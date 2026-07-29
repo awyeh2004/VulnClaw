@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from vulnclaw.agent.blackboard import Blackboard
 from vulnclaw.agent.context import TaskConstraints
 
 try:
@@ -80,3 +81,17 @@ class RuntimeState:
     unverified_assumptions: list[str] = field(default_factory=list)
     is_ctf_mode: bool = False
     consecutive_errors: int = 0
+
+    blackboard: Blackboard = field(default_factory=Blackboard)
+
+
+def get_or_create_blackboard(agent: Any) -> Blackboard:
+    """Get or create a Blackboard from the agent's session_state."""
+    from vulnclaw.agent.blackboard import Blackboard as _BB
+
+    session = getattr(agent, "session_state", None) or getattr(getattr(agent, "context", None), "state", None)
+    if session is not None:
+        bb = getattr(session, "blackboard", None)
+        if bb is not None:
+            return bb
+    return _BB()
