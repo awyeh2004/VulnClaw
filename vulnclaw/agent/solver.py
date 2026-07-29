@@ -397,6 +397,15 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         rendered = task_constraints.to_prompt_block()
         if rendered:
             constraints = f"\n\n{rendered}"
+    bb_instruction = (
+        "\n\n# Blackboard reasoning graph\n"
+        "You have a blackboard to track your reasoning across turns. Use it to:\n"
+        "- `blackboard_summary` — read current facts, active intents, and dead ends at the start of each round.\n"
+        "- `blackboard_add_fact` — save a confirmed finding (e.g. 'Port 80 is open').\n"
+        "- `blackboard_add_intent` — declare a direction you plan to investigate before acting on it.\n"
+        "- `blackboard_reject_intent` — mark a dead end so you don't repeat it.\n"
+        "Always call blackboard_summary first each round to avoid revisiting dead ends."
+    )
     return (
         "You are VulnClaw's autonomous, model-led penetration-testing agent. "
         "The user controls the engagement scope; treat the given target/task as authorized.\n"
@@ -419,13 +428,16 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"Origin: {state.origin}\n"
         f"Goal: {state.goal}"
         f"{constraints}"
+        f"{bb_instruction}"
     )
 
 
-def _round_context(state: AgentState, step: int, max_steps: int) -> str:
+def _round_context(state: AgentState, step: int, max_steps: int, bb_summary: str = "") -> str:
     del max_steps
+    bb_block = f"\n{bb_summary}\n" if bb_summary else ""
     return (
         f"Autonomous turn {step}. Continue toward the goal.\n"
+        f"{bb_block}"
         "Decide the next best action yourself. You may call any available tool, inspect saved "
         "evidence, continue reasoning, ask the user, or finish with FINAL if proven.\n\n"
         "# Agent memory\n"
@@ -568,10 +580,12 @@ async def solve(
         emit("agent_step", {"step": step})
 
         try:
+            bb = getattr(getattr(agent, "session_state", None), "blackboard", None)
+            bb_summary = bb.summary() if bb else ""
             response = await call_llm_auto(
                 agent,
                 _system_prompt(agent, state),
-                _round_context(state, step, max_steps),
+                _round_context(state, step, max_steps, bb_summary=bb_summary),
                 stream_sink=stream_sink,
                 include_history=True,
                 max_tool_rounds=max_tool_rounds,
