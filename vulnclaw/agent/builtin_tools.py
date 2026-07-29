@@ -2527,10 +2527,13 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
             mode="w", suffix=".py", delete=False, encoding="utf-8"
         ) as f:
             preamble = (
-                "import sys, json, re, os, base64, hashlib, itertools, collections, datetime, struct, binascii, textwrap\n"
+                "import sys, json, re, os, base64, hashlib, itertools, collections, datetime, struct, binascii, textwrap, math, random, string, fractions, decimal, statistics, typing, functools, operator, copy, pprint\n"
+                "import urllib.parse, urllib.request, http.client, xml.etree.ElementTree as ET\n"
                 "try:\n    import requests\nexcept ImportError:\n    pass\n"
                 "try:\n    from bs4 import BeautifulSoup\nexcept ImportError:\n    pass\n"
-                "try:\n    from Crypto.Cipher import AES\nexcept ImportError:\n    pass\n\n"
+                "try:\n    from Crypto.Cipher import AES, DES, Blowfish, ChaCha20\n    from Crypto.Util.number import *\n    from Crypto.PublicKey import RSA\n    from Crypto.Signature import pkcs1_15\n    from Crypto.Hash import SHA256, MD5\nexcept ImportError:\n    pass\n"
+                "try:\n    import zlib, gzip, bz2, lzma, zipfile, tarfile, io\nexcept ImportError:\n    pass\n"
+                "try:\n    import itertools, functools, collections, math\nexcept ImportError:\n    pass\n\n"
             )
             f.write(preamble)
             f.write(code)

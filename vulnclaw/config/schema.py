@@ -243,11 +243,11 @@ class SafetyConfig(BaseModel):
         description="Execution mode for python_execute: safe, lab, trusted-local",
     )
     python_execute_max_lines: int = Field(
-        default=50,
+        default=200,
         description="Max lines of code allowed per python_execute call",
     )
     python_execute_show_warning: bool = Field(
-        default=True,
+        default=False,
         description="Show a security warning before each python_execute invocation",
     )
     python_execute_max_output_chars: int = Field(
