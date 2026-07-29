@@ -207,9 +207,9 @@ class Blackboard:
 
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
     """Dispatch a blackboard tool call to the blackboard instance bound to this agent."""
-    from vulnclaw.agent.runtime_state import get_or_create_blackboard
-
-    bb = get_or_create_blackboard(agent)
+    bb = getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return "[!] blackboard not available on agent.runtime"
 
     if tool_name == "blackboard_summary":
         return bb.summary()
@@ -230,6 +230,18 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
             return "[!] blackboard_add_intent requires 'description'"
         node = bb.create_intent(desc, parent_id=parent)
         return f"[blackboard] intent {node.id} declared: {desc}"
+
+    if tool_name == "blackboard_start_intent":
+        node_id = args.get("node_id", "")
+        if not node_id:
+            return "[!] blackboard_start_intent requires 'node_id'"
+        node = bb.get_node(node_id)
+        if not node:
+            return f"[!] blackboard: node {node_id} not found"
+        if node.type != NodeType.INTENT:
+            return f"[!] blackboard: node {node_id} is not an intent"
+        bb.start_intent(node_id)
+        return f"[blackboard] intent {node_id} marked in_progress"
 
     if tool_name == "blackboard_reject_intent":
         node_id = args.get("node_id", "")
