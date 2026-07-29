@@ -873,7 +873,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         return execute_evidence_tool(agent, tool_name, args)
 
     # ── Blackboard reasoning graph ──
-    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_add_intent", "blackboard_reject_intent"):
+    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent"):
         try:
             from vulnclaw.agent.blackboard import dispatch_blackboard_tool
             return await dispatch_blackboard_tool(agent, tool_name, args)
@@ -1855,6 +1855,25 @@ def build_openai_tools(mcp_manager: Any, *, active_role: str | None = None) -> l
             },
         }
     )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_start_intent",
+                "description": "Mark an intent as currently in progress so other agents know you are working on it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "The intent node ID to mark as in progress (e.g. n3)",
+                        },
+                    },
+                    "required": ["node_id"],
+                },
+            },
+        }
+    )
 
     for tool in intel_tool_schemas():
         append_tool(tool)
@@ -2522,62 +2541,6 @@ def _write_python_audit(
 
 
 # ── Blackboard tools ────────────────────────────────────────────────
-
-
-async def blackboard_summary(agent: AgentContext, args: dict[str, Any]) -> str:
-    """Return the full blackboard reasoning graph as a formatted summary."""
-    return agent.runtime.blackboard.summary()
-
-
-async def blackboard_add_fact(agent: AgentContext, args: dict[str, Any]) -> str:
-    """Record a confirmed finding on the blackboard.
-
-    Args:
-        description: What was found (e.g. "Port 80 is open running nginx 1.18")
-        parent_id: Optional ID of the intent this fact supports
-        evidence_ref: Optional reference to tool evidence (e.g. evidence ID)
-    """
-    node = agent.runtime.blackboard.create_fact(
-        description=args.get("description", ""),
-        parent_id=args.get("parent_id"),
-        evidence_ref=args.get("evidence_ref"),
-    )
-    return f"[+] Fact recorded: {node.id} — {node.description}"
-
-
-async def blackboard_add_intent(agent: AgentContext, args: dict[str, Any]) -> str:
-    """Declare a direction you plan to investigate.
-
-    Args:
-        description: What you intend to explore (e.g. "Test SQL injection on /login")
-        parent_id: Optional ID of the parent intent this refines
-    """
-    node = agent.runtime.blackboard.create_intent(
-        description=args.get("description", ""),
-        parent_id=args.get("parent_id"),
-    )
-    return f"[+] Intent recorded: {node.id} — {node.description}"
-
-
-async def blackboard_start_intent(agent: AgentContext, args: dict[str, Any]) -> str:
-    """Mark an intent as in-progress (you are actively working on it)."""
-    node_id = args.get("node_id", "")
-    agent.runtime.blackboard.start_intent(node_id)
-    return f"[+] Intent {node_id} marked in_progress"
-
-
-async def blackboard_reject_intent(agent: AgentContext, args: dict[str, Any]) -> str:
-    """Mark an intent as a dead end so the agent won't repeat it.
-
-    Args:
-        node_id: The intent node ID to reject
-        reason: Why this path didn't work
-    """
-    agent.runtime.blackboard.reject_intent(
-        node_id=args.get("node_id", ""),
-        reason=args.get("reason", ""),
-    )
-    return f"[+] Intent {args.get('node_id')} rejected"
 
 
 async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:

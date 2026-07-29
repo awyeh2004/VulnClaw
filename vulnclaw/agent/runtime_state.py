@@ -86,12 +86,11 @@ class RuntimeState:
 
 
 def get_or_create_blackboard(agent: Any) -> Blackboard:
-    """Get or create a Blackboard from the agent's session_state."""
+    """Get or create a Blackboard from agent.runtime."""
     from vulnclaw.agent.blackboard import Blackboard as _BB
 
-    session = getattr(agent, "session_state", None) or getattr(getattr(agent, "context", None), "state", None)
-    if session is not None:
-        bb = getattr(session, "blackboard", None)
+    if hasattr(agent, "runtime"):
+        bb = getattr(agent.runtime, "blackboard", None)
         if bb is not None:
             return bb
     return _BB()

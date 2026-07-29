@@ -432,8 +432,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     )
 
 
-def _round_context(state: AgentState, step: int, max_steps: int, bb_summary: str = "") -> str:
-    del max_steps
+def _round_context(state: AgentState, step: int, max_steps: int = 0, bb_summary: str = "") -> str:
     bb_block = f"\n{bb_summary}\n" if bb_summary else ""
     return (
         f"Autonomous turn {step}. Continue toward the goal.\n"
@@ -580,7 +579,7 @@ async def solve(
         emit("agent_step", {"step": step})
 
         try:
-            bb = getattr(getattr(agent, "session_state", None), "blackboard", None)
+            bb = getattr(agent.runtime, "blackboard", None)
             bb_summary = bb.summary() if bb else ""
             response = await call_llm_auto(
                 agent,
