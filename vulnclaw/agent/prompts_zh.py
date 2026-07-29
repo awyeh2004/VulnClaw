@@ -426,7 +426,74 @@ AUTO_PENTEST_INSTRUCTION = """\
 1. **重新发送 payload** — 用工具重新发起请求，确认结果可复现
 2. **交叉验证** — 用不同的方法确认同一结果（如换一个函数读取同一文件）
 3. **不编造结果** — 如果工具返回空/错误，必须如实报告，不得猜测内容
-4. **Flag 格式校验** — 确认 flag 符合目标比赛的格式要求（如 NSSCTF{...}、flag{...}、CTF{...}）
+4. **Flag 格式校验** — 确认 flag 符合目标比赛的格式要求（如 NSSCTF{...}、DASCTF{...}、flag{...}、CTF{...}）
+
+### 📚 CTF 各类题型解题策略
+
+#### Web 题型
+- **信息收集类**：检查 robots.txt、sitemap.xml、.git/、.svn/、备份文件（*.bak、*.swp）、响应头、Cookie、注释
+- **SQL 注入类**：先测试闭合方式（`'`、`"`、`'）`），再确定注入类型（字符型/数字型/搜索型），最后选择注入技术（联合查询/报错/布尔盲注/时间盲注）
+- **文件包含类**：尝试路径遍历（`../../../etc/passwd`）、PHP 伪协议（`php://filter`、`data://`、`php://input`）、日志包含
+- **命令执行类**：尝试管道符（`|`、`||`、`&`、`&&`）、反引号、`$(...)` 注入、换行符绕过
+- **SSRF 类**：尝试内网地址（127.0.0.1、localhost、10.x.x.x、172.x.x.x）、URL 协议转换、DNS Rebinding
+- **反序列化类**：识别语言（PHP/Java/Python/Node.js），查找魔术方法/反序列化入口，构造 POP 链
+- **SSTI 类**：识别模板引擎（Jinja2/Twig/Smarty/FreeMarker），测试 `{{7*7}}`、`${7*7}` 等探测表达式
+- **JWT 类**：尝试 `alg: none`、RS256→HS256 算法混淆、弱密钥爆破、修改 payload 字段
+- **文件上传类**：尝试 Content-Type 绕过、扩展名绕过（`.php5`、`.phtml`、`.php.`）、竞争条件上传、.htaccess 绕过
+- **SSRF 结合云元数据**：尝试 `http://169.254.169.254/latest/meta-data/`（AWS）、`http://100.100.100.200/latest/meta-data/`（阿里云）
+- **XXE 类**：尝试外部实体读取文件（`/etc/passwd`）、SSRF 探测内网、XXE 结合数据外带
+- **CORS 类**：测试 `Origin: https://evil.com` 是否被信任，泄露敏感数据
+- **CSRF 类**：检查关键操作是否有 Token 验证，尝试构造跨站请求
+- **Web3/区块链类**：检查合约源码、交易记录、私钥泄露、重放攻击
+
+#### Crypto 题型
+- **古典密码**：识别加密特征（字母频率/密钥长度/编码特征），尝试 Caesar/Atbash/Vigenère/Playfair 等
+- **RSA 类**：检查公钥参数（n/e/d），尝试分解 n（Fermat/Yafu/在线数据库）、低指数攻击（e=3）、共享素数、Wiener 攻击（d 小）
+- **AES 类**：确定模式（ECB/CBC/CTR/GCM），检查 IV 重用、Padding Oracle、密钥硬编码、CBC 翻转
+- **哈希类**：尝试彩虹表/在线破解、长度扩展攻击（MD5/SHA1）、哈希传递、弱碰撞（MD5 0e 绕过）
+- **编码类**：识别编码特征（Base64/Base32/Base58/Base91/Hex/ASCII85/URL），LZ 系列压缩，曼彻斯特编码
+- **PRNG 类**：尝试种子恢复（时间种子/LCG/MT19937）、预测下一个随机数
+- **格密码/Lattice**：用 SageMath 或 fpylll 解 LWE、SIS、GGH 等问题
+- **椭圆曲线（ECC）**：检查曲线参数是否标准、攻击无效曲线、Smart 攻击（异常曲线）、Pohlig-Hellman 攻击（光滑阶）
+- **Diffie-Hellman 类**：检查素数是否为安全素数、尝试小指数攻击、静态 DH 私钥恢复
+
+#### Misc 题型
+- **隐写类（图片）**：检查 EXIF、LSB（zsteg/zbar/StegSolve）、图种（binwalk）、宽高修改、像素值隐写
+- **隐写类（音频）**：频谱图（Audacity/Sonic Visualiser）、Morse 码、拨号音（DTMF）、慢扫描电视（SSTV）
+- **隐写类（文档）**：隐藏文字、文档元数据、字体隐写、空白字符隐写
+- **流量分析类**：Wireshark 追踪 TCP/HTTP 流、提取传输文件、分析 DNS/ICMP 隐蔽隧道
+- **编码转换链**：多层编码嵌套（多次 Base64/Hex/URL/Unicode），调用 python_execute 逐层解码
+- **PyJail/BashJail**：Python 沙盒逃逸（`().__class__.__bases__`、`__import__`、builtins 访问）、Bash 绕过（`$0`、`${IFS}`、通配符）
+- **取证类**：内存取证（Volatility）、磁盘取证（FTK/Autopsy）、文件恢复（TestDisk/PhotoRec）、注册表分析
+- **压缩包类**：伪加密（修改 CRC/位标志）、明文攻击（bkcrack）、字典爆破（fcrackzip）、CRC32 碰撞
+
+#### Reverse 题型
+- **静态分析**：检查文件类型（file/PE/ELF/MachO）、字符串提取、导入/导出表、反编译（IDA/Ghidra）
+- **动态调试**：断点分析（x64dbg/gdb/lldb）、内存 dump、API 监控（Frida/trace）
+- **简单加密**：查找异或常数、S盒、加密函数识别；用 python_execute 还原解密
+- **混淆对抗**：花指令、控制流平坦化（deflat/angr）、Ollvm 反混淆
+- **反调试检测**：ptrace、TLS 回调、IsDebuggerPresent、时间差检测、INT 3 断点检测
+- **VM 类**：识别虚拟指令集，分析 opcode 分发逻辑，用 Python 重写模拟器
+- **Z3/符号执行**：输入约束求解（Z3）、代码覆盖率引导（angr）、路径探索
+- **固件/嵌入式**：binwalk 解包、检查文件系统、SquashFS 提取、bootloader 分析
+- **Go/Rust 逆向**：识别静态链接库、恢复符号表、处理 goroutine/async 调用
+- **pyc/pyinstaller**：uncompyle6/decompyle3 反编译 Python 字节码、pyinstxtractor 解包
+
+#### Pwn 题型
+- **信息收集**：checksec 查看保护（NX/Canary/PIE/RELRO）、file 查看架构、objdump/readelf 分析
+- **栈溢出（Stack）**：寻找危险函数（gets/read/scanf/strcpy），构造 ROP 链，绕过 Canary（泄露/覆盖）
+- **堆利用（Heap）**：UAF（释放后使用）、Double Free、Tcache poisoning、Fastbin attack、House of 系列
+- **格式化字符串**：泄露栈数据、任意地址读写、覆盖 GOT 表、覆盖 __malloc_hook/__free_hook
+- **整数溢出**：利用整数溢出导致数组越界、堆块大小混淆、绕过长度检查
+- **沙盒逃逸（seccomp）**：用 seccomp-tools 查看规则，构造白名单内的 syscall chain（open/read/write/orw）
+- **内核利用（Kernel）**：内核模块漏洞分析、ioctl 接口逆向、commit_creds/prepare_kernel_cred、modprobe_path
+
+### 💡 通用解题技巧
+- 遇到无头绪时，检查题目名称、描述、附件名：往往暗示了考点
+- 多步骤题目：每解一步，仔细检查页面/响应变化，下一关线索往往藏在前一关的结果中
+- 多个 payload 尝试：不要只试一次，善用 python_execute 批量构造和发送变体
+- 时间有限时优先选择最有把握的路径，不要在一棵树上吊死
+- 成功获取 flag 后立即用工具验证（重新请求确认 flag 不变），然后总结提交
 
 ## 代码审计模式（当遇到源码时启用）
 

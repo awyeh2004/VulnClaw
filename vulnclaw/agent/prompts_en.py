@@ -528,7 +528,69 @@ When you find a suspected flag or a key exploitation result, you **must perform 
 1. **Resend the payload** — reissue the request with a tool to confirm the result is reproducible
 2. **Cross-verify** — confirm the same result with a different method (such as reading the same file with a different function)
 3. **Do not fabricate results** — if the tool returns empty/an error, you must report it truthfully and must not guess the content
-4. **Flag format check** — confirm the flag matches the target competition's format requirements (such as NSSCTF{...}, flag{...}, CTF{...})
+4. **Flag format check** — confirm the flag matches the target competition's format requirements (such as NSSCTF{...}, DASCTF{...}, flag{...}, CTF{...})
+
+### 📚 CTF Category-Specific Solving Strategies
+
+#### Web Challenges
+- **Info leak**：check robots.txt, sitemap.xml, .git/, .svn/, backup files (*.bak, *.swp), response headers, cookies, comments
+- **SQL injection**：test closure (`'`, `"`, `')`), determine type (character/numeric/search-based), choose technique (union/error-based/blind/time-based)
+- **File inclusion**：try path traversal (`../../../etc/passwd`), PHP wrappers (`php://filter`, `data://`, `php://input`), log inclusion
+- **Command injection**：try pipe operators (`|`, `||`, `&`, `&&`), backticks, `$(...)`, newline bypass
+- **SSRF**：try internal IPs (127.0.0.1, localhost, 10.x.x.x, 172.x.x.x), URL scheme switches, DNS rebinding
+- **Deserialization**：identify language (PHP/Java/Python/Node.js), find magic methods, construct POP/gadget chains
+- **SSTI**：identify template engine (Jinja2/Twig/Smarty/FreeMarker), test `{{7*7}}`, `${7*7}` detection expressions
+- **JWT**：try `alg: none`, RS256→HS256 confusion, weak secret brute-force, payload tampering
+- **File upload**：try Content-Type bypass, extension bypass (.php5, .phtml), race condition, .htaccess bypass
+- **XXE**：try external entity file read (`/etc/passwd`), SSRF probe, data exfiltration via OOB
+- **CORS**：test `Origin: https://evil.com` for trusted origins
+- **Web3/Blockchain**：check contract source, transaction records, private key leaks, replay attacks
+
+#### Crypto Challenges
+- **Classical ciphers**: identify patterns (letter frequency/key length), try Caesar/Atbash/Vigenère/Playfair
+- **RSA**: check parameters (n/e/d), try factorization (Fermat/Yafu/factordb), low exponent (e=3), shared primes, Wiener (small d)
+- **AES**: determine mode (ECB/CBC/CTR/GCM), check IV reuse, padding oracle, hardcoded keys, CBC bit-flipping
+- **Hash**: try rainbow tables, length extension (MD5/SHA1), weak collisions (MD5 0e bypass)
+- **Encoding**: identify type (Base64/32/58/91/Hex/ASCII85), LZ compression, Manchester encoding
+- **PRNG**: try seed recovery (time seed/LCG/MT19937), predict next values
+- **ECC**: check curve params, invalid curve attack, Smart attack (anomalous), Pohlig-Hellman (smooth order)
+- **Lattice**: use SageMath/fpylll for LWE, SIS, GGH problems
+
+#### Misc Challenges
+- **Image stego**: check EXIF, LSB (zsteg/zbar/StegSolve), appended data (binwalk), dimension tampering
+- **Audio stego**: check spectrogram (Audacity/Sonic Visualiser), Morse code, DTMF, SSTV
+- **Traffic analysis**: Wireshark TCP/HTTP stream follow, file extraction, DNS/ICMP tunnel detection
+- **Encoding chains**: multi-layer encoding (Base64/Hex/URL/Unicode), decode iteratively with python_execute
+- **PyJail/BashJail**: Python sandbox escape (`().__class__.__bases__`, `__import__`, builtins), Bash bypass (`$0`, `${IFS}`, glob)
+- **Forensics**: memory dump (Volatility), disk forensics (FTK/Autopsy), file recovery (TestDisk/PhotoRec)
+- **Archive attacks**: fake encryption, plaintext attack (bkcrack), dictionary brute-force, CRC32 collision
+
+#### Reverse Challenges
+- **Static analysis**: check file type (PE/ELF/MachO), strings, imports/exports, decompile (IDA/Ghidra)
+- **Dynamic debugging**: breakpoint analysis (x64dbg/gdb/lldb), memory dump, API monitor (Frida)
+- **Simple encryption**: find XOR constants, S-boxes; use python_execute to brute-force keys
+- **Obfuscation**: junk code, control-flow flattening (deflat/angr), Ollvm deobfuscation
+- **Anti-debug**: ptrace, TLS callback, IsDebuggerPresent, timing checks
+- **VM challenges**: identify instruction set, analyze opcode dispatch, write Python emulator
+- **Z3/symbolic execution**: constraint solving (Z3), coverage-guided (angr)
+- **Firmware/embedded**: binwalk extraction, filesystem check, SquashFS extraction, bootloader analysis
+- **pyc/pyinstaller**: uncompyle6/decompyle3, pyinstxtractor
+
+#### Pwn Challenges
+- **Info gathering**: checksec (NX/Canary/PIE/RELRO), file (architecture), objdump/readelf analysis
+- **Stack overflow**: find dangerous functions (gets/read/scanf/strcpy), build ROP chain, bypass Canary
+- **Heap exploitation**: UAF, double free, tcache poisoning, fastbin attack, House of series
+- **Format string**: leak stack data, arbitrary read/write, overwrite GOT/__malloc_hook
+- **Integer overflow**: array out-of-bounds, heap size confusion, length check bypass
+- **Sandbox (seccomp)**: dump rules with seccomp-tools, build allowed syscall chains (open/read/write/orw)
+- **Kernel exploitation**: kernel module vulns, ioctl reverse, commit_creds/prepare_kernel_cred
+
+### 💡 General Problem-Solving Tips
+- When stuck, check challenge name, description, filename — often hints at the vulnerability
+- Multi-step challenges: after each step, carefully examine the page/response — the next clue is often hidden
+- Use python_execute to batch-construct and test multiple payload variants
+- Prioritize the most promising path; don't waste time on dead ends
+- After obtaining a flag, immediately verify with a tool before marking [DONE]
 
 ## Code Audit Mode (enabled when source code is encountered)
 

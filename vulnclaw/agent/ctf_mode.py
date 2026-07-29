@@ -9,50 +9,84 @@ if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
 
 
+# Comprehensive CTF flag format patterns
+# Covers major CTF platforms in China and international competitions
+FLAG_PATTERNS = [
+    # Chinese CTF platforms
+    r"(DASCTF\{[^}]+\})",
+    r"(NSSCTF\{[^}]+\})",
+    r"(BUUCTF\{[^}]+\})",
+    r"(CTFshow\{[^}]+\})",
+    r"(GXCTF\{[^}]+\})",
+    r"(D0g3\{[^}]+\})",
+    r"(HDCTF\{[^}]+\})",
+    r"(ISCTF\{[^}]+\})",
+    r"(SCTF\{[^}]+\})",
+    r"(HCTF\{[^}]+\})",
+    r"(ACTF\{[^}]+\})",
+    # International CTF platforms
+    r"(CTF\{[^}]+\})",
+    r"(FLAG\{[^}]+\})",
+    r"(flag\{[^}]+\})",
+    r"(Flag\{[^}]+\})",
+    # Capitalized variants
+    r"(DASctf\{[^}]+\})",
+    r"(Nssctf\{[^}]+\})",
+    # Generic flag-like patterns (low priority, matched last)
+    r"(?:^|\s)([A-Za-z0-9_]+\{[^}]+\})(?:\s|$)",
+]
+
 
 def detect_flag_claim(output: str) -> Optional[str]:
     """Detect if the LLM claims to have found a flag."""
-    flag_patterns = [
-        r"(NSSCTF\{[^}]+\})",
-        r"(CTF\{[^}]+\})",
-        r"(flag\{[^}]+\})",
-        r"(Flag\{[^}]+\})",
-        r"(FLAG\{[^}]+\})",
-    ]
-    for pattern in flag_patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
+    for pattern in FLAG_PATTERNS:
+        match = re.search(pattern, output)
         if match:
             return match.group(1)
     return None
 
 
+def detect_verification_success(response_text: str) -> bool:
+    """Detect if the LLM explicitly claims successful flag verification."""
+    text = response_text.lower()
+    markers = [
+        "验证成功",
+        "验证通过",
+        "已验证",
+        "复现成功",
+        "确认flag",
+        "verified",
+        "confirmed",
+        "flag正确",
+        "提交成功",
+        "flag 获取成功",
+        "flag获取成功",
+        "获取成功",
+        "找到flag",
+        "flag found",
+        "成功获取",
+        "获取了flag",
+        "拿到了flag",
+        "成功拿到",
+        "成功找到",
+        "解题完成",
+        "解题成功",
+        "flag is",
+        "the flag is",
+        "captured",
+        "flag captured",
+        "成功破解",
+        "flag verified",
+        "confirms the flag",
+        "验证flag成功",
+    ]
+    return any(marker in text for marker in markers)
+
+
 def update_ctf_state(agent: AgentContext, response_text: str, result_should_continue: bool) -> bool:
     """Update flag claim/verification state and return should_continue."""
     if agent.runtime.claimed_flag and not agent.runtime.flag_verified:
-        verification_markers = [
-            "验证成功",
-            "验证通过",
-            "已验证",
-            "复现成功",
-            "确认flag",
-            "verified",
-            "confirmed",
-            "flag正确",
-            "提交成功",
-            "flag 获取成功",
-            "flag获取成功",
-            "获取成功",
-            "找到flag",
-            "flag found",
-            "成功获取",
-            "获取了flag",
-            "拿到了flag",
-            "成功拿到",
-            "成功找到",
-            "解题完成",
-            "解题成功",
-        ]
-        if any(marker in response_text.lower() for marker in verification_markers):
+        if detect_verification_success(response_text):
             agent.runtime.flag_verified = True
 
     if agent.runtime.is_ctf_mode and agent.runtime.claimed_flag and not agent.runtime.flag_verified:
@@ -86,7 +120,6 @@ def update_ctf_state(agent: AgentContext, response_text: str, result_should_cont
         if agent.runtime.post_flag_rounds >= 2:
             result_should_continue = False
     if agent.runtime.flag_verified and agent.runtime.claimed_flag and result_should_continue:
-        # Once the flag is verified, allow only a short wrap-up window.
         if agent.runtime.post_flag_rounds >= 1 and "[done]" not in response_text.lower():
             result_should_continue = False
 
