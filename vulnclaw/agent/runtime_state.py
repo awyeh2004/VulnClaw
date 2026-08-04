@@ -84,6 +84,10 @@ class RuntimeState:
 
     blackboard: Blackboard = field(default_factory=Blackboard)
 
+    # Cross-round tool-call suppression: keyed by (tool_name, target fingerprint).
+    tool_target_calls: dict[str, int] = field(default_factory=dict)
+    tool_target_last_result: dict[str, str] = field(default_factory=dict)
+
 
 def get_or_create_blackboard(agent: Any) -> Blackboard:
     """Get or create a Blackboard from agent.runtime."""

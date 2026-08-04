@@ -26,6 +26,99 @@ logger = logging.getLogger(__name__)
 # Default concurrency cap used when the agent config does not specify one.
 DEFAULT_TOOL_MAX_CONCURRENT = 5
 
+# Cross-round repetition suppression: when the same tool is called against the
+# same target endpoint more than this many times (with nothing new produced),
+# later calls are short-circuited with the most recent result instead of being
+# re-executed, so the model stops spinning on a dead path.
+_REPEAT_TOOL_LIMITS = {
+    "brute_force_login": 2,
+    "http_probe_batch": 3,
+    "dir_enum": 3,
+    "source_extract": 3,
+    "runtime_diff_probe": 3,
+    "space_search": 3,
+    "subdomain_enum": 3,
+    "js_recon": 3,
+    "fetch": 5,
+}
+_DEFAULT_REPEAT_TOOL_LIMIT = 5
+_GUARD_LAST_RESULT_MAX_CHARS = 1500
+
+
+def _normalize_target_url(url: str) -> str:
+    """Normalize a URL to a stable host+path fingerprint (drop query/fragment)."""
+    m = re.match(r"^(https?://[^/?#]+)(/[^?#]*)?", url or "")
+    if not m:
+        return (url or "").lower().rstrip("/")
+    host = m.group(1).lower()
+    path = (m.group(2) or "").rstrip("/")
+    return f"{host}{path}"
+
+
+def _target_fingerprint(tool_name: str, func_args: dict[str, Any]) -> str:
+    """Return a stable fingerprint for 'same tool, same endpoint' detection.
+
+    Recursively collects every ``url`` field (and http(s) URLs nested in
+    structured args) and normalizes them, so near-identical probes that only
+    change query params or payloads collapse to one fingerprint.
+    """
+    urls: set[str] = set()
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "url" and isinstance(v, str) and re.match(r"^https?://", v):
+                    urls.add(_normalize_target_url(v))
+                else:
+                    _walk(v)
+        elif isinstance(obj, list):
+            for it in obj:
+                _walk(it)
+
+    _walk(func_args)
+    if not urls:
+        return ""
+    return f"{tool_name}::{ '|'.join(sorted(urls)) }"
+
+
+def _repeat_guard_violation(
+    agent: AgentContext, tool_name: str, func_args: dict[str, Any]
+) -> str | None:
+    """Return a short-circuit message when the same tool+endpoint repeats too often."""
+    runtime = getattr(agent, "runtime", None)
+    if runtime is None:
+        return None
+    fp = _target_fingerprint(tool_name, func_args)
+    if not fp:
+        return None
+    limit = _REPEAT_TOOL_LIMITS.get(tool_name, _DEFAULT_REPEAT_TOOL_LIMIT)
+    count = int(runtime.tool_target_calls.get(fp, 0))
+    if count < limit:
+        runtime.tool_target_calls[fp] = count + 1
+        return None
+    last = runtime.tool_target_last_result.get(fp, "")
+    preview = last[:_GUARD_LAST_RESULT_MAX_CHARS]
+    return (
+        f"[repetition guard] {tool_name} has already been called {count} times against "
+        f"the same endpoint without producing a new result. Re-executing would just repeat "
+        f"the same probe. Change strategy (different endpoint, different vuln class, or "
+        f"record this as a dead end with blackboard_reject_intent).\n"
+        f"Most recent result:\n{preview}"
+    )
+
+
+def _remember_target_result(
+    agent: AgentContext, tool_name: str, func_args: dict[str, Any], content: str
+) -> None:
+    """Store the most recent result for a tool+endpoint fingerprint."""
+    runtime = getattr(agent, "runtime", None)
+    if runtime is None:
+        return
+    fp = _target_fingerprint(tool_name, func_args)
+    if not fp:
+        return
+    runtime.tool_target_last_result[fp] = str(content or "")
+
 
 async def handle_tool_calls(agent: AgentContext, message: Any) -> str:
     """Handle tool calls from the LLM response (legacy single-turn)."""
@@ -213,6 +306,28 @@ async def _execute_single(agent: AgentContext, item: dict[str, Any]) -> dict[str
     tool_call = item["tool_call"]
     func_name = item["func_name"]
     func_args = item["func_args"]
+
+    guard_violation = _repeat_guard_violation(agent, func_name, func_args)
+    if guard_violation:
+        duration_ms = 0
+        _record_tool_call_without_new_evidence(
+            agent,
+            func_name,
+            func_args,
+            guard_violation,
+            duration_ms=duration_ms,
+            ok=True,
+        )
+        return {
+            "tool_call": tool_call,
+            "tool_call_id": tool_call.id,
+            "content": f"[tool:{func_name}] {guard_violation}",
+            "structured_content": None,
+            "duration_ms": duration_ms,
+            "correction": guard_violation,
+            "correction_signal": None,
+        }
+
     pre_hint = before_tool_call(agent, func_name, func_args)
     started = time.perf_counter()
     redundant_local_view = _redundant_evidence_view_reason(agent, func_name, func_args)
@@ -262,6 +377,7 @@ async def _execute_single(agent: AgentContext, item: dict[str, Any]) -> dict[str
             duration_ms=duration_ms,
             ok=True,
         )
+        _remember_target_result(agent, func_name, func_args, content)
         signal = after_tool_call(
             agent,
             tool=func_name,
