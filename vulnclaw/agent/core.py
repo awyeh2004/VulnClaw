@@ -14,6 +14,7 @@ from vulnclaw.agent.anti_loop import (
 from vulnclaw.agent.builtin_tools import (
     BLOCKED_PATTERNS,
     RESERVED_IP_RANGES,
+    _infer_allowed_tools,
     build_openai_tools,
     execute_mcp_tool,
     execute_nmap,
@@ -649,7 +650,9 @@ class AgentCore:
 
     def _build_openai_tools(self) -> list[dict]:
         """Build OpenAI function calling schema from MCP tools + built-in tools."""
-        return build_openai_tools(self.mcp_manager, active_role=self.active_role)
+        user_input = getattr(self.runtime, "auto_skill_input", "") or ""
+        allowed = _infer_allowed_tools(user_input)
+        return build_openai_tools(self.mcp_manager, active_role=self.active_role, allowed_tools=allowed)
 
     # ── Python code executor ─────────────────────────────────────────
 

@@ -1072,13 +1072,132 @@ def infer_ports_from_nmap_args(args: dict[str, Any]) -> list[int]:
     return []
 
 
-def build_openai_tools(mcp_manager: Any, *, active_role: str | None = None) -> list[dict[str, Any]]:
-    """Build OpenAI function calling schema from MCP tools + built-in tools."""
+# Core tools always available regardless of the inferred task type: they are
+# cheap, general-purpose and often needed for grounding/verification.
+_ALWAYS_KEEP_TOOLS = frozenset({
+    "load_skill_reference",
+    "evidence_list",
+    "evidence_view",
+    "evidence_search",
+    "python_execute",
+    "crypto_decode",
+    "shell_command",
+    "blackboard_summary",
+    "blackboard_add_fact",
+    "blackboard_add_intent",
+    "blackboard_start_intent",
+    "blackboard_reject_intent",
+})
+
+# Task-specific tool bundles keyed by inferred task type. Names not listed here
+# (recon/web/network/traffic/reporting heavy tools) are pruned unless required.
+_TASK_TOOL_BUNDLES: dict[str, set[str]] = {
+    "crypto": {"crypto_decode", "python_execute", "load_skill_reference"},
+    "misc": {"crypto_decode", "python_execute", "load_skill_reference"},
+    "reverse": {"python_execute", "shell_command", "load_skill_reference", "source_extract"},
+    "code": {"python_execute", "shell_command", "load_skill_reference", "source_extract", "evidence_view", "evidence_search"},
+    "web": {
+        "fetch",
+        "http_probe_batch",
+        "dir_enum",
+        "brute_force_login",
+        "source_extract",
+        "runtime_diff_probe",
+        "nmap_scan",
+    },
+    "network": {
+        "nmap_scan",
+        "shell_command",
+        "python_execute",
+        "http_probe_batch",
+        "subdomain_enum",
+        "space_search",
+        "unauth_test",
+        "js_recon",
+    },
+    "osint": {
+        "space_search",
+        "subdomain_enum",
+        "js_recon",
+        "cve_lookup",
+        "osint_recon",
+        "fetch",
+    },
+}
+
+# Strong keyword signals per task type. The first matching bundle wins.
+_TASK_KEYWORDS: dict[str, list[str]] = {
+    "crypto": [
+        "rot13", "rot", "base64", "md5", "sha1", "sha256", "aes", "des", "rsa",
+        "加密", "解密", "密文", "cipher", "decode", "encode", "哈希", "hash",
+        "caesar", "凯撒", "维吉尼亚", "vigenere", "xor", "异或", "rc4", "凯撒密码",
+        "base", "ascii", "摩斯", "morse", "进制",
+        "flag{", "synt{", "flag{", "ctf{",
+    ],
+    "misc": ["zip", "压缩包", "隐写", "steg", "流量包", "pcap", "取证", "forensic", "misc"],
+    "reverse": ["逆向", "reverse", "elf", "pe", "ida", "ghidra", "apk", "so文件", "脱壳"],
+    "code": ["源码", "代码审计", "代码", "php", "审计", "分析源码", "source"],
+    "web": [
+        "web", "sql注入", "xss", "csrf", "ssrf", "上传", "rce", "命令执行",
+        "后台", "登录", "login", "password", "用户名", "http://", "https://",
+        "目录", "dir", "爆破", "brute", "绕过", "waf", "文件包含",
+    ],
+    "network": ["nmap", "端口", "内网", "主机", "子域名", "subdomain", "c段", "网段", "资产", "扫描"],
+    "osint": ["osint", "情报", "信息收集", "资产发现", "社工", "whois", "shodan", "fofa", "hunter"],
+}
+
+
+def _infer_allowed_tools(user_input: str) -> set[str] | None:
+    """Infer a task-specific tool subset from the user's request.
+
+    Returns None when the request looks like a general pentest (keep all tools).
+    """
+    if not user_input:
+        return None
+    text = user_input.lower()
+
+    # An explicit bare flag/encoded string is a crypto/misc task even without
+    # an obvious keyword.
+    if re.search(r"\{\w{8,}\}", text) or re.search(r"(flag|synt|ctf)\{", text):
+        bundle = set(_ALWAYS_KEEP_TOOLS)
+        bundle |= _TASK_TOOL_BUNDLES["crypto"]
+        return bundle
+
+    # General/ambiguous pentest goals keep the full toolset.
+    if any(k in text for k in ("渗透", "pentest", "测试目标", "全面", "综合", "exploit", "exp", "漏洞挖掘")):
+        if not any(k in text for k in ("http", "web", "登录", "密码", "decode", "rot", "端口")):
+            return None
+
+    for task_type, keywords in _TASK_KEYWORDS.items():
+        if any(k in text for k in keywords):
+            bundle = set(_ALWAYS_KEEP_TOOLS)
+            bundle |= _TASK_TOOL_BUNDLES[task_type]
+            return bundle
+
+    return None
+
+
+def build_openai_tools(
+    mcp_manager: Any,
+    *,
+    active_role: str | None = None,
+    allowed_tools: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build OpenAI function calling schema from MCP tools + built-in tools.
+
+    ``allowed_tools`` optionally restricts the returned schema to a subset of
+    tool names (e.g. inferred from the user's task). Restricting the schema cuts
+    tokens per call and reduces the chance the model reaches for irrelevant
+    heavy tools; it does not change runtime dispatch, so a pruned name can still
+    be executed if the model somehow calls it.
+    """
     tools: list[dict[str, Any]] = []
 
     def append_tool(tool: dict[str, Any]) -> None:
         name = str(tool.get("function", {}).get("name", ""))
-        if role_allows_tool(active_role, name):
+        if role_allows_tool(active_role, name) and (
+            allowed_tools is None or name in allowed_tools
+        ):
             tools.append(tool)
 
     append_tool(
