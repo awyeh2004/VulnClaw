@@ -96,21 +96,62 @@ def estimate_tokens(messages: list[dict]) -> int:
     return sum(estimate_message_tokens(m) for m in messages)
 
 
+def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
+    """Drop orphaned ``tool`` messages left behind by truncation.
+
+    After a sliding-window cut, a ``tool`` result can survive while the
+    ``assistant`` message that declared its ``tool_calls`` was dropped.
+    OpenAI-compatible APIs reject any ``tool`` message that does not follow
+    a message with a matching ``tool_call_id``. This walks the list and
+    removes those orphans so the payload stays valid.
+    """
+    result: list[dict] = []
+    pending_ids: set[str] = set()
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant" and msg.get("tool_calls"):
+            pending_ids = {
+                tc.get("id")
+                for tc in msg["tool_calls"]
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            result.append(msg)
+        elif role == "tool":
+            tid = msg.get("tool_call_id")
+            if tid and tid in pending_ids:
+                pending_ids.discard(tid)
+                result.append(msg)
+            else:
+                # Orphaned tool result with no matching tool_calls above it.
+                continue
+        else:
+            pending_ids = set()
+            result.append(msg)
+    return result
+
+
 def truncate_messages(
     messages: list[dict],
     max_tokens: int,
     preserve_system: bool = True,
     min_recent: int = 4,
+    max_messages: int | None = None,
 ) -> list[dict]:
     """Sliding-window truncation to fit messages within max_tokens.
 
     Always keeps the system prompt (first message) when preserve_system is True,
     always keeps the most recent min_recent messages, and drops the oldest
     middle messages first. Inserts a system notice at the truncation point.
+
+    ``max_messages`` optionally caps the total number of conversation messages
+    (excluding system/notice) that survive, so long-running sessions do not keep
+    growing toward the full token budget on every call.
     """
     if not messages or max_tokens <= 0:
         return list(messages)
-    if estimate_tokens(messages) <= max_tokens:
+    if estimate_tokens(messages) <= max_tokens and (
+        max_messages is None or len(messages) <= max_messages
+    ):
         return list(messages)
 
     system_msgs: list[dict] = []
@@ -132,8 +173,13 @@ def truncate_messages(
 
     kept_middle: list[dict] = []
     running = base_tokens
-    # Add middle messages from newest to oldest until the budget is exhausted.
+    # Add middle messages from newest to oldest until the budget (or the
+    # message-count cap) is exhausted.
     for msg in reversed(middle):
+        if max_messages is not None and (
+            len(system_msgs) + 1 + len(kept_middle) + len(recent)
+        ) >= max_messages:
+            break
         cost = estimate_message_tokens(msg)
         if running + cost > max_tokens:
             break
@@ -146,4 +192,4 @@ def truncate_messages(
         result.append(notice)
     result.extend(kept_middle)
     result.extend(recent)
-    return result
+    return sanitize_tool_pairs(result)

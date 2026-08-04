@@ -22,6 +22,11 @@ from vulnclaw.agent.tool_call_manager import (  # noqa: E402
 
 _CONTEXT_USABLE_RATIO = 0.9
 _DEFAULT_AUTO_TOOL_ROUNDS = 6
+# Cap the number of conversation messages resent each call. Long-running
+# sessions otherwise grow toward the full token budget on every turn,
+# slowing each LLM request and inflating cost. Older detail is preserved in
+# AgentState evidence and reachable via evidence_search/evidence_view.
+_MAX_CONTEXT_MESSAGES = 30
 
 
 def _fit_context_window(agent: AgentContext, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -36,10 +41,15 @@ def _fit_context_window(agent: AgentContext, messages: list[dict[str, Any]]) -> 
 
     budget = int(max_context * _CONTEXT_USABLE_RATIO)
     current = estimate_tokens(messages)
-    if current <= budget:
+    if current <= budget and len(messages) <= _MAX_CONTEXT_MESSAGES:
         return messages
 
-    trimmed = truncate_messages(messages, budget, preserve_system=True)
+    trimmed = truncate_messages(
+        messages,
+        budget,
+        preserve_system=True,
+        max_messages=_MAX_CONTEXT_MESSAGES,
+    )
     try:
         from rich.console import Console
 
