@@ -455,6 +455,21 @@ def _round_context(state: AgentState, step: int, max_steps: int = 0, bb_summary:
     )
 
 
+def _flag_token_grounded(flag: str, evidence_text: str, evidence_flags: list[str]) -> bool:
+    """Check whether a claimed flag is supported by recorded evidence.
+
+    Exact substring match first, then a whitespace/punctuation-normalized
+    comparison so markdown like ``n1book{info_1` + `s_v3ry_im` + `p0rtant_hack}``
+    in the answer does not defeat a genuinely grounded full flag.
+    """
+    if flag in evidence_text:
+        return True
+    normalized_flag = re.sub(r"[\s'\"`+]+", "", flag)
+    if not normalized_flag:
+        return False
+    return any(normalized_flag == re.sub(r"[\s'\"`+]+", "", item) for item in evidence_flags)
+
+
 def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]]:
     """Verify model-declared completion against recorded evidence."""
 
@@ -468,12 +483,23 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
         return False, f"completion cited unknown evidence ids: {', '.join(missing)}", cited
 
     flags_in_answer = extract_flags(final_text)
-    flags_in_evidence = extract_flags(evidence_text)
+    evidence_flags = extract_flags(evidence_text)
     if _goal_wants_flag(state.goal):
         if not flags_in_answer:
             return False, "goal appears to require a flag/shell, but FINAL did not include a flag", cited
-        ungrounded = [flag for flag in flags_in_answer if flag not in flags_in_evidence]
+        ungrounded = [
+            flag for flag in flags_in_answer
+            if not _flag_token_grounded(flag, evidence_text, evidence_flags)
+        ]
         if ungrounded:
+            if evidence_flags:
+                return (
+                    False,
+                    f"claimed flag not present in tool evidence: {ungrounded[0]}; "
+                    f"grounded flags already recorded in evidence: "
+                    f"{', '.join(sorted(set(evidence_flags))[:5])}",
+                    cited,
+                )
             return False, f"claimed flag not present in tool evidence: {ungrounded[0]}", cited
 
     if not state.evidence:
@@ -514,6 +540,58 @@ def _implicit_flag_completion(state: AgentState, text: str) -> tuple[bool, str, 
         if any(flag in (item.content or "") for flag in grounded)
     ]
     return True, f"verified flag from recorded evidence: {grounded[0]}", evidence_ids
+
+
+def _thinking_fingerprint(text: str, n: int = 5) -> str:
+    """Return a compact n-gram fingerprint of an assistant text for repetition checks."""
+    tokens = re.findall(r"[A-Za-z0-9_]{3,}", (text or "").lower())
+    if not tokens:
+        return ""
+    n = max(2, min(n, len(tokens)))
+    return "|".join("_".join(tokens[i : i + n]) for i in range(0, len(tokens) - n + 1))
+
+
+def _thinking_repetition_hint(state: AgentState, text: str, threshold: float = 0.55) -> str:
+    """Detect the model re-running the same reasoning across recent turns.
+
+    When the current turn's thinking text is nearly identical to an earlier
+    step and that step produced no new evidence/tools, return a hint so the
+    loop can be surfaced instead of silently consuming budget.
+    """
+    if not text or not state.steps:
+        return ""
+    current = _thinking_fingerprint(text)
+    if not current:
+        return ""
+    current_tokens = set(current.split("|"))
+    if len(current_tokens) < 6:
+        return ""
+    current_chunks = current_tokens
+    prior = state.steps[:-1]
+    if not prior:
+        return ""
+    hits = []
+    for step in prior[-6:]:
+        if not step.observation:
+            continue
+        prior_fp = _thinking_fingerprint(step.observation)
+        if not prior_fp:
+            continue
+        prior_tokens = set(prior_fp.split("|"))
+        if not prior_tokens:
+            continue
+        overlap = len(current_chunks & prior_tokens) / max(1, len(current_chunks | prior_tokens))
+        if overlap >= threshold:
+            hits.append((step.index, overlap))
+    if not hits:
+        return ""
+    best_index, best_overlap = max(hits, key=lambda x: x[1])
+    return (
+        f"Repetition hint: the current reasoning closely repeats step #{best_index} "
+        f"(similarity {best_overlap:.0%}). That step did not produce new evidence or "
+        "change the target state. Reconsider the same hypothesis only with a new test, "
+        "new evidence, or after explicitly ruling out the previous conclusion."
+    )
 
 
 def _prepare_state(agent: AgentContext, *, origin: str, goal: str) -> AgentState:
@@ -620,6 +698,10 @@ async def solve(
 
         stall_guard_message = ""
         stop_for_stall = False
+        repetition_hint = _thinking_repetition_hint(state, cleaned)
+        if repetition_hint and tools_used and not new_evidence_count:
+            state.add_correction_hint(repetition_hint)
+            stall_guard_message = f"[repetition hint] {repetition_hint}"
         if _is_observation_only_turn(tools_used, new_evidence_count):
             observation_only_streak += 1
             if observation_only_streak == 2:

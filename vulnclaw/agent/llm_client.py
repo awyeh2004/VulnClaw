@@ -53,8 +53,14 @@ def _fit_context_window(agent: AgentContext, messages: list[dict[str, Any]]) -> 
     try:
         from rich.console import Console
 
+        reason = (
+            "消息条数超限"
+            if len(messages) > _MAX_CONTEXT_MESSAGES and current <= budget
+            else "超过窗口预算"
+        )
         Console().print(
-            f"[yellow][!] 上下文约 {current} tokens 超过窗口预算 {budget}，"
+            f"[yellow][!] 上下文约 {current} tokens / {len(messages)} 条消息"
+            f"（{reason}，预算 {budget} tokens），"
             f"已截断至约 {estimate_tokens(trimmed)} tokens[/yellow]"
         )
     except Exception:

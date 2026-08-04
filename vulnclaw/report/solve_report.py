@@ -83,17 +83,42 @@ def generate_solve_report(
         raise ValueError("solve reports currently support markdown only")
 
     if output_path is None:
-        from vulnclaw.config.settings import SESSIONS_DIR, ensure_dirs
+        from vulnclaw.config.settings import ensure_dirs
 
         ensure_dirs()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_target = _safe_filename(_target_label(state))
-        output_path = SESSIONS_DIR / f"solve_report_{timestamp}_{safe_target}.md"
+        report_dir = _default_solve_report_dir()
+        output_path = report_dir / f"solve_report_{timestamp}_{safe_target}.md"
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_solve_report(state), encoding="utf-8")
     return output
+
+
+def _default_solve_report_dir() -> Path:
+    """Resolve the directory used for auto-generated solve replay reports.
+
+    Priority: VULNCLAW_SOLVE_REPORT_DIR env var, else the configured session
+    output_dir with a ``solve_reports`` child, else the default sessions dir.
+    """
+    import os
+
+    if env_dir := os.environ.get("VULNCLAW_SOLVE_REPORT_DIR"):
+        return Path(env_dir)
+    try:
+        from vulnclaw.config.settings import SESSIONS_DIR, load_config
+
+        session = getattr(load_config(), "session", None)
+        if session is not None and getattr(session, "output_dir", None):
+            candidate = Path(session.output_dir) / "solve_reports"
+            default_output = Path("./vulnclaw-output")
+            if Path(session.output_dir).resolve() != default_output.resolve():
+                return candidate
+    except Exception:
+        pass
+    return SESSIONS_DIR
 
 
 def render_solve_report(state: AgentState) -> str:

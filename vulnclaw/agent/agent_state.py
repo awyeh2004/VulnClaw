@@ -27,7 +27,7 @@ MAX_STORED_PINNED_FACTS = 80
 MAX_STORED_CORRECTION_HINTS = 24
 OBSERVATION_ONLY_TOOLS = frozenset({"evidence_list", "evidence_view", "evidence_search"})
 
-_FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n]{1,200}\}")
+_FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n\s'\"`]{1,200}\}")
 _STATUS_RE = re.compile(r"(?:Status|HTTP/\d(?:\.\d)?)\s*:?\s*(\d{3})", re.IGNORECASE)
 
 
