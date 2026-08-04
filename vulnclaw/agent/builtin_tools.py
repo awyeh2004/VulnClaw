@@ -2308,6 +2308,9 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
                     results.append(item)
                     continue
                 results.append(_execute_one_http_probe(client, item, max_body_chars))
+        seen = getattr(agent.runtime, "seen_body_hashes", None)
+        if isinstance(seen, dict):
+            return _format_http_probe_batch(results, seen_hashes=seen)
         return _format_http_probe_batch(results)
 
     return await asyncio.to_thread(_run)
@@ -2543,7 +2546,17 @@ def _body_with_optional_limit(body: str, max_body_chars: int) -> tuple[str, bool
     return text, False
 
 
-def _format_http_probe_batch(results: list[dict[str, Any]]) -> str:
+def _format_http_probe_batch(
+    results: list[dict[str, Any]],
+    seen_hashes: dict[str, str] | None = None,
+) -> str:
+    """Format probe results with body dedup.
+
+    Identical bodies are only printed once. When ``seen_hashes`` is provided it
+    is mutated in place: newly discovered bodies are stored as a short summary,
+    and bodies already recorded (in this batch or an earlier call) are reduced
+    to a one-line reference instead of re-printing the full body.
+    """
     lines = [f"# http_probe_batch results ({len(results)} request(s))"]
     hashes: dict[str, list[str]] = {}
     for item in results:
@@ -2571,6 +2584,18 @@ def _format_http_probe_batch(results: list[dict[str, Any]]) -> str:
         body_note = (
             f" truncated_to={len(body_text)}" if item.get("body_truncated") else ""
         )
+        dedup_note = ""
+        meaningful = bool(hash_value and body_text.strip() and len(body_text) > 80)
+        if meaningful and seen_hashes is not None:
+            if hash_value in seen_hashes:
+                dedup_note = f" (body already seen: {seen_hashes[hash_value]})"
+            else:
+                seen_hashes[hash_value] = one_line(
+                    re.sub(r"<[^>]+>", " ", body_text), 120
+                )
+        body_block = ""
+        if not dedup_note:
+            body_block = f"\n    body:\n{body_text if body_text else '(empty body)'}"
         lines.append(
             "\n".join(
                 [
@@ -2588,9 +2613,10 @@ def _format_http_probe_batch(results: list[dict[str, Any]]) -> str:
                     ],
                     f"    signals={item['signals'] or '(empty body)'}",
                     f"    body_length={item.get('body_chars', 0)}{body_note}",
-                    f"    body:\n{body_text if body_text else '(empty body)'}",
                 ]
             )
+            + (f"    {dedup_note}" if dedup_note else "")
+            + body_block
         )
 
     same_body_groups = [ids for ids in hashes.values() if len(ids) > 1]

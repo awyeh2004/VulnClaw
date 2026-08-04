@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import subprocess
@@ -119,6 +120,7 @@ class MCPLifecycleManager(ProbeMixin):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_exception_handler_loop: asyncio.AbstractEventLoop | None = None
         self._task_constraints: Any = None
+        self._fetch_body_cache: dict[str, str] = {}
 
     async def __aenter__(self) -> MCPLifecycleManager:
         self.start_enabled_servers()
@@ -1441,6 +1443,8 @@ class MCPLifecycleManager(ProbeMixin):
                 else:
                     raise
 
+            body_digest = hashlib.sha256(response.content or b"").hexdigest()[:12]
+            request["_body_digest"] = body_digest
             return self._format_fetch_response(response, request)
 
         except ImportError:
@@ -1572,6 +1576,20 @@ class MCPLifecycleManager(ProbeMixin):
 
         body_text = response.text
         max_body_chars = request["max_body_chars"]
+
+        # Cross-call dedup: if this exact body was already returned by a
+        # previous fetch in this session, skip re-printing it.
+        body_digest = str(request.get("_body_digest", "") or "")
+        seen_summary = self._fetch_body_cache.get(body_digest) if body_digest else None
+        if body_digest and body_text.strip() and len(body_text) > 80:
+            if seen_summary is not None:
+                lines.append(
+                    f"Body (length {len(body_text)} chars) already returned by an "
+                    f"earlier fetch; not repeating. Earlier summary: {seen_summary}"
+                )
+                return "\n".join(lines)
+            self._fetch_body_cache[body_digest] = re.sub(r"<[^>]+>", " ", body_text)[:120]
+
         decoded_source = render_highlighted_source_block(body_text, max_chars=max_body_chars)
         if decoded_source:
             lines.append(decoded_source)

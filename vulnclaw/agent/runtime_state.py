@@ -88,6 +88,10 @@ class RuntimeState:
     tool_target_calls: dict[str, int] = field(default_factory=dict)
     tool_target_last_result: dict[str, str] = field(default_factory=dict)
 
+    # Seen web response bodies (hash → short summary), so repeated HTML/PHP
+    # bodies returned by fetch / http_probe_batch are not resent to the LLM.
+    seen_body_hashes: dict[str, str] = field(default_factory=dict)
+
 
 def get_or_create_blackboard(agent: Any) -> Blackboard:
     """Get or create a Blackboard from agent.runtime."""
