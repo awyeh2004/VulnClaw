@@ -40,9 +40,36 @@ _REPEAT_TOOL_LIMITS = {
     "subdomain_enum": 3,
     "js_recon": 3,
     "fetch": 5,
+    "python_execute": 4,
 }
 _DEFAULT_REPEAT_TOOL_LIMIT = 5
 _GUARD_LAST_RESULT_MAX_CHARS = 1500
+
+# URLs appearing inside python_execute / shell code strings, used so the
+# repetition guard also covers payload-driven probe scripts.
+_CODE_URL_RE = re.compile(r"https?://[^\s'\"`<>]+")
+# Tokens that indicate a python_execute call is probing a network target rather
+# than doing local computation (pure crypto/encoding work stays unrestricted).
+_CODE_NETWORK_MARKERS = (
+    "requests",
+    "urllib",
+    "httpx",
+    "socket",
+    "http",
+    "curl",
+)
+
+
+def _urls_in_code(code: str) -> set[str]:
+    """Extract normalized target URLs from a code/command string."""
+    urls: set[str] = set()
+    for match in _CODE_URL_RE.findall(code or ""):
+        candidate = match.rstrip(".,;)]}")
+        try:
+            urls.add(_normalize_target_url(candidate))
+        except Exception:
+            continue
+    return urls
 
 
 def _normalize_target_url(url: str) -> str:
@@ -61,6 +88,9 @@ def _target_fingerprint(tool_name: str, func_args: dict[str, Any]) -> str:
     Recursively collects every ``url`` field (and http(s) URLs nested in
     structured args) and normalizes them, so near-identical probes that only
     change query params or payloads collapse to one fingerprint.
+    For code-driven tools (python_execute/shell_command), target URLs are also
+    extracted from the code/command text so payload scripts count against the
+    same endpoint when they repeatedly probe it.
     """
     urls: set[str] = set()
 
@@ -69,6 +99,8 @@ def _target_fingerprint(tool_name: str, func_args: dict[str, Any]) -> str:
             for k, v in obj.items():
                 if k == "url" and isinstance(v, str) and re.match(r"^https?://", v):
                     urls.add(_normalize_target_url(v))
+                elif k in {"code", "command"} and isinstance(v, str):
+                    urls.update(_urls_in_code(v))
                 else:
                     _walk(v)
         elif isinstance(obj, list):
@@ -98,11 +130,21 @@ def _repeat_guard_violation(
         return None
     last = runtime.tool_target_last_result.get(fp, "")
     preview = last[:_GUARD_LAST_RESULT_MAX_CHARS]
+    if tool_name == "python_execute":
+        action_hint = (
+            "Change the probe logic (different vuln class, new endpoint, or a "
+            "different query shape) or record this path as a dead end with "
+            "blackboard_reject_intent. Do not rerun the same payload batch."
+        )
+    else:
+        action_hint = (
+            "Change strategy (different endpoint, different vuln class, or "
+            "record this as a dead end with blackboard_reject_intent)."
+        )
     return (
         f"[repetition guard] {tool_name} has already been called {count} times against "
         f"the same endpoint without producing a new result. Re-executing would just repeat "
-        f"the same probe. Change strategy (different endpoint, different vuln class, or "
-        f"record this as a dead end with blackboard_reject_intent).\n"
+        f"the same probe. {action_hint}\n"
         f"Most recent result:\n{preview}"
     )
 

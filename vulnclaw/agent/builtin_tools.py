@@ -1568,6 +1568,8 @@ def build_openai_tools(
                     "预装库：requests, beautifulsoup4, pycryptodome, base64, json, re 等。"
                     "普通 HTTP/HTTPS 请求优先使用 fetch 或 http_probe_batch，避免用 Python 手写请求浪费上下文；"
                     "只有需要复杂解析、生成 payload 或批量逻辑时再使用此工具。"
+                    "工作目录默认与 shell_command 一致（进程 cwd）；若依赖 shell_command 下载/生成的文件，"
+                    "请在代码里使用绝对路径，或通过 workdir 指定目录。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -1579,6 +1581,10 @@ def build_openai_tools(
                         "purpose": {
                             "type": "string",
                             "description": "简要说明执行目的（用于审计日志），如'构造HTTP请求测试弱比较绕过'",
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": "执行工作目录。默认与 shell_command 一致（进程 cwd）。代码里读写文件时建议用绝对路径。",
                         },
                     },
                     "required": ["code"],
@@ -2691,6 +2697,7 @@ def _write_python_audit(
 async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
     code = args.get("code", "")
     purpose = args.get("purpose", "")
+    workdir_arg = args.get("workdir", "")
     if not code.strip():
         return "[!] Code is empty; nothing executed"
 
@@ -2802,6 +2809,13 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
         base_env = {"PYTHONIOENCODING": "utf-8"}
         env = {**{k: v for k, v in os.environ.items() if not k.startswith("VULNCLAW_")}, **base_env} if mode == "trusted-local" else base_env
 
+        try:
+            workdir = _resolve_workdir(workdir_arg)
+        except Exception:
+            workdir = Path(os.getcwd()).resolve()
+        if not workdir.exists() or not workdir.is_dir():
+            workdir = Path(os.getcwd()).resolve()
+
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
@@ -2812,7 +2826,7 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout_seconds,
-                cwd=tempfile.gettempdir(),
+                cwd=str(workdir),
                 env=env,
             ),
         )

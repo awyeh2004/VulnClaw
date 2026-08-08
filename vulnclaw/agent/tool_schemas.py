@@ -359,6 +359,8 @@ def build_openai_tools(mcp_manager: Any) -> list[dict[str, Any]]:
                     "预装库：requests, beautifulsoup4, pycryptodome, base64, json, re 等。"
                     "普通 HTTP/HTTPS 请求优先使用 fetch 或 http_probe_batch，避免用 Python 手写请求浪费上下文；"
                     "只有需要复杂解析、生成 payload 或批量逻辑时再使用此工具。"
+                    "工作目录默认与 shell_command 一致（进程 cwd）；若依赖 shell_command 下载/生成的文件，"
+                    "请在代码里使用绝对路径，或通过 workdir 指定目录。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -370,6 +372,10 @@ def build_openai_tools(mcp_manager: Any) -> list[dict[str, Any]]:
                         "purpose": {
                             "type": "string",
                             "description": "简要说明执行目的（用于审计日志），如'构造HTTP请求测试弱比较绕过'",
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": "执行工作目录。默认与 shell_command 一致（进程 cwd）。代码里读写文件时建议用绝对路径。",
                         },
                     },
                     "required": ["code"],
