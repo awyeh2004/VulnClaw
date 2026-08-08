@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-DEFAULT_EVIDENCE_PREVIEW_CHARS = 6000
+DEFAULT_EVIDENCE_PREVIEW_CHARS = 3500
 DEFAULT_EVIDENCE_VIEW_CHARS = 0
 FULL_EVIDENCE_RANGE_END = 2**63 - 1
 MAX_STORED_EVIDENCE = 240
