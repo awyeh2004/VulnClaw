@@ -211,6 +211,28 @@ async def test_dir_enum_respects_host_constraint(monkeypatch):
     assert "constraint_violation" in res
 
 
+async def test_dir_enum_detects_parent_traversal_on_dir_hit(monkeypatch):
+    """目录命中后应自动探测父目录穿越变体（/img../），并标注 traversal candidate。"""
+
+    def router(method, url, params, content):
+        if "vulnclaw_nope" in url:
+            return _Resp(text="not found", status=404)
+        # /img 开放目录
+        if url.rstrip("/").endswith("/img"):
+            return _Resp(text="Index of /img/", status=200)
+        # /img../ 返回父目录内容（目录穿越漏洞）
+        if "/img../" in url:
+            return _Resp(text="Index of /", status=200)
+        return _Resp(text="nope", status=404)
+
+    monkeypatch.setattr(recon_tools, "_make_client", lambda cfg: _FakeClient(router))
+    agent = _agent(ReconConfig())
+    res = await recon_tools.execute_dir_enum(agent, {"url": "http://t.example.com"})
+    assert "/img" in res
+    assert "img../" in res
+    assert "traversal candidate" in res
+
+
 # ── 子域名枚举：被动聚合 + 字典爆破关闭时不解析 ─────────────────────
 
 

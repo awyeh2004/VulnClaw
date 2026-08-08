@@ -884,6 +884,46 @@ async def execute_dir_enum(agent: AgentContext, args: dict[str, Any]) -> str:
                     hits.append((code, length, path))
 
             await asyncio.gather(*(probe(p) for p in candidates))
+
+            # 目录命中后自动探测父目录穿越变体（/img/ -> /img../ 之类），
+            # 覆盖 nginx alias / 静态映射未做归一化导致的目录穿越类漏洞。
+            # 命中路径可能是 "img" 或 "img/"（带不带尾斜杠都可能是目录）。
+            # 关键：变体用"目录名文本后缀"模式（img../、img%2e%2e/），
+            # 不用 "img/../"——那会被 urljoin 归一化成根路径，测不出穿越。
+            dir_hits = [p for _, _, p in hits if p.rstrip("/")]
+            if dir_hits:
+                trav_candidates: list[str] = []
+                for d in dir_hits:
+                    dname = d.rstrip("/")
+                    trav_candidates.extend(
+                        [
+                            f"{dname}..",
+                            f"{dname}../",
+                            f"{dname}%2e%2e/",
+                            f"{dname}..%2f",
+                            f"{dname}%2e%2e%2f",
+                        ]
+                    )
+                trav_candidates = _dedup_cap(trav_candidates, 64)
+                trav_hits: list[tuple[int, int, str]] = []
+
+                async def probe_trav(path: str) -> None:
+                    target = urljoin(base, path)
+                    async with sem:
+                        try:
+                            r = await client.get(target)
+                        except Exception:
+                            return
+                    code = r.status_code
+                    length = len(r.content)
+                    if code in _HIT_CODES:
+                        if baseline_len is not None and code in (200, 301, 302) and length == baseline_len:
+                            return
+                        trav_hits.append((code, length, path))
+
+                await asyncio.gather(*(probe_trav(p) for p in trav_candidates))
+                for entry in trav_hits:
+                    hits.append(entry)
     except Exception as e:
         return _("agent.recon.dir_error", error=e)
 
@@ -892,5 +932,8 @@ async def execute_dir_enum(agent: AgentContext, args: dict[str, Any]) -> str:
     if baseline_len is not None:
         out.append(_("agent.recon.dir_baseline", length=baseline_len))
     for code, length, path in hits:
-        out.append(f"  [{code}] {length:>8}B  {base}{path}")
+        if ".." in path or "%2e%2e" in path.lower():
+            out.append(f"  [{code}] {length:>8}B  {base}{path}  (traversal candidate)")
+        else:
+            out.append(f"  [{code}] {length:>8}B  {base}{path}")
     return "\n".join(out) if hits else "\n".join(out + [_('agent.recon.no_valid_hits')])
