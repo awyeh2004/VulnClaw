@@ -322,3 +322,21 @@ async def test_solve_keeps_rejecting_external_writeup_asks_near_parser_filter(mo
     assert result.completed is True
     assert sum(1 for kind, _ in events if kind == "ask_user_rejected") == 2
     assert not agent.context.state.agent_state.pending_questions
+
+
+def test_system_prompt_prioritizes_loopback_bypass_for_internal_flag():
+    """SSRF direction rule: confirmed loopback bypass should steer toward internal services."""
+    from vulnclaw.agent.solver import _system_prompt
+
+    agent = _Agent()
+    state = agent.context.state.agent_state
+    prompt = _system_prompt(agent, state)
+
+    assert "127.0.0.2" in prompt
+    assert "169.254.169.254" in prompt
+    assert "rabbit hole" in prompt
+    assert "internal services" in prompt
+    assert "api/internal/secret" in prompt
+    # Direction rule should come before the FINAL/ASK_USER markers.
+    assert prompt.index("127.0.0.2") < prompt.index("FINAL:")
+

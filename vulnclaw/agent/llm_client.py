@@ -22,6 +22,89 @@ from vulnclaw.agent.tool_call_manager import (  # noqa: E402
 
 _CONTEXT_USABLE_RATIO = 0.9
 _DEFAULT_AUTO_TOOL_ROUNDS = 6
+# Self-repetition guard: a single LLM response repeating the same reasoning
+# block verbatim (without new evidence or tool calls) burns budget and never
+# converges. Tuned against a real stuck run that repeated a ~18-line block 15
+# times in one response (~16k chars of pure duplication).
+_SELF_REP_MIN_BLOCK_LINES = 4
+_SELF_REP_MIN_REPEATS = 3
+_SELF_REP_MIN_BLOCK_CHARS = 80
+_SELF_REP_STREAM_CHECK_INTERVAL = 3000
+
+
+def _line_signature(line: str) -> str:
+    """Normalize a line for block matching (collapse whitespace + lowercase)."""
+    return " ".join(line.split()).lower()
+
+
+def _self_repetition_cut(text: str) -> tuple[int, int] | None:
+    """Return ``(cut_line, repeat_count)`` keeping the first full copy, or None.
+
+    Detects a text block (``_SELF_REP_MIN_BLOCK_LINES`` consecutive lines,
+    repeated ``_SELF_REP_MIN_REPEATS`` times verbatim after normalization).
+    ``cut_line`` points just past the FIRST occurrence of the block, so the
+    caller keeps the genuine first copy and drops the duplicated tail.
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+    if len(lines) < _SELF_REP_MIN_BLOCK_LINES * _SELF_REP_MIN_REPEATS:
+        return None
+    sigs = [ _line_signature(line) for line in lines ]
+    first_seen: dict[tuple[str, ...], int] = {}
+    counts: dict[tuple[str, ...], int] = {}
+    for i in range(len(lines) - _SELF_REP_MIN_BLOCK_LINES + 1):
+        block = tuple(sigs[i : i + _SELF_REP_MIN_BLOCK_LINES])
+        if sum(len(s) for s in block) < _SELF_REP_MIN_BLOCK_CHARS:
+            continue
+        if block not in first_seen:
+            first_seen[block] = i
+        counts[block] = counts.get(block, 0) + 1
+    candidates = [
+        (first_seen[b], b, c) for b, c in counts.items() if c >= _SELF_REP_MIN_REPEATS
+    ]
+    if not candidates:
+        return None
+    first, block, count = min(candidates, key=lambda item: item[0])
+    positions = [
+        i
+        for i in range(len(lines) - _SELF_REP_MIN_BLOCK_LINES + 1)
+        if tuple(sigs[i : i + _SELF_REP_MIN_BLOCK_LINES]) == block
+    ]
+    cut = positions[1] if len(positions) >= 2 else first + _SELF_REP_MIN_BLOCK_LINES
+    return cut, count
+
+
+_REPETITION_GUARD_NOTICE = (
+    "Repetition guard: a single response repeated the same reasoning block "
+    "{count} times without new evidence or a tool call; the duplicated tail was "
+    "removed. Do not restate the same conclusion. Either run a concrete tool call "
+    "that produces new evidence, or write FINAL/NO_PATH grounded in recorded evidence."
+)
+
+
+def _apply_repetition_guard(
+    agent: AgentContext,
+    text: str,
+    detected_count: int = 0,
+) -> str:
+    """Truncate a self-repeating response and steer the model back to converging.
+
+    If ``text`` repeats a reasoning block, keep only the first copy and append a
+    user-message guard notice to the context so the next model call converges
+    instead of re-running the same analysis. ``detected_count`` may be passed from
+    the streaming path where the tail was already truncated at generation time.
+    """
+    cut = _self_repetition_cut(text)
+    if cut is not None:
+        kept = "\n".join(text.splitlines()[: cut[0]]).strip()
+        detected_count = max(detected_count, cut[1])
+    else:
+        kept = text
+    if detected_count <= 0:
+        return kept
+    _append_context_message(agent, {"role": "user", "content": _REPETITION_GUARD_NOTICE.format(count=detected_count)})
+    return kept
 # Cap the number of conversation messages resent each call. This bounds worst-case
 # request size even when the token budget is far from full. Each tool call
 # produces an assistant message plus one tool result message, so a single round
@@ -161,6 +244,8 @@ async def _stream_chat_completion_message(
     full_text = ""
     reasoning_buffer = ""
     tool_calls_chunks: list[dict] = []
+    repetition_count = 0
+    last_rep_check = 0
     stream = _ensure_async_iter(response)
     if stream is None:
         raise ValueError("LLM response is not a valid stream object")
@@ -181,13 +266,34 @@ async def _stream_chat_completion_message(
                 reasoning_buffer = ""
             stream_sink.on_content_token(content)
             full_text += content
+            if tool_calls_chunks:
+                repetition_count = 0
+            elif (
+                repetition_count == 0
+                and len(full_text) >= _SELF_REP_MIN_BLOCK_LINES * _SELF_REP_MIN_REPEATS
+                and len(full_text) - last_rep_check >= _SELF_REP_STREAM_CHECK_INTERVAL
+            ):
+                cut = _self_repetition_cut(full_text)
+                if cut is not None:
+                    repetition_count = cut[1]
+                    kept = "\n".join(full_text.splitlines()[: cut[0]]).strip()
+                    stream_sink.on_content_token(
+                        f"\n[repetition guard] self-repeating block detected "
+                        f"({cut[1]}x); duplicated tail truncated during generation.\n"
+                    )
+                    full_text = kept
+                    break
+                last_rep_check = len(full_text)
 
         _collect_tool_call_deltas(delta, tool_calls_chunks)
 
     if reasoning_buffer:
         full_text += f"<thinking>\n{reasoning_buffer}\n</thinking>\n"
     stream_sink.on_stream_end()
-    return _message_from_stream(full_text, _assemble_tool_calls(tool_calls_chunks))
+    message = _message_from_stream(full_text, _assemble_tool_calls(tool_calls_chunks))
+    if repetition_count:
+        message.repetition_count = repetition_count
+    return message
 
 
 def extract_response(message: Any) -> str:
@@ -441,7 +547,10 @@ async def call_llm(
     choice = response.choices[0]
     if choice.message.tool_calls:
         return _prepend_retry_notice(await handle_tool_calls(agent, choice.message), retry_attempts)
-    return _prepend_retry_notice(extract_response(choice.message), retry_attempts)
+    return _prepend_retry_notice(
+        _apply_repetition_guard(agent, extract_response(choice.message)),
+        retry_attempts,
+    )
 
 
 async def call_llm_auto(
@@ -507,7 +616,10 @@ async def call_llm_auto(
         choice = response.choices[0]
         tool_calls = list(getattr(choice.message, "tool_calls", None) or [])
         if not tool_calls:
-            return _prepend_retry_notice(extract_response(choice.message), retry_attempts_total)
+            return _prepend_retry_notice(
+                _apply_repetition_guard(agent, extract_response(choice.message)),
+                retry_attempts_total,
+            )
 
         tool_results, skipped_info = await handle_tool_calls_with_results(agent, choice.message)
         last_tool_results = tool_results
@@ -782,7 +894,7 @@ async def call_llm_stream(
                 stream_sink.on_stream_end()
                 return result
 
-        return full_text
+        return _apply_repetition_guard(agent, full_text)
 
     except Exception as e:
         # Fallback to non-streaming on streaming-related errors or general failures
@@ -851,7 +963,11 @@ async def call_llm_auto_stream(
             message = await _stream_chat_completion_message(agent, messages, tools, stream_sink)
             tool_calls = list(getattr(message, "tool_calls", None) or [])
             if not tool_calls:
-                return extract_response(message)
+                return _apply_repetition_guard(
+                    agent,
+                    extract_response(message),
+                    detected_count=getattr(message, "repetition_count", 0),
+                )
 
             for tc in tool_calls:
                 stream_sink.on_tool_call(tc.function.name, tc.function.arguments[:200])
