@@ -251,7 +251,10 @@ def build_openai_tools(mcp_manager: Any) -> list[dict[str, Any]]:
                     "useful. Good uses include php -r serialization checks, curl requests with raw "
                     "cookies/headers, rg/Select-String over saved files, and small one-off scripts. "
                     "Set workdir when the command depends on files. Raw stdout/stderr are saved as "
-                    "evidence; large active-context observations are bounded high-signal previews."
+                    "evidence; large active-context observations are bounded high-signal previews. "
+                    "IMPORTANT: the default shell on this host is Windows PowerShell: `&&` and "
+                    "Linux-style paths like /tmp are invalid; use `;` to chain, PowerShell cmdlets "
+                    "or `python_execute` for file/zip generation, and quote paths with spaces."
                 ),
                 "parameters": {
                     "type": "object",
