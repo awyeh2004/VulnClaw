@@ -22,11 +22,13 @@ from vulnclaw.agent.tool_call_manager import (  # noqa: E402
 
 _CONTEXT_USABLE_RATIO = 0.9
 _DEFAULT_AUTO_TOOL_ROUNDS = 6
-# Cap the number of conversation messages resent each call. Long-running
-# sessions otherwise grow toward the full token budget on every turn,
-# slowing each LLM request and inflating cost. Older detail is preserved in
-# AgentState evidence and reachable via evidence_search/evidence_view.
-_MAX_CONTEXT_MESSAGES = 30
+# Cap the number of conversation messages resent each call. This bounds worst-case
+# request size even when the token budget is far from full; 3 messages per
+# solve round (assistant + tool_calls + tool result) means ~20 rounds stay
+# intact before truncation, keeping earlier reasoning available and reducing
+# redundant re-analysis. Older detail is preserved in AgentState evidence and
+# reachable via evidence_search/evidence_view.
+_MAX_CONTEXT_MESSAGES = 60
 
 
 def _fit_context_window(agent: AgentContext, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
