@@ -80,8 +80,9 @@ class I18nLoader:
         elif system_lang.startswith("en"):
             return "en"
 
-        # Default to Chinese for this project
-        return "zh"
+        # Default to English when no environment signal is present so new
+        # users do not land in a language they cannot read.
+        return "en"
 
 
 # Global translator instance
@@ -126,3 +127,4 @@ def current_lang() -> str:
     if _translator is None:
         init_i18n()
     return _translator.lang
+

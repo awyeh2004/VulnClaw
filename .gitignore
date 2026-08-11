@@ -86,3 +86,6 @@ docs/
 
 # 开发中途产生的临时文件
 .projectHelp/
+# Rust TUI build artifacts
+tui/target/
+

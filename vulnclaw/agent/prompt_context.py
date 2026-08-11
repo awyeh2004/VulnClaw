@@ -297,7 +297,9 @@ async def generate_attack_summary(agent: AgentContext) -> str:
     try:
         client = agent._get_client()
         messages = [{"role": "user", "content": prompt}]
-        from vulnclaw.agent.llm_client import build_chat_completion_kwargs
+        from vulnclaw.agent.llm_client import _fit_context_window, build_chat_completion_kwargs
+
+        messages = _fit_context_window(agent, messages, [], purpose="persistent_summary")
 
         response = client.chat.completions.create(
             **build_chat_completion_kwargs(

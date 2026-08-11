@@ -27,6 +27,7 @@ class LLMProvider(str, Enum):
     STEPFUN = "stepfun"
     SENSETIME = "sensetime"
     YI = "yi"
+    OLLAMA = "ollama"
     CUSTOM = "custom"
 
 
@@ -97,6 +98,16 @@ PROVIDER_PRESETS: dict[LLMProvider, dict[str, str]] = {
         "default_model": "yi-lightning",
         "label": "零一万物 (Yi)",
     },
+    # Local models via Ollama's OpenAI-compatible endpoint. No API key is
+    # required (the client sends a placeholder). The default model must support
+    # tool calling — VulnClaw drives everything through function calls — so pick
+    # a tool-capable model (llama3.1, qwen2.5, mistral-nemo, ...). Inside Docker
+    # use http://host.docker.internal:11434/v1; see DOCKER.md.
+    LLMProvider.OLLAMA: {
+        "base_url": "http://localhost:11434/v1",
+        "default_model": "llama3.1",
+        "label": "Ollama (本地)",
+    },
     LLMProvider.CUSTOM: {
         "base_url": "",
         "default_model": "",
@@ -110,7 +121,7 @@ class LLMConfig(BaseModel):
 
     provider: str = Field(
         default="openai",
-        description="LLM provider name (openai/anthropic/minimax/deepseek/zhipu/moonshot/qwen/siliconflow/doubao/baichuan/stepfun/sensetime/yi/custom)",
+        description="LLM provider name (openai/anthropic/minimax/deepseek/zhipu/moonshot/qwen/siliconflow/doubao/baichuan/stepfun/sensetime/yi/ollama/custom)",
     )
     api_key: str = Field(default="", description="Static API key for the chosen provider (auth_mode=static)")
     api_keys: list[str] = Field(
@@ -146,7 +157,7 @@ class LLMConfig(BaseModel):
     model: str = Field(default="gpt-4o", description="Model name to use (auto-filled by provider)")
     max_tokens: int = Field(default=4096, description="Max tokens per response")
     max_context_tokens: int = Field(
-        default=128000, description="Max context window tokens before sliding-window truncation"
+        default=128000, description="Total model context window including input and completion tokens"
     )
     temperature: float = Field(default=0.1, description="Sampling temperature")
     reasoning_effort: str = Field(
@@ -196,6 +207,41 @@ class MCPServersConfig(BaseModel):
     """All MCP servers configuration."""
 
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
+class SubagentConfig(BaseModel):
+    """Limits for asynchronous Group Leaders and leaf agents."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    enabled: bool = Field(
+        default=True,
+        description="Expose agent_run and agent_job to the model-led solve engine",
+    )
+    max_background_groups: int = Field(default=3, gt=0, le=8)
+    max_concurrent_leaf_total: int = Field(default=4, gt=0, le=32)
+    max_concurrent_leaf_per_group: int = Field(default=3, gt=0, le=16)
+    max_leaf_per_group: int = Field(default=6, gt=0, le=32)
+    max_waves_per_group: int = Field(default=3, gt=0, le=12)
+    max_steps_per_leaf: int = Field(default=12, gt=0, le=100)
+    leaf_max_tool_rounds: int = Field(default=4, gt=0, le=20)
+    leaf_timeout_seconds: float = Field(default=900.0, gt=0, le=86_400)
+    group_timeout_seconds: float = Field(default=1200.0, gt=0, le=86_400)
+    finalization_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
+    max_model_tokens_per_solve: int = Field(
+        default=8_000_000,
+        gt=0,
+        le=200_000_000,
+        description="Solve-wide model-token ceiling for all descendant agents",
+    )
+    max_model_tokens_per_group: int = Field(
+        default=1_000_000,
+        gt=0,
+        le=20_000_000,
+        description="Shared token ceiling for one Leader and all of its leaves",
+    )
+    merge_max_evidence_per_group: int = Field(default=48, gt=0, le=128)
+    result_max_chars: int = Field(default=16_000, gt=0, le=200_000)
 
 
 class ReconConfig(BaseModel):
@@ -282,6 +328,31 @@ class SessionConfig(BaseModel):
     )
     poc_language: str = Field(default="python", description="Default PoC language: python, bash")
     max_rounds: int = Field(default=15, description="Max autonomous pentest rounds (1-100)")
+    context_hot_max_messages: int = Field(
+        default=48,
+        ge=4,
+        description="Maximum messages retained in hot conversation memory",
+    )
+    context_hot_max_tokens: int = Field(
+        default=32000,
+        ge=1024,
+        description="Approximate token cap for hot conversation memory",
+    )
+    memory_search_max_chars: int = Field(
+        default=6000,
+        ge=512,
+        description="Maximum cold-memory characters returned by one search",
+    )
+    memory_archive_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1024 * 1024,
+        description="Rotate a cold-memory JSONL shard after this many bytes",
+    )
+    memory_archive_max_files: int = Field(
+        default=8,
+        ge=2,
+        description="Maximum cold-memory JSONL shards retained per output directory",
+    )
     # Autonomous engine: "solve" = model-led agent loop with evidence memory (default),
     # "team" = role-specialized supervisor, "rounds" = legacy fixed-round loop.
     engine: str = Field(
@@ -312,13 +383,54 @@ class SessionConfig(BaseModel):
         default=1,
         description="Deprecated for model-led solve; retained for team/legacy integrations",
     )
+    context_auto_compact: bool = Field(
+        default=True,
+        description="Automatically compact model context across all LLM call paths before overflow",
+    )
+    context_compact_trigger_ratio: float = Field(
+        default=0.70,
+        ge=0.10,
+        le=0.95,
+        description="Usable-input ratio that triggers automatic context compaction",
+    )
+    context_compact_target_ratio: float = Field(
+        default=0.55,
+        ge=0.05,
+        le=0.90,
+        description="Usable-input ratio targeted after context compaction",
+    )
+    context_recent_message_groups: int = Field(
+        default=12,
+        ge=1,
+        le=100,
+        description="Recent complete message groups retained verbatim after compaction",
+    )
+    context_summary_max_tokens: int = Field(
+        default=3500,
+        ge=200,
+        le=16000,
+        description="Maximum token budget for the deterministic context digest",
+    )
+    context_output_reserve_tokens: int = Field(
+        default=0,
+        ge=0,
+        description="Reserved completion-token budget; 0 derives it from llm.max_tokens",
+    )
+    context_compaction_mode: str = Field(
+        default="structured",
+        description="Context compaction mode; structured is deterministic and evidence-aware",
+    )
+    context_compaction_audit_enabled: bool = Field(
+        default=True,
+        description="Record context compaction metadata in the persistent agent state",
+    )
     solve_auto_compact: bool = Field(
         default=False,
-        description="Auto-compact solve memory before context overflow; otherwise compact only on /compact",
+        description="Deprecated alias for context_auto_compact in legacy configuration files",
     )
     solve_compact_trigger_ratio: float = Field(
         default=0.9,
-        description="Context-window ratio that may trigger auto compact when solve_auto_compact is enabled",
+        description="Deprecated alias for context_compact_trigger_ratio in legacy configuration files",
     )
     solve_auto_report: bool = Field(
         default=True,
@@ -430,12 +542,32 @@ class VulnClawConfig(BaseModel):
     mcp: MCPServersConfig = Field(default_factory=MCPServersConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     recon: ReconConfig = Field(default_factory=ReconConfig)
 
     model_config = ConfigDict(
         env_prefix="VULNCLAW_",
         env_nested_delimiter="__",
     )
+
+
+# ── Autonomous engine selection ────────────────────────────────────
+# The three autonomous engines a run can dispatch to. Kept here (next to the
+# ``SessionConfig.engine`` field) so the CLI, ``AgentCore.auto_pentest`` and the
+# persistent loop all validate/resolve against one list instead of re-hardcoding
+# the string set in three places.
+ENGINE_CHOICES: tuple[str, ...] = ("solve", "team", "rounds")
+
+
+def resolve_engine(config: "VulnClawConfig", override: str | None = None) -> str:
+    """Resolve the effective autonomous engine for a run.
+
+    Precedence: explicit ``override`` (e.g. a CLI ``--engine``) > the configured
+    ``session.engine`` > the ``"solve"`` default. An unrecognized value falls
+    back to ``"solve"`` so a stale config can never dispatch to a missing engine.
+    """
+    engine = (override or getattr(config.session, "engine", "") or "solve").strip().lower()
+    return engine if engine in ENGINE_CHOICES else "solve"
 
 
 # ── Built-in MCP server definitions (MVP) ──────────────────────────

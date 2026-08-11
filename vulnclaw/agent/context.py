@@ -38,6 +38,7 @@ from vulnclaw.config.domain_models import (  # noqa: F401 — re-export
     phase_from_canonical_id,
     validate_action_constraints,
 )
+from vulnclaw.i18n import _
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +72,15 @@ class SessionConfig(BaseModel):
 
 
 class VulnerabilityStore(BaseModel):
-    """漏洞存储管理 — 负责漏洞的增删改查和去重。
+    """漏洞查询视图 — 按验证/生命周期状态过滤 findings。
 
     职责域:
-    - 漏洞列表 (findings)
+    - 漏洞列表 (findings)：由 SessionState 写入并同步
     - ID 缓存用于精确去重 (_finding_ids_cache)
-    - 语义去重阈值 (semantic_dedup_threshold)
 
-    去重策略:
-    1. finding_id 精确 hash 匹配（快）
-    2. 语义相似度匹配（捕获同一漏洞的不同表述），命中后保留证据更强者
+    说明:
+    新增与去重的唯一实现位于 ``SessionState.add_finding``。本类只提供只读的
+    分类查询（get_verified/pending/... ），由 ``SessionState`` 委托调用。
     """
 
     target: Optional[str] = None
@@ -90,118 +90,6 @@ class VulnerabilityStore(BaseModel):
     )
     # PrivateAttr 不受 Pydantic 字段命名限制，用于内部去重追踪
     _finding_ids_cache: set[str] = PrivateAttr(default_factory=set)
-
-    def set_checkpoint_callback(
-        self, callback: Callable[["SessionState", str], None] | None
-    ) -> None:
-        """Install a persistence callback fired at durable state boundaries."""
-        self._checkpoint_callback = callback
-
-    def _notify_checkpoint(self, reason: str) -> None:
-        if self._checkpoint_callback is None:
-            return
-        self._checkpoint_callback(self, reason)
-
-    def add_finding(self, finding: VulnerabilityFinding) -> bool:
-        """添加漏洞发现，自动去重。
-
-        Returns:
-            True if finding was added, False if duplicate (skipped).
-        """
-        # 生成 finding_id（如果还没有）
-        if hasattr(finding, "_sync_status_fields"):
-            finding._sync_status_fields()
-        if not finding.finding_id:
-            finding.finding_id = finding._generate_finding_id()
-
-        # Tie the finding to the owning target when the caller didn't set one.
-        if not finding.target and self.target:
-            finding.target = self.target
-
-        # 第一层：finding_id 精确去重
-        if finding.finding_id in self._finding_ids_cache:
-            logger.debug("跳过重复漏洞: %s (ID: %s)", finding.title, finding.finding_id)
-            return False
-
-        # 第二层：语义相似度去重
-        from vulnclaw.agent.finding_similarity import (
-            _evidence_strength,
-            finding_similarity,
-        )
-
-        for idx, existing in enumerate(self.findings):
-            if finding_similarity(finding, existing) >= self.semantic_dedup_threshold:
-                # 命中语义重复：保留证据更强者
-                if _evidence_strength(finding) > _evidence_strength(existing):
-                    logger.debug(
-                        "语义重复，替换为证据更强的漏洞: %s 取代 %s",
-                        finding.title, existing.title,
-                    )
-                    self._finding_ids_cache.discard(existing.finding_id)
-                    self._finding_ids_cache.add(finding.finding_id)
-                    self.findings[idx] = finding
-                    self._notify_checkpoint("finding_updated")
-                else:
-                    logger.debug("跳过语义重复漏洞: %s", finding.title)
-                return False
-
-        # 附加 skill 溯源（若未显式提供且当前有活跃选择）。深拷贝以免其中的
-        # references_loaded 列表与 active_skill_selection 共享 —— 否则之后
-        # record_loaded_reference() 会追溯性地修改已记录漏洞的溯源。
-        if finding.skill_provenance is None and self.active_skill_selection is not None:
-            finding.skill_provenance = copy.deepcopy(self.active_skill_selection)
-
-        # 添加到追踪集合和列表
-        self._finding_ids_cache.add(finding.finding_id)
-        self.findings.append(finding)
-        self._notify_checkpoint("finding_added")
-        return True
-
-    def set_active_skill_selection(self, provenance: Optional[dict[str, Any]]) -> bool:
-        """Record the active skill selection; emit a run event when it changes.
-
-        Args:
-            provenance: A ``SkillSelection.to_provenance()`` dict (or None).
-
-        Returns:
-            True if the selection changed from the previous turn.
-        """
-        prev = self.active_skill_selection
-        changed = (prev or {}).get("primary") != (provenance or {}).get("primary") or (
-            (prev or {}).get("supporting") != (provenance or {}).get("supporting")
-        )
-        # Same bundle as last turn: carry over references already loaded under it
-        # so provenance keeps a complete record across turns.
-        if not changed and prev is not None and provenance is not None:
-            loaded = prev.get("references_loaded")
-            if loaded and not provenance.get("references_loaded"):
-                provenance = {**provenance, "references_loaded": list(loaded)}
-        self.active_skill_selection = provenance
-        if changed:
-            event = {
-                "kind": "skill_selection_changed" if provenance is not None else "skill_selection_cleared",
-                "timestamp": datetime.now().isoformat(),
-                "primary": (provenance or {}).get("primary"),
-                "supporting": (provenance or {}).get("supporting", []),
-                "reason": (provenance or {}).get("reason", ""),
-                "confidence": (provenance or {}).get("confidence", 0.0),
-            }
-            self.skill_selection_events.append(event)
-            self.skill_selection_events = self.skill_selection_events[-50:]
-        return changed
-
-    def record_loaded_reference(self, skill_name: str, ref_name: str) -> None:
-        """Record a reference loaded via ``load_skill_reference`` onto provenance.
-
-        Findings created after this call inherit the reference in their
-        ``skill_provenance['references_loaded']``.
-        """
-        if self.active_skill_selection is None:
-            return
-        entry = f"{skill_name}/{ref_name}" if skill_name else ref_name
-        loaded = self.active_skill_selection.setdefault("references_loaded", [])
-        if entry and entry not in loaded:
-            loaded.append(entry)
 
     def get_verified_findings(self) -> list[VulnerabilityFinding]:
         """获取已验证的漏洞列表。"""
@@ -299,7 +187,6 @@ class ReconState(BaseModel):
 
     def get_recon_status_text(self) -> str:
         """获取人类可读的侦察维度完成状态。"""
-        from vulnclaw.i18n import _
 
         parts = []
         for dim, completed in self.recon_dimensions_completed.items():
@@ -693,13 +580,36 @@ class SessionState(BaseModel):
     skill_selection_events: list[dict[str, Any]] = Field(
         default_factory=list, description="Audit log of skill-selection changes"
     )
+    subagent_events: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Bounded durable projection of sub-agent runtime events",
+    )
+    subagent_evidence_provenance: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Parent evidence id to originating sub-agent task identity",
+    )
     semantic_dedup_threshold: float = Field(
         default=0.75, description="语义去重的相似度阈值（0-1）"
+    )
+    session_kind: str = Field(
+        default="parent", description="Session owner kind: parent, group_leader, or leaf"
+    )
+    run_id: str = Field(default="", description="Owning solve/runtime identifier")
+    parent_session_id: str = Field(
+        default="", description="Parent session identifier for sub-agent checkpoints"
+    )
+    task_id: str = Field(default="", description="Sub-agent task identifier")
+    lifecycle_status: str = Field(
+        default="", description="Last persisted sub-agent lifecycle status"
     )
 
     # ★ 漏洞去重追踪（PrivateAttr）
     _finding_ids_cache: set[str] = PrivateAttr(default_factory=set)
     _content_hash: str = PrivateAttr(default="")
+    _save_path: Optional[Path] = PrivateAttr(default=None)
+    _checkpoint_transform: Callable[
+        ["SessionState", dict[str, Any]], dict[str, Any]
+    ] | None = PrivateAttr(default=None)
     _checkpoint_callback: Callable[["SessionState", str], None] | None = PrivateAttr(
         default=None
     )
@@ -759,10 +669,15 @@ class SessionState(BaseModel):
     # ==========================================================================
 
     def add_finding(self, finding: VulnerabilityFinding) -> bool:
-        """添加漏洞发现。
+        """添加漏洞发现，自动去重（新增/去重的唯一实现所在处）。
 
-        [P17 重构] 同时更新 self.findings 和 self._finding_ids_cache，
-        保持向后兼容性。去重逻辑委托给 VulnerabilityStore。
+        去重策略:
+        1. finding_id 精确 hash 匹配（快）
+        2. 语义相似度匹配（捕获同一漏洞的不同表述），命中后保留证据更强者
+
+        写入 self.findings / self._finding_ids_cache，并把同一引用同步给
+        VulnerabilityStore（只读查询视图）。成功新增或替换时触发 checkpoint，
+        使「发现漏洞」成为一个可持久化的进度边界。
         """
         # 生成 finding_id（如果还没有）
         if hasattr(finding, "_sync_status_fields"):
@@ -797,6 +712,7 @@ class SessionState(BaseModel):
                     self._finding_ids_cache.discard(existing.finding_id)
                     self._finding_ids_cache.add(finding.finding_id)
                     self.findings[idx] = finding
+                    self._notify_checkpoint("finding_updated")
                 else:
                     logger.debug("跳过语义重复漏洞: %s", finding.title)
                 return False
@@ -815,6 +731,7 @@ class SessionState(BaseModel):
         self._vulnerabilities.findings = self.findings
         self._vulnerabilities._finding_ids_cache = self._finding_ids_cache
 
+        self._notify_checkpoint("finding_added")
         return True
 
     def get_verified_findings(self) -> list[VulnerabilityFinding]:
@@ -1061,7 +978,6 @@ class SessionState(BaseModel):
 
     def advance_phase(self, phase: PentestPhase) -> None:
         """切换到新阶段。"""
-        from vulnclaw.i18n import _
 
         old_phase = self.phase
         self.phase = phase
@@ -1084,16 +1000,23 @@ class SessionState(BaseModel):
         保持向后兼容性。
         [Perf] 对比 MD5 内容哈希，跳过未变更的写入。
         """
+        if path is None and self._save_path is not None:
+            path = self._save_path
         if path is None:
             from vulnclaw.config.settings import SESSIONS_DIR
 
             safe_target = (self.target or "unknown").replace("/", "_").replace(":", "_")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = SESSIONS_DIR / f"{timestamp}_{safe_target}.json"
+        else:
+            path = Path(path)
+        self._save_path = path
 
         path.parent.mkdir(parents=True, exist_ok=True)
         # [P18 兼容] 获取序列化数据并添加 executed_steps
         data = self.model_dump(mode="json")
+        if self._checkpoint_transform is not None:
+            data = self._checkpoint_transform(self, data)
         data["executed_steps"] = self.executed_steps
         content = json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -1105,6 +1028,11 @@ class SessionState(BaseModel):
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return path
+
+    def set_save_path(self, path: Path) -> None:
+        """Pin future no-argument saves to one collision-free checkpoint."""
+
+        self._save_path = Path(path)
 
     @classmethod
     def load(cls, path: Path) -> "SessionState":
@@ -1125,7 +1053,9 @@ class SessionState(BaseModel):
         # [P18 兼容] 移除 executed_steps 字段，避免 Pydantic 验证错误
         data.pop("executed_steps", None)
 
-        return cls(**data)
+        state = cls(**data)
+        state.set_save_path(path)
+        return state
 
 # ==============================================================================
 # [P17 重构结束] SessionState 组合模式重构
@@ -1135,10 +1065,45 @@ class SessionState(BaseModel):
 class ContextManager:
     """Manages conversation context and session state."""
 
-    def __init__(self, max_history: int = 200) -> None:
-        self.max_history = max_history
+    def __init__(
+        self,
+        max_history: int = 200,
+        memory_store: Any = None,
+        *,
+        max_tokens: int = 32000,
+        search_max_chars: int = 6000,
+    ) -> None:
+        self.max_history = max(1, int(max_history))
+        self.max_tokens = max(256, int(max_tokens))
+        self.search_max_chars = max(256, int(search_max_chars))
         self.messages: list[dict[str, Any]] = []
         self.state = SessionState()
+        self.memory_store = memory_store
+        # Context Vault: selective, model-driven archiving layered on top of the
+        # deterministic compactor.  Initialized lazily so tool dispatch and the
+        # budget pipeline can attach it without import cycles.
+        self.vault: Any = None
+        self.vault_output_dir: Path | None = None
+
+    def ensure_vault(self) -> Any:
+        """Lazily create the vault manager for this session."""
+        if self.vault is None:
+            from vulnclaw.agent.context_vault import VaultConfig, VaultManager
+
+            self.vault = VaultManager(
+                output_dir=self.vault_output_dir,
+                config=VaultConfig(),
+            )
+        return self.vault
+
+    def attach_vault(self, vault: Any, output_dir: Path | None = None) -> None:
+        """Attach an externally-created vault (used by tests and CLI wiring)."""
+        self.vault = vault
+        if output_dir is not None:
+            self.vault_output_dir = output_dir
+            setter = getattr(vault, "set_output_dir", None)
+            if callable(setter):
+                setter(output_dir)
 
     def add_user_message(self, content: str) -> None:
         """Add a user message to context."""
@@ -1163,7 +1128,10 @@ class ContextManager:
         role = str(message.get("role", "") or "").strip()
         if not role:
             return
-        self.messages.append(copy.deepcopy(message))
+        stored_message = copy.deepcopy(message)
+        if role == "tool":
+            stored_message = self._offload_large_tool_message(stored_message)
+        self.messages.append(stored_message)
         self._trim()
 
     def add_system_message(self, content: str) -> None:
@@ -1179,40 +1147,150 @@ class ContextManager:
         """Reset context and session state."""
         self.messages = []
         self.state = SessionState()
+        if self.memory_store is not None:
+            new_scope = getattr(self.memory_store, "new_scope", None)
+            if callable(new_scope):
+                new_scope()
+
+    def _memory_scope(self) -> str:
+        return str(getattr(self.memory_store, "session_id", "") or "")
+
+    def _archive_messages(self, messages: list[dict[str, Any]], *, kind: str) -> str:
+        if not messages or self.memory_store is None:
+            return ""
+        try:
+            return str(
+                self.memory_store.archive_messages(
+                    copy.deepcopy(messages),
+                    scope=self._memory_scope(),
+                    target=str(self.state.target or ""),
+                    kind=kind,
+                )
+                or ""
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Cold-memory archive failed; retaining hot history: %s", exc)
+            return ""
+
+    def _offload_large_tool_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        from vulnclaw.agent.token_counter import estimate_message_tokens
+
+        if self.memory_store is None or estimate_message_tokens(message) <= self.max_tokens // 2:
+            return message
+        record_id = self._archive_messages([message], kind="large_tool_result")
+        if not record_id:
+            return message
+        content = str(message.get("content", "") or "")
+        preview = content[:2000]
+        if len(content) > len(preview):
+            preview += "..."
+        message["content"] = (
+            f"[cold-memory:{record_id}] Large tool result archived. "
+            f"Use memory_search with query '{record_id}' for a bounded excerpt.\n{preview}"
+        )
+        return message
+
+    def _over_hot_limit(self, messages: list[dict[str, Any]]) -> bool:
+        from vulnclaw.agent.token_counter import estimate_tokens
+
+        return len(messages) > self.max_history or estimate_tokens(messages) > self.max_tokens
 
     def _trim(self) -> None:
-        """Trim old messages to stay within limit.
+        """Spill old messages to cold memory at the hot-history cap.
 
-        Instead of blindly dropping old messages, we compress them
-        into a summary to preserve key discoveries for multi-round loops.
+        Normal request-time compaction is driven by the token budget manager.
+        This remains a safety net for callers that keep adding messages without
+        issuing an LLM request.
         """
-        if len(self.messages) <= self.max_history:
+        if not self._over_hot_limit(self.messages):
             return
 
-        self.messages = self.messages[-self.max_history :]
+        from vulnclaw.agent.token_counter import group_conversation_turns, group_tool_exchanges
+
+        candidate = list(self.messages)
+        turns = group_conversation_turns(candidate)
+        archived_messages: list[dict[str, Any]] = []
+        while self._over_hot_limit(candidate) and len(turns) > 1:
+            archived = turns.pop(0)
+            archived_messages.extend(archived)
+            candidate = candidate[len(archived) :]
+
+        # A single automated subtask can itself contain hundreds of tool
+        # exchanges. Keep its user instruction as a hot anchor, then spill the
+        # oldest complete exchanges until the window is bounded.
+        exchanges = group_tool_exchanges(candidate)
+        while self._over_hot_limit(candidate) and len(exchanges) > 2:
+            remove_at = 1 if exchanges[0][0].get("role") == "user" else 0
+            archived = exchanges.pop(remove_at)
+            archived_messages.extend(archived)
+            candidate = [message for exchange in exchanges for message in exchange]
+
+        if not archived_messages:
+            return
+        if self.memory_store is not None and not self._archive_messages(
+            archived_messages, kind="history"
+        ):
+            return
+        self.messages = candidate
+
+    def search_cold_memory(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """Retrieve relevant archived turns only when explicitly requested."""
+        if self.memory_store is None:
+            return []
+        return self.memory_store.search_messages(
+            query,
+            limit=limit,
+            max_chars=self.search_max_chars,
+            scope=self._memory_scope(),
+            target=str(self.state.target or ""),
+        )
+
+    @staticmethod
+    def _is_context_digest_message(message: dict[str, Any]) -> bool:
+        content = str(message.get("content", "") or "")
+        return message.get("role") == "system" and content.startswith("[context digest")
+
+    def replace_history_with_digest(
+        self,
+        digest_message: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace older history with a prompt-safe context digest."""
+        cleaned_recent = [
+            copy.deepcopy(message)
+            for message in recent_messages
+            if isinstance(message, dict) and not self._is_context_digest_message(message)
+        ]
+        self.messages = [copy.deepcopy(digest_message), *cleaned_recent]
 
     def compact_messages(self, *, max_recent: int = 24, note: str = "") -> str:
-        """Explicitly compact older conversation messages for `/compact`."""
+        """Compact older conversation message groups for `/compact` or safety fallback."""
+        from vulnclaw.agent.token_counter import group_messages
 
-        if len(self.messages) <= max_recent:
+        groups = group_messages(self.messages)
+        if len(groups) <= max_recent:
             return "No compaction needed."
 
-        recent = self.messages[-max_recent:]
-        old = self.messages[:-max_recent]
+        recent_groups: list[list[dict[str, Any]]] = []
+        recent_count = 0
+        while groups and recent_count < max_recent:
+            group = groups.pop()
+            recent_groups.insert(0, group)
+            recent_count += len(group)
+        recent = [message for group in recent_groups for message in group]
+        old = [message for group in groups for message in group]
         summary = self._compress_messages(old) or "(older conversation omitted)"
         if note:
             summary = f"{note}\n{summary}"
-        self.messages = [
-            {"role": "system", "content": f"[manual compact summary]\n{summary}"},
-            *recent,
-        ]
+        digest = {"role": "system", "content": f"[context digest v1]\n{summary}"}
+        self.replace_history_with_digest(digest, recent)
         agent_state = getattr(self.state, "agent_state", None)
         if agent_state is not None:
-            agent_state.compact_summary = (
-                f"{agent_state.compact_summary}\n{summary}"
-                if agent_state.compact_summary
-                else summary
-            ).strip()
+            evidence_ids = [item.id for item in getattr(agent_state, "evidence", [])[-12:]]
+            if hasattr(agent_state, "update_context_digest"):
+                agent_state.update_context_digest(summary, evidence_ids)
+            else:
+                agent_state.compact_summary = summary
         return summary
 
     @staticmethod
@@ -1295,5 +1373,9 @@ class ContextManager:
 
         Used when context overflow causes repeated LLM errors.
         """
-        if len(self.messages) > max_messages:
-            self.messages = self.messages[-max_messages:]
+        original_limit = self.max_history
+        try:
+            self.max_history = max(1, max_messages)
+            self._trim()
+        finally:
+            self.max_history = original_limit

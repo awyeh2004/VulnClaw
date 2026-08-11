@@ -6,12 +6,14 @@
 # - 新增 prompt 状态机 (input / choice / confirm / chain)
 # - 新增 _run_pt_tui 函数提供 prompt_toolkit 应用主循环
 # - 旧 Rich Prompt 保留在 _prompt_* 函数中作为兼容
-# - 原 run_tui() 改为桥接至 tui_textual.run_tui_textual()
+# - [2026-08-07] Textual TUI (tui_textual.py) 已退役: run_tui() 改为启动 Rust ratatui 工作台
+#   (tui/, vulnclaw-tui-native), --once 保留文本 dashboard 用于 smoke test
 
 from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -30,6 +32,7 @@ from rich.text import Text
 
 from vulnclaw.config.schema import (
     BUILTIN_MCP_SERVERS,
+    ENGINE_CHOICES,
     MCPServerConfig,
     MCPTransportConfig,
 )
@@ -442,10 +445,46 @@ def run_tui(
     once: bool = False,
     initial_state: TuiState | None = None,
 ) -> None:
-    """Run the interactive terminal UI loop (Textual-powered)."""
-    # [修改] 原 Rich 主循环替换为 Textual 后端, 桥接至 tui_textual.run_tui_textual()
-    from vulnclaw.cli.tui_textual import run_tui_textual
-    run_tui_textual(launcher=launcher, once=once, initial_state=initial_state)
+    """Run the interactive terminal UI (Rust ratatui workbench).
+
+    The Textual TUI was retired in favour of the Rust ratatui workbench
+    (``tui/``). This entry point locates the ``vulnclaw-tui-native`` binary
+    (env ``VULNCLAW_TUI_BINARY`` -> PATH -> repository ``tui/target/release``)
+    and hands control over to it. ``--once`` keeps the legacy text dashboard
+    for smoke tests; ``initial_state`` is accepted for CLI compatibility and
+    rendered by the Rust workbench when present.
+    """
+    if once:
+        print(render_tui_home(initial_state), end="")
+        return
+
+    binary = _find_tui_binary()
+    if binary is None:
+        print(
+            "[!] VulnClaw TUI binary was not found. Build `tui/` (cargo build --release) "
+            "or set VULNCLAW_TUI_BINARY.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    sys.exit(subprocess.call([str(binary)]))
+
+
+def _find_tui_binary() -> Path | str | None:
+    """Locate the Rust TUI binary: env override, PATH, then the repo build."""
+    override = os.environ.get("VULNCLAW_TUI_BINARY")
+    if override:
+        return override
+    if binary := shutil.which("vulnclaw-tui-native"):
+        return binary
+    extension = ".exe" if os.name == "nt" else ""
+    repository_binary = (
+        Path(__file__).resolve().parents[2]
+        / "tui"
+        / "target"
+        / "release"
+        / f"vulnclaw-tui-native{extension}"
+    )
+    return repository_binary if repository_binary.exists() else None
 
 
 def _run_pt_tui(session: dict[str, Any]) -> Optional[str]:
@@ -2269,11 +2308,44 @@ def _edit_session_config(screen: Console, config):
         screen, "PoC language", ["python", "bash"], config.session.poc_language
     )
     config.session.engine = _prompt_choice_value(
-        screen, "Autonomous engine", ["solve", "team", "rounds"], config.session.engine
+        screen, "Autonomous engine", list(ENGINE_CHOICES), config.session.engine
     )
     config.session.max_rounds = _prompt_int_value(screen, "Max rounds", config.session.max_rounds)
     config.session.show_thinking = _prompt_bool_value(
         screen, "Show thinking", config.session.show_thinking
+    )
+    config.session.context_auto_compact = _prompt_bool_value(
+        screen, "Automatically compact context", config.session.context_auto_compact
+    )
+    config.session.context_compact_trigger_ratio = _prompt_float_value(
+        screen,
+        "Context compaction trigger ratio",
+        config.session.context_compact_trigger_ratio,
+    )
+    config.session.context_compact_target_ratio = _prompt_float_value(
+        screen,
+        "Context compaction target ratio",
+        config.session.context_compact_target_ratio,
+    )
+    config.session.context_recent_message_groups = _prompt_int_value(
+        screen,
+        "Recent message groups to retain",
+        config.session.context_recent_message_groups,
+    )
+    config.session.context_summary_max_tokens = _prompt_int_value(
+        screen,
+        "Context digest token budget",
+        config.session.context_summary_max_tokens,
+    )
+    config.session.context_output_reserve_tokens = _prompt_int_value(
+        screen,
+        "Context output token reserve (0 = automatic)",
+        config.session.context_output_reserve_tokens,
+    )
+    config.session.context_compaction_audit_enabled = _prompt_bool_value(
+        screen,
+        "Record context compaction audit events",
+        config.session.context_compaction_audit_enabled,
     )
     config.session.persistent_rounds_per_cycle = _prompt_int_value(
         screen, "Persistent rounds per cycle", config.session.persistent_rounds_per_cycle

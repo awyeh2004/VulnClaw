@@ -25,6 +25,7 @@ MAX_STORED_STEPS = 400
 MAX_STORED_PROGRESS_SIGNALS = 160
 MAX_STORED_PINNED_FACTS = 80
 MAX_STORED_CORRECTION_HINTS = 24
+MAX_STORED_CONTEXT_COMPACTIONS = 32
 OBSERVATION_ONLY_TOOLS = frozenset({"evidence_list", "evidence_view", "evidence_search"})
 
 _FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n\s'\"`]{1,200}\}")
@@ -252,6 +253,29 @@ class PinnedFact(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+class ContextDigest(BaseModel):
+    """Bounded durable memory produced by automatic context compaction."""
+
+    version: int = 1
+    summary: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class ContextCompactionEvent(BaseModel):
+    """Metadata-only record for one context compaction operation."""
+
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    purpose: str = ""
+    reason: str = ""
+    before_tokens: int = 0
+    after_tokens: int = 0
+    tool_tokens: int = 0
+    removed_message_groups: int = 0
+    retained_message_groups: int = 0
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class AgentState(BaseModel):
     """Durable state for the default model-led solve engine."""
 
@@ -275,6 +299,8 @@ class AgentState(BaseModel):
     tool_health: dict[str, ToolHealth] = Field(default_factory=dict)
     pending_questions: list[str] = Field(default_factory=list)
     compact_summary: str = ""
+    context_digest: ContextDigest = Field(default_factory=ContextDigest)
+    context_compactions: list[ContextCompactionEvent] = Field(default_factory=list)
     completion_rejections: list[str] = Field(default_factory=list)
     completed: bool = False
     complete_reason: str = ""
@@ -345,6 +371,9 @@ class AgentState(BaseModel):
         self.correction_hints = []
         self.tool_health = {}
         self.pending_questions = []
+        self.compact_summary = ""
+        self.context_digest = ContextDigest()
+        self.context_compactions = []
         self.completion_rejections = []
         self.completed = False
         self.complete_reason = ""
@@ -575,6 +604,42 @@ class AgentState(BaseModel):
         self.correction_hints.append(text)
         self.correction_hints = self.correction_hints[-MAX_STORED_CORRECTION_HINTS:]
 
+    def update_context_digest(self, summary: str, evidence_ids: list[str]) -> None:
+        """Persist the latest prompt-safe context digest."""
+        text = clip_text(summary.strip(), 14_000)
+        self.context_digest = ContextDigest(
+            summary=text,
+            evidence_ids=list(dict.fromkeys(evidence_ids))[-32:],
+        )
+        # Keep the legacy field populated for restored sessions and old callers.
+        self.compact_summary = text
+
+    def record_context_compaction(
+        self,
+        *,
+        purpose: str,
+        reason: str,
+        before_tokens: int,
+        after_tokens: int,
+        tool_tokens: int,
+        removed_message_groups: int,
+        retained_message_groups: int,
+        evidence_ids: list[str],
+    ) -> None:
+        self.context_compactions.append(
+            ContextCompactionEvent(
+                purpose=one_line(purpose, 80),
+                reason=one_line(reason, 160),
+                before_tokens=max(0, int(before_tokens)),
+                after_tokens=max(0, int(after_tokens)),
+                tool_tokens=max(0, int(tool_tokens)),
+                removed_message_groups=max(0, int(removed_message_groups)),
+                retained_message_groups=max(0, int(retained_message_groups)),
+                evidence_ids=list(dict.fromkeys(evidence_ids))[-32:],
+            )
+        )
+        self.context_compactions = self.context_compactions[-MAX_STORED_CONTEXT_COMPACTIONS:]
+
     def record_verified_claim(self, claim: str, evidence_ids: list[str]) -> VerifiedClaim:
         self.claim_seq += 1
         record = VerifiedClaim(
@@ -754,7 +819,10 @@ class AgentState(BaseModel):
             f"Goal: {self.goal or '(unset)'}",
             f"Origin: {self.origin or '(unset)'}",
         ]
-        if self.compact_summary:
+        digest = getattr(self, "context_digest", None)
+        if digest and digest.summary:
+            sections.append(f"\nContext digest:\n{clip_text(digest.summary, 1800)}")
+        elif self.compact_summary:
             sections.append(f"\nManual compact summary:\n{clip_text(self.compact_summary, 1800)}")
         if self.verified_claims:
             sections.append("\nVerified claims:")

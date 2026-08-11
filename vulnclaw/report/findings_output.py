@@ -221,6 +221,8 @@ def _build_result_properties(finding: VulnerabilityFinding) -> dict[str, Any]:
         props["impact"] = finding.impact
     if finding.skill_provenance:
         props["skill_provenance"] = finding.skill_provenance
+    if finding.subagent_provenance:
+        props["subagent_provenance"] = finding.subagent_provenance
     if finding.evidence_refs:
         props["evidence_refs"] = [ref.model_dump(mode="json") for ref in finding.evidence_refs]
     return props

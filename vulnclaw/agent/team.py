@@ -167,11 +167,12 @@ async def run_team_pentest(
     stream_sink: Any = None,
     on_event: Callable[[str, dict], None] | None = None,
 ) -> TeamRunResult:
-    """Run a bounded adaptive team plan against the shared session state."""
-    direction_limit = max_directions if max_directions is not None else max_intents
-    if direction_limit is None:
-        direction_limit = 3
+    """Run a bounded adaptive team plan against the shared session state.
 
+    ``max_directions`` / ``max_intents`` are accepted for call-site compatibility
+    (the model-led solver no longer plans research directions) and are not routed
+    anywhere; ``max_parallel`` is the real fan-out control.
+    """
     target = target or root_agent.session_state.target or user_input
     root_agent.session_state.target = target
     _seed_agent_state(root_agent, origin=target, goal=user_input)
@@ -207,7 +208,6 @@ async def run_team_pentest(
                         agent_factory=agent_factory,
                         target=target,
                         max_steps=step_budget,
-                        max_directions=direction_limit,
                         max_tool_rounds=max_tool_rounds,
                         stream_sink=stream_sink,
                         on_event=on_event,
@@ -301,7 +301,6 @@ async def _run_team_step(
     agent_factory: AgentFactory,
     target: str,
     max_steps: int,
-    max_directions: int,
     max_tool_rounds: int,
     stream_sink: Any = None,
     on_event: Callable[[str, dict], None] | None = None,
@@ -316,7 +315,6 @@ async def _run_team_step(
             target=target,
             goal=step.done_when,
             max_steps=max_steps,
-            max_directions=max_directions,
             max_tool_rounds=max_tool_rounds,
             stream_sink=stream_sink,
             on_event=on_event,

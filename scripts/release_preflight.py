@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument("--build", action="store_true", help="Also build dist artifacts after tests and typechecks")
     args = parser.parse_args()
 
-    run_step("version-check", [sys.executable, "-m", "pytest", "-q", "tests/test_release.py"])
+    run_step("version-check", [sys.executable, "-m", "pytest", "-q", "tests/meta/test_release.py"])
     run_step("backend-tests", [sys.executable, "-m", "pytest", "-q"])
     npm_cmd = shutil.which("npm") or shutil.which("npm.cmd")
     if not npm_cmd:

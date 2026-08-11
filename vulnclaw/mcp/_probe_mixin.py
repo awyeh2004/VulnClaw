@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -196,7 +195,7 @@ class ProbeMixin:
                 url, headers=headers, timeout=connect_s, sse_read_timeout=read_s
             ) as (read_stream, write_stream, _get_session_id):
                 async with ClientSession(
-                    read_stream, write_stream, read_timeout_seconds=timedelta(seconds=read_s)
+                    read_stream, write_stream, read_timeout_seconds=read_s
                 ) as session:
                     await session.initialize()
                     tools = await session.list_tools()
@@ -226,7 +225,7 @@ class ProbeMixin:
         try:
             async with sse_client(url) as (read_stream, write_stream):
                 async with ClientSession(
-                    read_stream, write_stream, read_timeout_seconds=timedelta(seconds=read_s)
+                    read_stream, write_stream, read_timeout_seconds=read_s
                 ) as session:
                     await session.initialize()
                     tools = await session.list_tools()

@@ -23,6 +23,47 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
+_SUBAGENT_ENV_FIELDS: tuple[tuple[str, str, type], ...] = (
+    ("leaf_timeout_seconds", "VULNCLAW_SUBAGENT_LEAF_TIMEOUT_SECONDS", float),
+    ("group_timeout_seconds", "VULNCLAW_SUBAGENT_GROUP_TIMEOUT_SECONDS", float),
+    (
+        "finalization_timeout_seconds",
+        "VULNCLAW_SUBAGENT_FINALIZATION_TIMEOUT_SECONDS",
+        float,
+    ),
+    ("max_background_groups", "VULNCLAW_SUBAGENT_MAX_BACKGROUND_GROUPS", int),
+    (
+        "max_concurrent_leaf_total",
+        "VULNCLAW_SUBAGENT_MAX_CONCURRENT_LEAF_TOTAL",
+        int,
+    ),
+    (
+        "max_concurrent_leaf_per_group",
+        "VULNCLAW_SUBAGENT_MAX_CONCURRENT_LEAF_PER_GROUP",
+        int,
+    ),
+    ("max_leaf_per_group", "VULNCLAW_SUBAGENT_MAX_LEAF_PER_GROUP", int),
+    ("max_waves_per_group", "VULNCLAW_SUBAGENT_MAX_WAVES_PER_GROUP", int),
+    ("max_steps_per_leaf", "VULNCLAW_SUBAGENT_MAX_STEPS_PER_LEAF", int),
+    ("leaf_max_tool_rounds", "VULNCLAW_SUBAGENT_LEAF_MAX_TOOL_ROUNDS", int),
+    ("result_max_chars", "VULNCLAW_SUBAGENT_RESULT_MAX_CHARS", int),
+    (
+        "max_model_tokens_per_solve",
+        "VULNCLAW_SUBAGENT_MAX_MODEL_TOKENS_PER_SOLVE",
+        int,
+    ),
+    (
+        "max_model_tokens_per_group",
+        "VULNCLAW_SUBAGENT_MAX_MODEL_TOKENS_PER_GROUP",
+        int,
+    ),
+    (
+        "merge_max_evidence_per_group",
+        "VULNCLAW_SUBAGENT_MERGE_MAX_EVIDENCE_PER_GROUP",
+        int,
+    ),
+)
+
 # ── Paths ──────────────────────────────────────────────────────────
 
 CONFIG_DIR = Path(os.environ.get("VULNCLAW_CONFIG_DIR", str(Path.home() / ".vulnclaw")))
@@ -177,6 +218,22 @@ def _merge_config(base: VulnClawConfig, raw: dict[str, Any]) -> VulnClawConfig:
     """Merge raw dict into existing config, preserving unset defaults."""
     data = base.model_dump(mode="json")
 
+    # Context compaction was initially exposed under solve-specific names but
+    # never wired into runtime behavior. Preserve explicit legacy settings when
+    # users upgrade, while allowing the new all-call-path settings to win.
+    raw = dict(raw)
+    raw_session = raw.get("session")
+    if isinstance(raw_session, dict):
+        session = dict(raw_session)
+        if "context_auto_compact" not in session and "solve_auto_compact" in session:
+            session["context_auto_compact"] = session["solve_auto_compact"]
+        if (
+            "context_compact_trigger_ratio" not in session
+            and "solve_compact_trigger_ratio" in session
+        ):
+            session["context_compact_trigger_ratio"] = session["solve_compact_trigger_ratio"]
+        raw["session"] = session
+
     # Deep merge
     _deep_merge(data, raw)
 
@@ -205,6 +262,9 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
         Safety:     PYTHON_EXECUTE_ENABLED, PYTHON_EXECUTE_RESTRICTED, PYTHON_EXECUTE_MODE,
                     PYTHON_EXECUTE_MAX_LINES, PYTHON_EXECUTE_SHOW_WARNING,
                     PYTHON_EXECUTE_MAX_OUTPUT_CHARS, PYTHON_EXECUTE_AUDIT_ENABLED
+        Subagent:   ENABLED, MAX_TASKS_PER_CALL, MAX_CONCURRENT, MAX_STEPS_PER_CHILD,
+                    CHILD_MAX_TOOL_ROUNDS, MAX_TOTAL_PER_SOLVE, MAX_DEPTH,
+                    MERGE_MAX_EVIDENCE_PER_CHILD, RESULT_MAX_CHARS
     """
     # ── LLM ──────────────────────────────────────────────────────────
     if v := os.environ.get("VULNCLAW_LLM_API_KEY"):
@@ -251,6 +311,27 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
             config.session.max_rounds = int(v)
     if v := os.environ.get("VULNCLAW_SESSION_SHOW_THINKING"):
         config.session.show_thinking = v.lower() in ("1", "true", "yes", "on")
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_AUTO_COMPACT"):
+        config.session.context_auto_compact = v.lower() in ("1", "true", "yes", "on")
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_COMPACT_TRIGGER_RATIO"):
+        with suppress(ValueError):
+            config.session.context_compact_trigger_ratio = float(v)
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_COMPACT_TARGET_RATIO"):
+        with suppress(ValueError):
+            config.session.context_compact_target_ratio = float(v)
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_RECENT_MESSAGE_GROUPS"):
+        with suppress(ValueError):
+            config.session.context_recent_message_groups = int(v)
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_SUMMARY_MAX_TOKENS"):
+        with suppress(ValueError):
+            config.session.context_summary_max_tokens = int(v)
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_OUTPUT_RESERVE_TOKENS"):
+        with suppress(ValueError):
+            config.session.context_output_reserve_tokens = int(v)
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_COMPACTION_MODE"):
+        config.session.context_compaction_mode = v
+    if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_COMPACTION_AUDIT_ENABLED"):
+        config.session.context_compaction_audit_enabled = v.lower() in ("1", "true", "yes", "on")
     if v := os.environ.get("VULNCLAW_SESSION_REPL_PARALLEL_ENABLED"):
         config.session.repl_parallel_enabled = v.lower() in ("1", "true", "yes", "on")
     if v := os.environ.get("VULNCLAW_SESSION_REPL_PARALLEL_AGENTS"):
@@ -313,6 +394,24 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
     if v := os.environ.get("VULNCLAW_SAFETY_PYTHON_EXECUTE_AUDIT_ENABLED"):
         config.safety.python_execute_audit_enabled = v.lower() in ("1", "true", "yes", "on")
 
+    # ── Model-driven sub-agents ──────────────────────────────────────
+    if v := os.environ.get("VULNCLAW_SUBAGENT_ENABLED"):
+        config.subagent.enabled = v.lower() in ("1", "true", "yes", "on")
+    for field, env_name, caster in _SUBAGENT_ENV_FIELDS:
+        value = os.environ.get(env_name)
+        if not value:
+            continue
+        try:
+            setattr(config.subagent, field, caster(value))
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Ignoring invalid %s=%r (%s); keeping %s=%s",
+                env_name,
+                value,
+                exc,
+                field,
+                getattr(config.subagent, field),
+            )
     # ── Recon: space-mapping API keys ────────────────────────────────
     # Accept both the short form (FOFA_KEY) and the prefixed form
     # (VULNCLAW_RECON_FOFA_KEY); short form wins if both are set.
