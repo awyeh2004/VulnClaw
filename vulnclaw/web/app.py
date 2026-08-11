@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-from vulnclaw.web.auth import AuthMiddleware
+from vulnclaw.web.auth import AuthMiddleware, attach_session_cookie, verify_token
 from vulnclaw.web.schemas import (
     ConfigUpdateRequest,
     ProviderModelsRequest,
@@ -37,16 +37,23 @@ from vulnclaw.web.stream import encode_sse
 from vulnclaw.web.task_manager import WebTaskManager
 
 try:
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import (
+        FileResponse,
+        JSONResponse,
+        RedirectResponse,
+        StreamingResponse,
+    )
     from starlette.middleware.base import BaseHTTPMiddleware
 
     FASTAPI_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised in CLI dry-run and tests
     FastAPI = None  # type: ignore[assignment]
     HTTPException = RuntimeError  # type: ignore[assignment]
+    Request = None  # type: ignore[assignment]
     FileResponse = None  # type: ignore[assignment]
     JSONResponse = None  # type: ignore[assignment]
+    RedirectResponse = None  # type: ignore[assignment]
     StreamingResponse = None  # type: ignore[assignment]
     BaseHTTPMiddleware = object  # type: ignore[assignment,misc]
     FASTAPI_AVAILABLE = False
@@ -81,6 +88,24 @@ def resolve_web_asset(path: str) -> Path:
     return resolve_web_index()
 
 
+def _serve_spa(request, file_path: Path):  # type: ignore[no-untyped-def]
+    """Serve a frontend file, trading a ``?token=`` query for a session cookie.
+
+    The browser UI cannot send a bearer header (see :mod:`vulnclaw.web.auth`),
+    so opening the printed ``/?token=<token>`` URL once is what authenticates
+    the session. The token is redirected straight back out of the address bar
+    so it does not linger in history or leak through ``Referer``.
+    """
+    token = request.query_params.get("token", "")
+    if token and verify_token(token):
+        response = RedirectResponse(
+            str(request.url.remove_query_params("token")), status_code=303
+        )
+        attach_session_cookie(response, token)
+        return response
+    return FileResponse(file_path)
+
+
 @contextmanager
 def _report_fs_errors():
     """Map report filesystem errors onto HTTP responses (missing -> 404, denied -> 403)."""
@@ -99,7 +124,7 @@ def create_app():
             "FastAPI is not installed. Install the web extra first: pip install vulnclaw[web]"
         )
 
-    app = FastAPI(title="VulnClaw Web UI", version="0.3.6")
+    app = FastAPI(title="VulnClaw Web UI", version="0.3.8")
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(AuthMiddleware)
 
@@ -245,14 +270,14 @@ def create_app():
         return {"status": "ok", "path": path}
 
     @app.get("/")
-    async def index():
-        return FileResponse(resolve_web_index())
+    async def index(request: Request):
+        return _serve_spa(request, resolve_web_index())
 
     @app.get("/{full_path:path}")
-    async def frontend_routes(full_path: str):
+    async def frontend_routes(full_path: str, request: Request):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
-        return FileResponse(resolve_web_asset(full_path))
+        return _serve_spa(request, resolve_web_asset(full_path))
 
     return app
 

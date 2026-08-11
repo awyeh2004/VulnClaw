@@ -62,6 +62,63 @@ Configuration is supplied via environment variables (see `.env.example`) and/or
 the persisted `config.yaml` written into the `/data` volume. Environment
 variables override the config file at startup.
 
+## Running with a local model (Ollama)
+
+VulnClaw talks to the model through the OpenAI Chat Completions API, and Ollama
+exposes exactly that, so a local model needs configuration only — no code
+changes. `ollama` is a built-in provider preset.
+
+Run Ollama on your **host** (not in this container) and make it reachable:
+
+```bash
+# Bind to all interfaces so the container can reach it (default is loopback).
+OLLAMA_HOST=0.0.0.0 ollama serve
+
+# Pull a TOOL-CAPABLE model — VulnClaw drives everything through function
+# calls, so a model without tool support will not work. Good choices:
+# llama3.1, qwen2.5, mistral-nemo. Prefer 14B+ for the multi-step reasoning.
+ollama pull llama3.1
+```
+
+Point the container at it via `.env` (see the Ollama block in `.env.example`):
+
+```bash
+VULNCLAW_LLM_PROVIDER=ollama
+VULNCLAW_LLM_BASE_URL=http://host.docker.internal:11434/v1
+VULNCLAW_LLM_API_KEY=ollama          # any placeholder; Ollama ignores it
+VULNCLAW_LLM_MODEL=llama3.1
+```
+
+and give the container the host-gateway alias so `host.docker.internal`
+resolves:
+
+```yaml
+services:
+  vulnclaw:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+Three things that will otherwise bite you:
+
+- **`host.docker.internal`, not `localhost`.** Inside the container `localhost`
+  is the container itself, so `localhost:11434` never reaches host Ollama.
+- **Raise the context window.** Ollama defaults `num_ctx` to a few thousand
+  tokens and silently truncates above that, which wrecks the agent's long
+  prompts. Bake a larger window into the model, e.g. a `Modelfile` with
+  `PARAMETER num_ctx 32768`, then `ollama create`.
+- **Tool support is mandatory.** Non-tool models produce no usable actions.
+
+Verify the endpoint is reachable from the container before running:
+
+```bash
+docker compose exec vulnclaw \
+  python -c "import socket; socket.create_connection(('host.docker.internal', 11434), 3); print('reachable')"
+```
+
+Note: the Web UI's "fetch models" button expects an API key, so with a keyless
+Ollama it won't auto-list models — just type the model name.
+
 ## Scanning a target from inside the container
 
 `localhost` / `127.0.0.1` inside the container refers to the **container

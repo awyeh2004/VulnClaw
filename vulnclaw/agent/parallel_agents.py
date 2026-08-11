@@ -124,6 +124,10 @@ async def run_parallel_pentest(
     if graph is not None and graph.root_id is None:
         graph.create_root(role="root", task_summary=user_input)
 
+    # NOTE: ``auto_pentest`` only returns a populated list under the ``rounds``
+    # engine; ``solve``/``team`` persist their work on ``session_state`` and
+    # return []. That is fine here — surface extraction below reads
+    # ``session_state``, not this return value; ``root_results`` is bookkeeping.
     summary.root_results = await root_agent.auto_pentest(
         user_input,
         target=target,

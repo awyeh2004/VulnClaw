@@ -6,7 +6,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from vulnclaw.config.settings import SESSIONS_DIR, ensure_dirs
+from vulnclaw.config.settings import SESSIONS_DIR, ensure_dirs, load_config
+from vulnclaw.i18n import init_i18n
 from vulnclaw.report.generator import generate_report_from_target_state
 from vulnclaw.target_state.store import load_target_state
 from vulnclaw.web.schemas import ReportContentView
@@ -50,6 +51,11 @@ def generate_target_report(
 ) -> str:
     """Generate a report from target state and return the saved path."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    # The report generator picks Chinese vs English from current_lang(). Unlike
+    # the scan task path, this standalone endpoint has no ambient i18n state, so
+    # initialize it from the saved config.session.language before generating —
+    # otherwise the report always falls back to auto-detection (defaults to zh).
+    init_i18n(config=load_config())
     raw = load_target_state(target)
     if not raw:
         raise FileNotFoundError(f"Target state not found: {target}")

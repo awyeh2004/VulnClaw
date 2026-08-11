@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vulnclaw"
-version = "0.3.6"
+version = "0.3.8"
 description = "AI-powered penetration testing CLI tool for cybersecurity professionals"
 readme = "README.md"
 license = { text = "MIT" }
@@ -14,7 +14,6 @@ authors = [
 ]
 keywords = ["pentest", "security", "ai", "mcp", "cli", "vulnerability", "red-team"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -22,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
 ]
 dependencies = [
@@ -35,7 +35,6 @@ dependencies = [
     "pyyaml>=6.0",
     "toml>=0.10.0",
     "jinja2>=3.1.0",
-    "textual>=0.40.0",
     # ── 沙箱依赖（python_execute 运行时）──────────────────────────────
     # LLM 在 python_execute 中可直接 import 以下库
     "beautifulsoup4>=4.12.0",
@@ -47,6 +46,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.4.0",
     "build>=1.2.0",
 ]
@@ -70,9 +70,9 @@ traffic = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Unclecheng-li/VulnClaw"
-Repository = "https://github.com/Unclecheng-li/VulnClaw"
-Issues = "https://github.com/Unclecheng-li/VulnClaw/issues"
+Homepage = "https://github.com/Netw0rkNoob/VulnClaw"
+Repository = "https://github.com/Netw0rkNoob/VulnClaw"
+Issues = "https://github.com/Netw0rkNoob/VulnClaw/issues"
 
 [project.scripts]
 vulnclaw = "vulnclaw.cli.main:app"
@@ -126,3 +126,22 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Coverage is opt-in to keep normal runs fast:
+#   pytest --cov=vulnclaw --cov-report=term-missing
+[tool.coverage.run]
+source = ["vulnclaw"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# A floor below current coverage (~74%) so a large regression fails CI without
+# being brittle; raise it as coverage climbs.
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "^\\s*\\.\\.\\.\\s*$",
+]

@@ -22,6 +22,7 @@ from vulnclaw.agent.reasoning_state import (
 )
 from vulnclaw.agent.reflexion import FailureCategory, classify_failure
 from vulnclaw.agent.runtime_state import AgentResult, PersistentCycleResult
+from vulnclaw.config.schema import resolve_engine
 from vulnclaw.i18n import _
 
 RECON_MIN_ROUNDS = 8
@@ -346,7 +347,7 @@ async def persistent_pentest(
                 rendered = agent.context.state.task_constraints.to_prompt_block()
                 if rendered:
                     constraints_block = f"\n\n{rendered}"
-            selected_engine = getattr(agent.config.session, "engine", "solve")
+            selected_engine = resolve_engine(agent.config)
             results = await agent.auto_pentest(
                 user_input=(
                     _(

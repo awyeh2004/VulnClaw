@@ -37,15 +37,18 @@ from vulnclaw.agent.kb_context import build_kb_context
 from vulnclaw.agent.llm_client import StreamSink, call_llm
 from vulnclaw.agent.loop_controller import auto_pentest as run_auto_pentest
 from vulnclaw.agent.loop_controller import persistent_pentest as run_persistent_pentest
+from vulnclaw.agent.memory import MemoryStore
 from vulnclaw.agent.prompt_context import build_round_context, generate_attack_summary
 from vulnclaw.agent.recon_tracker import update_recon_dimension_completion
 from vulnclaw.agent.roles import role_prompt_block
 from vulnclaw.agent.runtime_state import AgentResult, PersistentCycleResult, RuntimeState
 from vulnclaw.agent.skill_context import apply_skill_selection
+from vulnclaw.agent.subagent.models import SubagentContext
 from vulnclaw.agent.system_prompt import build_dynamic_system_prompt
 from vulnclaw.agent.tool_call_manager import safe_parse_tool_args
-from vulnclaw.config.schema import VulnClawConfig
+from vulnclaw.config.schema import VulnClawConfig, resolve_engine
 from vulnclaw.config.settings import make_openai_client
+from vulnclaw.i18n import _
 from vulnclaw.target_state.store import save_target_state
 
 # Optional KB integration — gracefully degrade if KB data is unavailable
@@ -62,8 +65,21 @@ class AgentCore:
     def __init__(self, config: VulnClawConfig, mcp_manager: Any = None) -> None:
         self.config = config
         self.mcp_manager = mcp_manager
-        self.context = ContextManager()
+        memory_dir = config.session.output_dir / "memory"
+        self.context = ContextManager(
+            max_history=config.session.context_hot_max_messages,
+            max_tokens=config.session.context_hot_max_tokens,
+            search_max_chars=config.session.memory_search_max_chars,
+            memory_store=MemoryStore(
+                store_dir=memory_dir,
+                archive_max_bytes=config.session.memory_archive_max_bytes,
+                archive_max_files=config.session.memory_archive_max_files,
+            ),
+        )
+        # Wire the vault to the run output directory so archiving can persist.
+        self.context.vault_output_dir = config.session.output_dir
         self.active_role: str | None = None
+        self._subagent_ctx = SubagentContext()
         self._client = None
         # Failover key pool: prefer llm.api_keys, else the single llm.api_key.
         self._key_pool = config.llm.key_pool()
@@ -75,6 +91,11 @@ class AgentCore:
         self._kb_context_cache: dict[Any, str] = {}
         self._finding_parser = FindingParser(self.context, self.runtime)
         self._report_kb_status()
+
+    def _child_factory(self) -> "AgentCore":
+        """Build an isolated child; subclasses may override this explicit seam."""
+
+        return AgentCore(self.config, self.mcp_manager)
 
     def _report_kb_status(self) -> None:
         """Print the knowledge-base backend status once at startup."""
@@ -103,14 +124,11 @@ class AgentCore:
         if RetrieverStatus is None:
             return
         if status == RetrieverStatus.CHROMADB_ACTIVE:
-            console.print("[green]✓ 知识库已启用 (ChromaDB)[/green]")
+            console.print(f"[green]{_('agent.kb_enabled')}[/green]")
         elif status == RetrieverStatus.KEYWORD_FALLBACK:
-            console.print(
-                "[yellow]⚠ 知识库已降级为关键词模式 "
-                "(chromadb 未安装，运行 pip install vulnclaw[kb] 启用语义搜索)[/yellow]"
-            )
+            console.print(f"[yellow]{_('agent.kb_fallback')}[/yellow]")
         else:
-            console.print("[red]✗ 知识库已禁用 (无可用数据)[/red]")
+            console.print(f"[red]{_('agent.kb_disabled')}[/red]")
 
     def _maybe_auto_save_session(self) -> None:
         """Persist session state when auto-save is enabled."""
@@ -146,6 +164,16 @@ class AgentCore:
         self._client = None
         self._key_pool = config.llm.key_pool()
         self._key_index = 0
+        context = getattr(self, "context", None)
+        if context is not None:
+            context.max_history = config.session.context_hot_max_messages
+            context.max_tokens = config.session.context_hot_max_tokens
+            context.search_max_chars = config.session.memory_search_max_chars
+            memory_store = getattr(context, "memory_store", None)
+            if memory_store is not None:
+                memory_store.archive_max_bytes = config.session.memory_archive_max_bytes
+                memory_store.archive_max_files = config.session.memory_archive_max_files
+            context._trim()
 
     def _reset_runtime_state(
         self,
@@ -154,6 +182,12 @@ class AgentCore:
     ) -> None:
         """Reset per-run runtime state to avoid cross-run contamination."""
         user_lower = user_input.lower() if user_input else ""
+        # A persistent-mode cycle re-enters this reset every cycle for the SAME
+        # engagement (its prompt carries the "[Persistent Cycle N]" marker). Such
+        # a cycle is a continuation, not a fresh task, so accumulated per-target
+        # progress (recon dimensions, dimension-4 activation) must survive the
+        # reset — mirroring how reflexion memory is restored below.
+        is_persistent_cycle = bool(user_input and "[Persistent Cycle " in user_input)
         existing_constraints = self.context.state.task_constraints
         parsed_constraints = (
             extract_task_constraints(user_input)
@@ -161,8 +195,7 @@ class AgentCore:
             else self.context.state.task_constraints
         )
         if (
-            user_input
-            and "[Persistent Cycle " in user_input
+            is_persistent_cycle
             and parsed_constraints.allowed_ports == []
             and parsed_constraints.blocked_ports == []
             and parsed_constraints.allowed_actions == []
@@ -187,27 +220,30 @@ class AgentCore:
         if self.mcp_manager and hasattr(self.mcp_manager, "set_task_constraints"):
             self.mcp_manager.set_task_constraints(self.context.state.task_constraints)
 
-        self.context.state.recon_dimensions_completed = {
-            "server": False,
-            "website": False,
-            "domain": False,
-            "personnel": False,
-        }
-        social_engineering_keywords = [
-            "社会工程",
-            "社工",
-            "人员信息",
-            "作者追踪",
-            "人物追踪",
-            "人物画像",
-            "osint",
-            "情报",
-            "作者",
-            "调查",
-        ]
-        self.context.state.recon_dimension4_active = self.runtime.is_recon_phase and any(
-            kw in user_lower for kw in social_engineering_keywords
-        )
+        # Preserve accumulated recon progress across persistent cycles; only a
+        # genuinely fresh task (or first cycle) starts the four dimensions over.
+        if not is_persistent_cycle:
+            self.context.state.recon_dimensions_completed = {
+                "server": False,
+                "website": False,
+                "domain": False,
+                "personnel": False,
+            }
+            social_engineering_keywords = [
+                "社会工程",
+                "社工",
+                "人员信息",
+                "作者追踪",
+                "人物追踪",
+                "人物画像",
+                "osint",
+                "情报",
+                "作者",
+                "调查",
+            ]
+            self.context.state.recon_dimension4_active = self.runtime.is_recon_phase and any(
+                kw in user_lower for kw in social_engineering_keywords
+            )
         # Re-bind finding parser to the new runtime object
         self._finding_parser = FindingParser(self.context, self.runtime)
 
@@ -490,8 +526,16 @@ class AgentCore:
         stream_sink: Optional["StreamSink"] = None,
         engine: Optional[str] = None,
     ) -> list[AgentResult]:
-        """Autonomous penetration test loop."""
-        selected_engine = engine or getattr(self.config.session, "engine", "solve")
+        """Autonomous penetration test loop.
+
+        Return-value contract (important for callers): only the legacy ``rounds``
+        engine returns a populated ``list[AgentResult]`` — one per round. The
+        ``solve`` and ``team`` engines persist their outcome on
+        ``self.session_state`` (findings, steps, agent_state) and return an
+        **empty list**. Callers that need results must read ``session_state``
+        rather than the return value; those (like the orchestrator) already do.
+        """
+        selected_engine = resolve_engine(self.config, engine)
         if selected_engine == "solve":
             await self.solve(
                 user_input,
@@ -532,13 +576,11 @@ class AgentCore:
         *,
         goal: Optional[str] = None,
         max_steps: int = 80,
-        max_directions: int | None = None,
-        max_intents: int | None = None,
         max_tool_rounds: int = 6,
         stream_sink: Optional["StreamSink"] = None,
         on_event: Optional[Callable[[str, dict], None]] = None,
     ) -> Any:
-        """运行模型主导 solve；旧方向/intent 参数仅作调用兼容。"""
+        """运行模型主导 solve。"""
         from vulnclaw.agent.solver import solve as run_solve
 
         detected_target = target or self._detect_target(user_input)
@@ -554,8 +596,6 @@ class AgentCore:
             origin=origin,
             goal=resolved_goal,
             max_steps=max_steps,
-            max_directions=max_directions,
-            max_intents=max_intents,
             max_tool_rounds=max_tool_rounds,
             stream_sink=stream_sink,
             on_event=on_event,
@@ -652,7 +692,25 @@ class AgentCore:
         """Build OpenAI function calling schema from MCP tools + built-in tools."""
         user_input = getattr(self.runtime, "auto_skill_input", "") or ""
         allowed = _infer_allowed_tools(user_input)
-        return build_openai_tools(self.mcp_manager, active_role=self.active_role, allowed_tools=allowed)
+        cfg = getattr(self.config, "subagent", None)
+        session_kind = str(
+            getattr(getattr(self.context, "state", None), "session_kind", "")
+            or ""
+        )
+        include_subagent_tool = bool(
+            cfg
+            and cfg.enabled
+            and (
+                self._subagent_ctx.depth == 0
+                or session_kind == "group_leader"
+            )
+        )
+        return build_openai_tools(
+            self.mcp_manager,
+            active_role=self.active_role,
+            allowed_tools=allowed,
+            include_subagent_tool=include_subagent_tool,
+        )
 
     # ── Python code executor ─────────────────────────────────────────
 

@@ -20,6 +20,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from vulnclaw.i18n import I18nLoader, _
+
 # ──────────────────────────────────────────────────────────────
 # Enums
 # ──────────────────────────────────────────────────────────────
@@ -51,7 +53,6 @@ class PentestPhase(str, Enum):
             if normalized in {phase.value, phase.name.lower()}:
                 return phase
 
-        from vulnclaw.i18n import I18nLoader
 
         for lang in ("zh", "en"):
             translator = I18nLoader(lang)
@@ -96,11 +97,9 @@ def phase_display_name(
 
     key = f"phase.{canonical_id}"
     if lang is None:
-        from vulnclaw.i18n import _
 
         return _(key)
 
-    from vulnclaw.i18n import I18nLoader
 
     return I18nLoader(lang).t(key)
 
@@ -169,6 +168,10 @@ class VulnerabilityFinding(BaseModel):
     # ★ Optional skill-loading provenance (reserved by the skill-loading PRD);
     # mapped into finding metadata / SARIF ``properties`` when present.
     skill_provenance: Optional[dict[str, Any]] = Field(default=None)
+    subagent_provenance: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Owning sub-agent task identity when this finding was merged",
+    )
     poc_script: Optional[str] = Field(default=None, description="Generated PoC script path")
     evidence_level: str = Field(default="L1", description="L1-L4 evidence strength")
     lifecycle_status: str = Field(

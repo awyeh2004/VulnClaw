@@ -8,7 +8,8 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI_Compatible-green)](https://platform.openai.com/)
 [![MCP](https://img.shields.io/badge/Toolchain-MCP-orange)](https://modelcontextprotocol.io/)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.3.6-blueviolet)](https://pypi.org/project/vulnclaw/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.3.8-blueviolet)](https://pypi.org/project/vulnclaw/)
+[![codecov](https://codecov.io/gh/Netw0rkNoob/VulnClaw/branch/main/graph/badge.svg)](https://codecov.io/gh/Netw0rkNoob/VulnClaw)
 [![Security](https://img.shields.io/badge/Scope-Authorized_Only-red)](#-security-notice)
 [![AtomGitStars](https://atomgit.com/Unclecheng-li/VulnClaw/star/badge.svg)](https://atomgit.com/Unclecheng-li/VulnClaw)
 <picture>
@@ -50,7 +51,7 @@ VulnClaw executes:
 
 <img width="1148" height="642" alt="image" src="https://github.com/user-attachments/assets/576e1cf6-25da-4969-864b-40e77d020dbf" />
 
-<img width="2529" height="1136" alt="image" src="https://github.com/user-attachments/assets/dd49dc35-4082-4328-a521-8b7a92676e70" />
+<img width="2530" height="1153" alt="image" src="https://github.com/user-attachments/assets/8825f92f-eb70-433d-89e4-eec313b6ec0c" />
 
 Suitable for authorized pentests, CTF competitions, security training, and red team operations.
 
@@ -59,11 +60,15 @@ Suitable for authorized pentests, CTF competitions, security training, and red t
 ## Features
 
 - **Model-Led Solver Engine (default)** — Claude Code/Codex-style autonomous loop: the model decides the next action, tool usage, completion, user questions, or no-path termination
+- **Parallel Sub-Agent Fan-Out** — The model can spawn multiple independent sub-agents in a single turn via `spawn_subagents`; each sub-agent inherits target constraints and evidence, runs concurrently with its own lifecycle budget; sub-evidence is merged back into the parent state with unified `eNNN` renumbering
+- **Cold/Hot Memory Separation** — Hot conversation context retains only recent complete tool-exchange groups (default 48 messages / 32K tokens); older messages are archived to rotating JSONL shards; `memory_search` retrieves relevant archived turns on demand
+- **Unified Context Budget & Structured Compaction** — All LLM call paths go through `prepare_context()`, which estimates tokens (including tool schemas), triggers structured compaction at 70% of usable context, and generates a deterministic `[context digest v1]` summary (target/scope/verified facts/evidence references) — no LLM free-form summarization needed
+- **TUI Sub-Agent Monitor** — Real-time panel showing each sub-agent's role, status, step count, and latest progress via a private JSON-line protocol
 - **AgentState Evidence Memory** — Tool results are stored in `AgentState.evidence` with complete raw text preserved; active context receives bounded high-signal previews by default, while `evidence_search` / `evidence_view` revisit raw evidence on demand
 - **Lightweight Correction Layer** — Records repeated calls, degraded tools, timing, and new observations; repeated reads of the same evidence range are suppressed and evidence-only stalls trigger a stall guard without restoring the old stage planner
 - **Evidence-Level Anti-Hallucination Gate** — Claims about flags/conclusions must appear verbatim in real tool output to be accepted; prevents fabricated flags
 - **Natural Language Driven** — Describe your goal in plain English, auto-identifies phases and tools
-- **13 LLM Providers** — OpenAI / Anthropic / MiniMax / DeepSeek / Zhipu / Moonshot / Qwen / SiliconFlow / Doubao / Baichuan / StepFun / SenseTime / Yi, one-command switch
+- **14 LLM Providers** — OpenAI / Anthropic / MiniMax / DeepSeek / Zhipu / Moonshot / Qwen / SiliconFlow / Doubao / Baichuan / StepFun / SenseTime / Yi / local Ollama, one-command switch
 - **MCP Toolchain** — 4 MCP services: `fetch` / `memory` run locally out-of-the-box, `chrome-devtools` / `burp` connect to external MCP servers for browser automation and HTTP interception
 - **Enhanced fetch request tool** — Defaults to GET, returns the full response body, and supports HTTP/HTTPS, custom method/headers/params/cookies/body/data/form/json, timeout/redirect/TLS controls; TLS verification is off by default for CTF/lab HTTPS targets
 - **Native Traffic Evidence Store** — In-scope request/response pairs land in an append-only JSONL index under `evidence/traffic/`. Built-in `traffic_list` / `traffic_view` / `traffic_repeat` / `traffic_sitemap` tools read and replay the store
@@ -84,6 +89,7 @@ Suitable for authorized pentests, CTF competitions, security training, and red t
 - **Auto Report & PoC** — Generates structured Markdown reports and runnable Python PoC scripts
 - **Web UI Mode** — `vulnclaw web` launches a local web interface, default `127.0.0.1:7788`
 - **Security Knowledge Base** — Includes KB module and baseline seed data; retrieval augmentation being integrated
+- **CONTRIBUTING_EN.md** — English contributing guide for international contributors
 
 ---
 
@@ -96,7 +102,7 @@ Suitable for authorized pentests, CTF competitions, security training, and red t
 pip install vulnclaw
 
 # Install from source
-git clone https://github.com/Unclecheng-li/VulnClaw.git
+git clone https://github.com/Netw0rkNoob/VulnClaw.git
 cd VulnClaw
 pip install -e .
 ```
@@ -126,7 +132,7 @@ docker run --rm -it \
 
 ```bash
 # 1. Select provider (auto-fills Base URL and model name)
-vulnclaw config provider minimax   # or openai / anthropic / deepseek / zhipu / moonshot / qwen / siliconflow
+vulnclaw config provider minimax   # or openai / anthropic / deepseek / zhipu / moonshot / qwen / siliconflow / ollama
 
 # 1.2 (optional) custom Base URL or model name
 vulnclaw config set llm.base_url https://your-own-api.example.com/v1
@@ -187,7 +193,8 @@ $ vulnclaw --help
  Usage: vulnclaw [OPTIONS] COMMAND [ARGS]...
 
  Commands:
-   run           🚀 Full pentest in one shot
+   run           🚀 Full pentest in one shot (defaults to the solve engine)
+   solve         🧩 Goal-driven solver (model-led, no fixed rounds)
    persistent    🔄 Persistent pentesting (100 rounds/cycle)
    recon         🔍 Reconnaissance only
    scan          🔎 Vulnerability scanning
@@ -195,6 +202,7 @@ $ vulnclaw --help
    report        📝 Generate report from session JSON
    repl          💬 Start the classic REPL
    config        ⚙️  Manage config (set/get/list/provider)
+   plugins       🧩 Manage vulnerability detection plugins (list/info/run)
    init          🔧 Initialize configuration
    doctor        🏥  Check runtime environment
    tui           🖥️  Open the terminal UI workbench
@@ -358,7 +366,7 @@ continue reasoning / continue tool use / ASK_USER / NO_PATH / FINAL
 FINAL passes evidence gate → accepted; otherwise the rejection is fed back and solve continues
 ```
 
-**Context Strategy:** solve keeps ordinary conversation history by default. It does not compact unless the model context is close to full, the user runs `/compact`, or auto-compaction is explicitly enabled. Tool output is fully stored in `AgentState.evidence`, while large outputs enter active context as bounded high-signal previews containing status, headers/request surface, forms/parameters, endpoints, source sinks/filters, flag-like tokens, key line numbers, raw size and hash. The exact body/stdout/stderr remains available through `evidence_search` or paged `evidence_view`. `fetch` / `http_probe_batch` `max_body_chars`, `python_execute_max_output_chars`, and `shell_command.max_output_chars` clip raw tool output only when explicitly set to a positive value; otherwise raw evidence remains intact. When the same raw output appears again, active context keeps a `same_as=eXXX` reference instead of repeating the body. Terminal echo is human-only display: long tool results are collapsed into previews while full content remains in evidence. High-signal facts extracted from raw output are pinned separately from recent evidence, including forms, parameters, JS endpoints, linked PHP/API files, `highlight_file` source, dangerous sinks, request surfaces, same-body/response differentials, and local proof snippets. `evidence_list` / `evidence_search` / `evidence_view` are for revisiting prior evidence. Repeated reads of an already covered evidence range are short-circuited, and multiple evidence-only turns with no new evidence trigger a stall guard requiring a non-evidence tool, `FINAL`, `ASK_USER`, or `NO_PATH`. After a tool call, solve no longer forces an extra `Summarizing...` LLM call; the normal path uses native Chat Completions tool transcript messages (assistant `tool_calls` + `role=tool`) so the next model sample continues from real observations.
+**Context Strategy:** solve keeps ordinary conversation history by default. Hot context is bounded to 48 messages / 32K tokens; when exceeded, older messages are archived to cold-memory JSONL shards and retrievable via `memory_search`. The unified context budget (`prepare_context()`) estimates tokens (including tool schemas) across all LLM call paths and triggers structured compaction at 70% of usable context, generating a deterministic `[context digest v1]` summary with target/scope/verified facts/evidence references. Tool output is fully stored in `AgentState.evidence`, while large outputs enter active context as bounded high-signal previews. The same raw output appearing again gets a `same_as=eXXX` reference instead of repeating the body.
 
 **Evidence-Level Anti-Hallucination Gate:** Records all real tool output as the sole trusted evidence. Claims about flags/conclusions must appear in real output or cite evidence ids before they are accepted. `NO_PATH` is also gated by the near-miss guard: if unresolved high-signal anchors remain in evidence, the rejection reason is fed back to the model for another concrete verification step instead of stopping immediately.
 
@@ -373,11 +381,14 @@ FINAL passes evidence gate → accepted; otherwise the rejection is fed back and
 | **CLI/TUI Entry** | `cli/main.py` + `cli/tui.py` | Typer commands + REPL + TUI |
 | **Agent Core** | `agent/core.py` | AgentCore coordination entrypoint |
 | **Solver Engine** | `agent/solver.py` + `agent/agent_state.py` | Model-led loop + AgentState evidence / steps / completion gate |
+| **Sub-Agent Runtime** | `agent/subagent/` | Parallel fan-out: budget, integration, merge, service, solve |
+| **Context Budget** | `agent/context_budget.py` + `agent/token_counter.py` | Unified token budget, structured compaction, tool-exchange grouping |
+| **Cold/Hot Memory** | `agent/memory.py` + `agent/context.py` (ContextManager) | Hot context bounding, cold-memory archival & retrieval |
 | **Reasoning / Reflection** | `agent/reasoning_state.py` + `reflexion.py` | Structured facts/constraints/attack chains + L0-L4 escalation |
 | **Plugin System** | `plugins/` | Low-coupling vulnerability detection plugin runtime |
 | **Skill reference index** | `skills/loader.py` + `resolver.py` | Task-aware optional references without forced workflow injection |
 | **MCP Orchestration** | `mcp/registry.py` + `lifecycle.py` + `router.py` | Service registry + lifecycle + tool routing |
-| **Config** | `config/schema.py` + `settings.py` | Pydantic + YAML + 13 provider presets |
+| **Config** | `config/schema.py` + `settings.py` | Pydantic + YAML + 14 provider presets + SubagentConfig |
 | **Report Generator** | `report/generator.py` + `poc_builder.py` | Markdown reports + PoC scripts |
 | **Security KB** | `kb/store.py` + `retriever.py` | JSON storage + CVE/technique/tool retrieval |
 
@@ -536,6 +547,7 @@ vulnclaw config provider minimax   # one-command switch
 | StepFun | `provider stepfun` | step-3.5-flash |
 | SenseTime | `provider sensetime` | SenseNova-6.7-Flash-Lite |
 | Yi | `provider yi` | yi-lightning |
+| Ollama (local) | `provider ollama` | llama3.1 |
 | Custom | `provider custom` | manual |
 
 ### CLI Configuration
@@ -564,14 +576,35 @@ vulnclaw config set session.show_thinking false  # hide thinking process
 | `session.solve_max_steps` | 240 | Runaway safety budget for solve; not a planned round count |
 | `session.solve_max_directions` | 3 | Deprecated compatibility field; model-led solve no longer uses research direction counts |
 | `session.solve_max_tool_rounds` | 6 | Compatibility safety cap for consecutive tool follow-ups inside one model turn; not a planned workflow length |
-| `session.solve_auto_compact` | false | Allow solve to compact context automatically; disabled by default to preserve context |
-| `session.solve_compact_trigger_ratio` | 0.9 | Context usage ratio that triggers auto-compaction when enabled |
+| `session.solve_auto_compact` | false | Deprecated; use `context_auto_compact` instead |
+| `session.solve_compact_trigger_ratio` | 0.9 | Deprecated; use `context_compact_trigger_ratio` instead |
+| `session.context_auto_compact` | true | Enable automatic structured context compaction |
+| `session.context_compact_trigger_ratio` | 0.70 | Context usage ratio that triggers auto-compaction |
+| `session.context_compact_target_ratio` | 0.55 | Post-compaction target ratio of usable context |
+| `session.context_recent_message_groups` | 12 | Minimum complete message groups retained after compaction |
+| `session.context_summary_max_tokens` | 3500 | Max tokens for the structured context digest |
+| `session.context_output_reserve_tokens` | 0 | Output token reserve (0 = auto: min(max_tokens, 8192)) |
+| `session.context_compaction_mode` | structured | Compaction strategy (only `structured` supported) |
+| `session.context_hot_max_messages` | 48 | Max messages retained in hot conversation memory |
+| `session.context_hot_max_tokens` | 32000 | Approximate token cap for hot conversation memory |
+| `session.memory_search_max_chars` | 6000 | Max characters returned by one cold-memory search |
+| `session.memory_archive_max_bytes` | 67108864 | Rotate cold-memory JSONL shard after this many bytes |
+| `session.memory_archive_max_files` | 8 | Max cold-memory JSONL shards retained per output directory |
+| `subagent.enabled` | true | Expose `spawn_subagents` tool to the model-led solve engine |
+| `subagent.max_background_groups` | 3 | Max concurrent sub-agent groups per solve turn |
+| `subagent.max_concurrent_leaf_total` | 4 | Max concurrent leaf agents across all groups |
+| `subagent.max_leaf_per_group` | 6 | Max leaf agents per group |
+| `subagent.max_steps_per_leaf` | 12 | Max solve steps per leaf agent |
+| `subagent.leaf_max_tool_rounds` | 4 | Max tool follow-up rounds per leaf agent |
+| `subagent.max_model_tokens_per_solve` | 8000000 | Solve-wide model-token ceiling for all descendant agents |
+| `subagent.max_model_tokens_per_group` | 1000000 | Shared token ceiling for one Leader and all its leaves |
 | `session.solve_auto_report` | true | Generate a Markdown replay report when solve completes |
 | `session.solve_report_show` | true | Print the generated solve report body in the terminal |
 | `session.max_rounds` | 15 | Max rounds |
 | `session.output_dir` | ./vulnclaw-output | Report output directory |
 | `session.report_format` | markdown | Report format (markdown / html) |
 | `session.poc_language` | python | PoC language (python / bash) |
+| `session.language` | auto | UI language (auto / zh / en), defaults to English |
 | `session.show_thinking` | false | Show LLM reasoning |
 | `session.persistent_rounds_per_cycle` | 100 | Rounds per cycle in persistent mode |
 | `session.persistent_max_cycles` | 10 | Max cycles (0=unlimited) |
@@ -596,6 +629,16 @@ vulnclaw config set session.show_thinking false  # hide thinking process
 | `VULNCLAW_SESSION_ESCALATION_MAX_LEVEL` | Payload escalation cap (0-4) |
 | `VULNCLAW_SESSION_PLUGIN_RUNTIME_ENABLED` | Plugin runtime toggle |
 | `VULNCLAW_SESSION_PLUGIN_MAX_REQUESTS_PER_TARGET` | Per-target plugin request budget |
+| `VULNCLAW_SUBAGENT_ENABLED` | Sub-agent fan-out toggle |
+| `VULNCLAW_SUBAGENT_MAX_BACKGROUND_GROUPS` | Max concurrent sub-agent groups per solve turn |
+| `VULNCLAW_SUBAGENT_MAX_CONCURRENT_LEAF_TOTAL` | Max concurrent leaf agents across all groups |
+| `VULNCLAW_SUBAGENT_MAX_LEAF_PER_GROUP` | Max leaf agents per group |
+| `VULNCLAW_SUBAGENT_MAX_STEPS_PER_LEAF` | Max solve steps per leaf agent |
+| `VULNCLAW_SUBAGENT_LEAF_MAX_TOOL_ROUNDS` | Max tool follow-up rounds per leaf agent |
+| `VULNCLAW_SUBAGENT_LEAF_TIMEOUT_SECONDS` | Per-leaf solve timeout (seconds) |
+| `VULNCLAW_SUBAGENT_GROUP_TIMEOUT_SECONDS` | Per-group timeout (seconds) |
+| `VULNCLAW_SUBAGENT_MAX_MODEL_TOKENS_PER_SOLVE` | Solve-wide model-token ceiling |
+| `VULNCLAW_SUBAGENT_MAX_MODEL_TOKENS_PER_GROUP` | Per-group model-token ceiling |
 
 Priority: **Environment Variables > Config File > Built-in Defaults**
 
@@ -603,9 +646,33 @@ Config file: `~/.vulnclaw/config.yaml`.
 
 ---
 
+## Language
+
+VulnClaw ships with a built-in **English / 中文 (Chinese)** bilingual interface. The default is **English** (`auto` mode falls back to English), so international users never hit a language wall; Chinese is fully preserved and both modes produce identical behavior.
+
+Switch the UI language any of three ways:
+
+| Method | Example |
+|---|---|
+| REPL command | `/language en` or `/language zh` (or `/language auto`) inside the interactive REPL |
+| Environment variable | `VULNCLAW_LANG=zh` / `VULNCLAW_LANG=en` |
+| Config file | `session.language: auto \| zh \| en` in `~/.vulnclaw/config.yaml` |
+
+Everything user-visible in the CLI follows the current language: REPL messages and status banners, event stream, solve reports, knowledge-base status, and LLM retry/recovery notices. Agent detection keyword tables are bilingual, so English or Chinese task phrasing is classified the same way. (Note: the web dashboard is not yet localized; that's planned separately.)
+
+---
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full version history.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING_EN.md](CONTRIBUTING_EN.md) (English) or [CONTRIBUTING.md](CONTRIBUTING.md) (Chinese) before submitting a pull request.
+
+The project uses a `dev` branch for integration — all PRs should target `dev`, not `main`.
 
 ---
 

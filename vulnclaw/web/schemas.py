@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field, field_validator
 TaskCommand = Literal["run", "recon", "scan", "exploit", "persistent"]
 TaskStatus = Literal["pending", "restoring", "running", "completed", "failed", "stopped"]
 PythonExecuteMode = Literal["safe", "lab", "trusted-local"]
+ContextCompactionMode = Literal["structured"]
+# Report / UI language: auto follows env detection, zh/en force a language.
+ReportLanguage = Literal["auto", "zh", "en"]
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -257,8 +260,18 @@ class ConfigView(BaseModel):
     model: str
     base_url: str
     api_key_configured: bool
+    language: ReportLanguage
     output_dir: str
     max_rounds: int
+    max_context_tokens: int
+    context_auto_compact: bool
+    context_compact_trigger_ratio: float
+    context_compact_target_ratio: float
+    context_recent_message_groups: int
+    context_summary_max_tokens: int
+    context_output_reserve_tokens: int
+    context_compaction_mode: ContextCompactionMode
+    context_compaction_audit_enabled: bool
     persistent_rounds_per_cycle: int
     persistent_max_cycles: int
     show_thinking: bool
@@ -272,8 +285,18 @@ class ConfigUpdateRequest(BaseModel):
     provider: Optional[str] = Field(default=None, min_length=1, max_length=64)
     model: Optional[str] = Field(default=None, min_length=1, max_length=160)
     base_url: Optional[str] = Field(default=None, max_length=512)
+    language: Optional[ReportLanguage] = None
     output_dir: Optional[str] = Field(default=None, min_length=1, max_length=1024)
     max_rounds: Optional[int] = Field(default=None, ge=1, le=100)
+    max_context_tokens: Optional[int] = Field(default=None, ge=1024, le=10_000_000)
+    context_auto_compact: Optional[bool] = None
+    context_compact_trigger_ratio: Optional[float] = Field(default=None, ge=0.10, le=0.95)
+    context_compact_target_ratio: Optional[float] = Field(default=None, ge=0.05, le=0.90)
+    context_recent_message_groups: Optional[int] = Field(default=None, ge=1, le=100)
+    context_summary_max_tokens: Optional[int] = Field(default=None, ge=200, le=16000)
+    context_output_reserve_tokens: Optional[int] = Field(default=None, ge=0, le=1_000_000)
+    context_compaction_mode: Optional[ContextCompactionMode] = None
+    context_compaction_audit_enabled: Optional[bool] = None
     persistent_rounds_per_cycle: Optional[int] = Field(default=None, ge=1, le=1000)
     persistent_max_cycles: Optional[int] = Field(default=None, ge=0, le=1000)
     show_thinking: Optional[bool] = None

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from vulnclaw.agent.finding_parser import FindingParser
     from vulnclaw.agent.llm_client import StreamSink
     from vulnclaw.agent.runtime_state import AgentResult, RuntimeState
+    from vulnclaw.agent.subagent.models import SubagentContext
     from vulnclaw.config.schema import VulnClawConfig
 
 
@@ -55,6 +56,7 @@ class AgentContext(Protocol):
     _finding_parser: FindingParser
     _kb_retriever: Any
     _kb_context_cache: dict[Any, str]
+    _subagent_ctx: SubagentContext
 
     @property
     def session_state(self) -> SessionState:
@@ -64,6 +66,10 @@ class AgentContext(Protocol):
     # ── LLM client / credential plumbing ─────────────────────────────────
     def _get_client(self) -> Any:
         """Return the lazily-built, credential-resolved LLM client."""
+        ...
+
+    def _child_factory(self) -> AgentContext:
+        """Build a fresh isolated child agent."""
         ...
 
     def rotate_api_key(self) -> bool:

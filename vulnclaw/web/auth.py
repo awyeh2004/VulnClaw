@@ -2,12 +2,20 @@
 
 The token is generated once and persisted to ``~/.vulnclaw/web_token``.
 All ``/api/`` routes (except ``/api/health``) require a valid
-``Authorization: Bearer <token>`` header.
+``Authorization: Bearer <token>`` header, a session cookie carrying the same
+token, or a loopback peer address.
+
+The cookie exists because the shipped browser UI cannot send a bearer header:
+``fetch`` here adds none and an SSE ``EventSource`` cannot attach one at all.
+Opening the UI once at ``/?token=<token>`` exchanges the token for an
+``HttpOnly``/``SameSite=Strict`` session cookie, which the browser then sends
+on every subsequent request including the event stream.
 """
 
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import secrets
 from pathlib import Path
 
@@ -22,6 +30,9 @@ except ImportError:  # pragma: no cover
 
 TOKEN_DIR = Path.home() / ".vulnclaw"
 TOKEN_FILE = TOKEN_DIR / "web_token"
+
+#: Name of the session cookie that carries the bearer token for browser clients.
+SESSION_COOKIE = "vulnclaw_session"
 
 
 def _token_path() -> Path:
@@ -66,6 +77,52 @@ def verify_token(token: str) -> bool:
     return hmac.compare_digest(stored, token)
 
 
+def attach_session_cookie(response, token: str) -> None:  # type: ignore[no-untyped-def]
+    """Store *token* on the browser as an HttpOnly session cookie.
+
+    ``secure`` is deliberately left off: the UI is served over plain HTTP on
+    localhost and inside Docker, where a Secure cookie would never be sent
+    back. ``SameSite=Strict`` keeps the cookie off cross-site requests, which
+    is what guards the state-changing ``/api/`` routes against CSRF.
+    """
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+
+
+def request_has_valid_session(request) -> bool:  # type: ignore[no-untyped-def]
+    """Whether *request* carries a session cookie holding a valid token."""
+    cookie = request.cookies.get(SESSION_COOKIE, "")
+    return bool(cookie) and verify_token(cookie)
+
+
+def _client_is_loopback(client_host: str | None) -> bool:
+    """Whether a request originates from a loopback (local) client.
+
+    The ``web`` command binds to 127.0.0.1 by default and refuses non-loopback
+    binds without ``--allow-remote``, so a loopback client is the trusted local
+    operator. Bearer-token auth is therefore enforced only for **non-loopback**
+    clients (the explicit ``--allow-remote`` case). This is what lets the
+    same-origin browser UI work locally: native ``fetch`` here sends no bearer
+    header and an SSE ``EventSource`` cannot attach one at all, so requiring a
+    token on loopback would 401 the entire shipped frontend.
+
+    Note: this trusts the peer address, so a reverse proxy on localhost would
+    appear loopback. Defending a localhost bind against DNS-rebinding wants a
+    ``Host`` header allowlist, which is a separate hardening step.
+    """
+    if not client_host:
+        return False  # unknown origin — require auth
+    try:
+        return ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        return client_host == "localhost"
+
+
 if _HAS_STARLETTE:
 
     class AuthMiddleware(BaseHTTPMiddleware):  # type: ignore[no-redef]
@@ -75,12 +132,18 @@ if _HAS_STARLETTE:
         credentials.
         """
 
-        _EXEMPT_PREFIXES: tuple[str, ...] = ("/api/health",)
+        # Exact paths — not prefixes — so an added route like /api/healthcheck
+        # or /api/health-secret is never accidentally left unauthenticated.
+        _EXEMPT_PATHS: frozenset[str] = frozenset({"/api/health"})
 
         async def dispatch(self, request: Request, call_next):  # type: ignore[override]
             path = request.url.path
-            if path.startswith("/api/") and not any(
-                path.startswith(p) for p in self._EXEMPT_PREFIXES
+            client_host = request.client.host if request.client else None
+            if (
+                path.startswith("/api/")
+                and path not in self._EXEMPT_PATHS
+                and not _client_is_loopback(client_host)
+                and not request_has_valid_session(request)
             ):
                 auth_header = request.headers.get("Authorization", "")
                 if not auth_header.startswith("Bearer "):

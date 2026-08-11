@@ -2,13 +2,25 @@ export type TaskCommand = "run" | "recon" | "scan" | "exploit" | "persistent";
 
 export type TaskStatus = "pending" | "restoring" | "running" | "completed" | "failed" | "stopped";
 
+export type ReportLanguage = "auto" | "zh" | "en";
+
 export interface ConfigView {
   provider: string;
   model: string;
   base_url: string;
   api_key_configured: boolean;
+  language: ReportLanguage;
   output_dir: string;
   max_rounds: number;
+  max_context_tokens: number;
+  context_auto_compact: boolean;
+  context_compact_trigger_ratio: number;
+  context_compact_target_ratio: number;
+  context_recent_message_groups: number;
+  context_summary_max_tokens: number;
+  context_output_reserve_tokens: number;
+  context_compaction_mode: "structured";
+  context_compaction_audit_enabled: boolean;
   persistent_rounds_per_cycle: number;
   persistent_max_cycles: number;
   show_thinking: boolean;
@@ -22,8 +34,18 @@ export interface ConfigUpdateRequest {
   provider?: string;
   model?: string;
   base_url?: string;
+  language?: ReportLanguage;
   output_dir?: string;
   max_rounds?: number;
+  max_context_tokens?: number;
+  context_auto_compact?: boolean;
+  context_compact_trigger_ratio?: number;
+  context_compact_target_ratio?: number;
+  context_recent_message_groups?: number;
+  context_summary_max_tokens?: number;
+  context_output_reserve_tokens?: number;
+  context_compaction_mode?: "structured";
+  context_compaction_audit_enabled?: boolean;
   persistent_rounds_per_cycle?: number;
   persistent_max_cycles?: number;
   show_thinking?: boolean;

@@ -47,13 +47,25 @@ VulnClaw/
 |   |   |-- memory.py            # 短/中/长期 Agent 记忆管理
 |   |   |-- network_scan.py      # 网络扫描规划与薄弱环节分析
 |   |   |-- recon_tools.py       # 信息收集工具（空间测绘/子域/JS/目录枚举）
-|   |   |-- token_counter.py     # token 估算与滑动窗口截断
+|   |   |-- token_counter.py     # token 估算、工具交换组分组、滑动窗口截断
+|   |   |-- context_budget.py   # 统一上下文预算与结构化压缩（prepare_context 唯一入口）
+|   |   |-- subagent/            # 模型驱动并行子 Agent 扇出
+|   |   |   |-- budget.py        # 子 Agent LLM 预算/准入/结算
+|   |   |   |-- integration.py  # spawn_subagents 工具与主 solve 集成
+|   |   |   |-- merge.py        # 子证据/claim/step 合并回父状态
+|   |   |   |-- models.py       # 子 Agent 任务/结果/生命周期模型
+|   |   |   |-- service.py      # Group Leader/Leaf 异步运行时
+|   |   |   |-- solve.py        # 子 Agent solve 循环
+|   |   |   `-- tooling.py      # 子 Agent 工具注册与约束
 |   |   `-- chatgpt_proxy.py     # ChatGPT 后端 OpenAI 兼容代理（Responses API）
 |   |-- cli/
 |   |   |-- main.py              # CLI 命令、doctor、web 启动、target-state CLI
 |   |   |-- tui.py               # TUI 数据类、仪表盘渲染、配色常量
 |   |   `-- tui_textual.py       # Textual 驱动的 TUI 工作台
 |   |-- config/                  # 配置 schema、加载、保存、环境变量覆盖
+|   |   |-- schema.py           # Pydantic 配置模型（LLM/MCP/Session/Safety/Subagent/Recon）
+|   |   |-- settings.py         # 加载、环境变量覆盖、旧字段迁移
+|   |   `-- domain_models.py    # 领域叶子类型（Phase/EvidenceRef/Finding 等）
 |   |-- kb/                      # 知识库存储、检索、更新
 |   |-- mcp/
 |   |   |-- lifecycle.py         # attach / probe / call / degrade 行为
@@ -88,6 +100,9 @@ VulnClaw/
 |   `-- package.json             # 前端构建与开发脚本
 |-- scripts/                     # release preflight / dist 校验脚本
 |-- tests/                       # 后端、CLI、MCP、release、web、report 测试
+|   |-- agent/                  # agent 层单元测试（subagent/context/token/streaming）
+|   |-- cli/                    # CLI/TUI 测试
+|   `-- web/                    # Web API 测试
 |-- .github/workflows/           # CI / preflight / release 工作流
 |-- README.md                    # 中文说明
 |-- README_EN.md                 # 英文说明
@@ -109,8 +124,14 @@ VulnClaw/
 - LLM 请求与响应处理
 - recon / CTF / anti-loop 逻辑
 - finding 生命周期、证据等级、结果解析
+- 上下文预算与压缩（`context_budget.py`）
+- 子 Agent 扇出与合并（`subagent/`）
 
 `core.py` 是协调壳层。除非确实是入口级逻辑，否则优先修改对应 helper/module，不要把逻辑堆回 `core.py`。
+
+**上下文预算**：所有 LLM 调用路径（含 `structured_call`/team planner/adviser/report summary）必须经过 `context_budget.prepare_context()` 预算入口。新增旁路 LLM 调用时，务必包装 `_fit_context_window(agent, messages, tools, purpose="...")`。
+
+**子 Agent**：`subagent/` 是独立的扇出运行时。修改扇出逻辑时注意：`max_depth` 硬顶为 2；`SubagentConfig` 全部数值项有 `le=` 上界；子进程退出必须是 `terminate→wait→kill` 三段式；TUI 中渲染子代理输出必须先转义再写入 `markup=True` 面板。
 
 ### 2.2 修改共享任务流 → `vulnclaw/orchestrator.py` / `vulnclaw/repl_runner.py`
 

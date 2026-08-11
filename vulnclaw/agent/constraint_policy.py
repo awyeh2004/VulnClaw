@@ -51,6 +51,8 @@ LOCAL_META_TOOLS = {
     "crypto_decode",
     "source_extract",
     "runtime_diff_probe",
+    "agent_run",
+    "agent_job",
 }
 
 # 真正代表「利用」意图的攻击载荷特征——与传输方式（HTTP 方法/网络库）无关

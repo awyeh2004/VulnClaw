@@ -46,8 +46,14 @@ COPY pyproject.toml README.md LICENSE ./
 COPY vulnclaw ./vulnclaw
 
 # Editable install so vulnclaw resolves to /app and finds frontend/dist.
-# `web` extra pulls in fastapi + uvicorn for the Web UI.
-RUN pip install -e ".[web]"
+#   web → fastapi + uvicorn for the Web UI
+#   kb  → chromadb, so the knowledge base runs semantic search instead of
+#         silently degrading to the keyword fallback
+#   pdf → reportlab, so `vulnclaw report --pdf` works in the container
+# `traffic` (mitmproxy + playwright) is deliberately excluded: Playwright also
+# needs browser binaries pulled in via `playwright install`, which would add
+# hundreds of MB. Add it here if you need the live proxy/browser backends.
+RUN pip install -e ".[web,kb,pdf]"
 
 # Bring in the built frontend so the full React UI is served (not the
 # bundled single-file fallback). resolve_web_index() looks for this path.

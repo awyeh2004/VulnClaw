@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ConfigView } from "../types/api";
 import { fetchProviderModels, updateConfig } from "../api/web";
 import { SectionCard } from "../components/SectionCard";
 import { useConfigQuery, useMcpDiagnosticsQuery, useProvidersQuery } from "../hooks/queries";
@@ -56,11 +57,20 @@ export function SettingsPage({ initialSection = "basic", onOpenAdvanced }: Setti
   const [provider, setProvider] = useState("openai");
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [reportLanguage, setReportLanguage] = useState<ConfigView["language"]>("auto");
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsHint, setModelsHint] = useState<string | null>(null);
   const [outputDir, setOutputDir] = useState("");
   const [maxRounds, setMaxRounds] = useState(15);
+  const [maxContextTokens, setMaxContextTokens] = useState(128000);
+  const [contextAutoCompact, setContextAutoCompact] = useState(true);
+  const [contextTriggerRatio, setContextTriggerRatio] = useState(0.7);
+  const [contextTargetRatio, setContextTargetRatio] = useState(0.55);
+  const [contextRecentGroups, setContextRecentGroups] = useState(12);
+  const [contextSummaryTokens, setContextSummaryTokens] = useState(3500);
+  const [contextOutputReserveTokens, setContextOutputReserveTokens] = useState(0);
+  const [contextAuditEnabled, setContextAuditEnabled] = useState(true);
   const [persistentRounds, setPersistentRounds] = useState(100);
   const [persistentCycles, setPersistentCycles] = useState(10);
   const [showThinking, setShowThinking] = useState(false);
@@ -105,8 +115,17 @@ export function SettingsPage({ initialSection = "basic", onOpenAdvanced }: Setti
     setProvider(configQuery.data.provider);
     setModel(configQuery.data.model);
     setBaseUrl(configQuery.data.base_url);
+    setReportLanguage(configQuery.data.language);
     setOutputDir(configQuery.data.output_dir);
     setMaxRounds(configQuery.data.max_rounds);
+    setMaxContextTokens(configQuery.data.max_context_tokens);
+    setContextAutoCompact(configQuery.data.context_auto_compact);
+    setContextTriggerRatio(configQuery.data.context_compact_trigger_ratio);
+    setContextTargetRatio(configQuery.data.context_compact_target_ratio);
+    setContextRecentGroups(configQuery.data.context_recent_message_groups);
+    setContextSummaryTokens(configQuery.data.context_summary_max_tokens);
+    setContextOutputReserveTokens(configQuery.data.context_output_reserve_tokens);
+    setContextAuditEnabled(configQuery.data.context_compaction_audit_enabled);
     setPersistentRounds(configQuery.data.persistent_rounds_per_cycle);
     setPersistentCycles(configQuery.data.persistent_max_cycles);
     setShowThinking(configQuery.data.show_thinking);
@@ -199,8 +218,18 @@ export function SettingsPage({ initialSection = "basic", onOpenAdvanced }: Setti
         provider,
         model,
         base_url: baseUrl,
+        language: reportLanguage,
         output_dir: outputDir,
         max_rounds: maxRounds,
+        max_context_tokens: maxContextTokens,
+        context_auto_compact: contextAutoCompact,
+        context_compact_trigger_ratio: contextTriggerRatio,
+        context_compact_target_ratio: contextTargetRatio,
+        context_recent_message_groups: contextRecentGroups,
+        context_summary_max_tokens: contextSummaryTokens,
+        context_output_reserve_tokens: contextOutputReserveTokens,
+        context_compaction_mode: "structured",
+        context_compaction_audit_enabled: contextAuditEnabled,
         persistent_rounds_per_cycle: persistentRounds,
         persistent_max_cycles: persistentCycles,
         show_thinking: showThinking,
@@ -354,6 +383,18 @@ export function SettingsPage({ initialSection = "basic", onOpenAdvanced }: Setti
                 )}
                 <small>{modelsHint ?? t("settings.model_hint")}</small>
               </div>
+              <label className="field">
+                <span>{t("settings.report_language")}</span>
+                <select
+                  value={reportLanguage}
+                  onChange={(event) => setReportLanguage(event.target.value as ConfigView["language"])}
+                >
+                  <option value="auto">{t("settings.report_language_auto")}</option>
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                </select>
+                <small>{t("settings.report_language_hint")}</small>
+              </label>
             </div>
           )}
 
@@ -374,6 +415,42 @@ export function SettingsPage({ initialSection = "basic", onOpenAdvanced }: Setti
               <label className="check-row field-wide">
                 <input checked={showThinking} onChange={(event) => setShowThinking(event.target.checked)} type="checkbox" />
                 <span>{t("settings.show_reasoning")}</span>
+              </label>
+              <div className="inline-panel field-wide">
+                <strong>{t("settings.context_management")}</strong>
+                <p className="inline-note">{t("settings.context_management_copy")}</p>
+              </div>
+              <label className="check-row">
+                <input checked={contextAutoCompact} onChange={(event) => setContextAutoCompact(event.target.checked)} type="checkbox" />
+                <span>{t("settings.context_auto_compact")}</span>
+              </label>
+              <label className="check-row">
+                <input checked={contextAuditEnabled} onChange={(event) => setContextAuditEnabled(event.target.checked)} type="checkbox" />
+                <span>{t("settings.context_audit")}</span>
+              </label>
+              <label className="field">
+                <span>{t("settings.max_context_tokens")}</span>
+                <input min="1024" type="number" value={maxContextTokens} onChange={(event) => setMaxContextTokens(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>{t("settings.context_trigger")}</span>
+                <input max="0.95" min="0.1" step="0.05" type="number" value={contextTriggerRatio} onChange={(event) => setContextTriggerRatio(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>{t("settings.context_target")}</span>
+                <input max="0.9" min="0.05" step="0.05" type="number" value={contextTargetRatio} onChange={(event) => setContextTargetRatio(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>{t("settings.context_recent_groups")}</span>
+                <input min="1" type="number" value={contextRecentGroups} onChange={(event) => setContextRecentGroups(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>{t("settings.context_summary_tokens")}</span>
+                <input min="200" type="number" value={contextSummaryTokens} onChange={(event) => setContextSummaryTokens(Number(event.target.value))} />
+              </label>
+              <label className="field">
+                <span>{t("settings.context_output_reserve")}</span>
+                <input min="0" type="number" value={contextOutputReserveTokens} onChange={(event) => setContextOutputReserveTokens(Number(event.target.value))} />
               </label>
               <article className="stat">
                 <span className="stat-label">{t("settings.mcp_services")}</span>
