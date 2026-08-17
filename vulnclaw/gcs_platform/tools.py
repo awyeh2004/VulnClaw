@@ -1,0 +1,434 @@
+"""OpenAI tool schemas and dispatch for the West Lake Sword Competition agent API.
+
+Handlers call :mod:`vulnclaw.gcs_platform.client`. Missing/malformed access
+keys short-circuit to a readable `[gcs_config]`/`[gcs_error]` message instead
+of crashing the agent loop.  Environment lifecycle (start -> poll ready ->
+attack -> recover) is assembled here from the flat client calls.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Awaitable, Callable
+
+from vulnclaw.gcs_platform import client as _client
+
+GCS_TOOL_NAMES: list[str] = [
+    "gcs_match_info",
+    "gcs_notice_list",
+    "gcs_notice_detail",
+    "gcs_overview",
+    "gcs_exercise_list",
+    "gcs_read_exercise",
+    "gcs_build_env",
+    "gcs_recover_env",
+    "gcs_submit_flag",
+]
+
+GCS_READ_TOOLS: set[str] = {
+    "gcs_match_info",
+    "gcs_notice_list",
+    "gcs_notice_detail",
+    "gcs_overview",
+    "gcs_exercise_list",
+    "gcs_read_exercise",
+}
+
+
+def gcs_tool_schemas() -> list[dict[str, Any]]:
+    """OpenAI function schemas for all GCS competition tools."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_match_info",
+                "description": (
+                    "Fetch the West Lake Sword Competition notes and rules "
+                    "(competition notice + rule text). Call this first to learn "
+                    "flag format, timing and submission constraints."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_notice_list",
+                "description": (
+                    "List recent competition announcements (id, title, content)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results.",
+                            "default": 20,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_notice_detail",
+                "description": (
+                    "Read a single competition announcement by id, including "
+                    "its attached file download link when present."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "notice_id": {
+                            "type": "integer",
+                            "description": "Announcement id from gcs_notice_list.",
+                        },
+                    },
+                    "required": ["notice_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_overview",
+                "description": (
+                    "Query the team's current score and rank on the leaderboard."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_exercise_list",
+                "description": (
+                    "List available challenges grouped by category. Each leaf "
+                    "entry carries a numeric id used by gcs_read_exercise / "
+                    "gcs_build_env / gcs_submit_flag."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results.",
+                            "default": 50,
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_read_exercise",
+                "description": (
+                    "Read challenge detail: description, attachment download "
+                    "urls, target endpoint info (exposeIps/ports/users/proxy "
+                    "mappings), score/difficulty, and environment flags "
+                    "(isNeedInit / isNeedCheck)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "exercise_id": {
+                            "type": "integer",
+                            "description": "Numeric challenge id from gcs_exercise_list.",
+                        },
+                    },
+                    "required": ["exercise_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_build_env",
+                "description": (
+                    "Start (or reuse) a challenge's live environment. This is "
+                    "async: after calling it, poll gcs_read_exercise until "
+                    "isNeedCheck is false and endpoints are populated before "
+                    "attempting to connect."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "exercise_id": {
+                            "type": "integer",
+                            "description": "Numeric challenge id.",
+                        },
+                    },
+                    "required": ["exercise_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_recover_env",
+                "description": (
+                    "Recover (destroy) a challenge environment once the flag "
+                    "is found, releasing platform quota. Safe to call after "
+                    "gcs_submit_flag succeeds."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "exercise_id": {
+                            "type": "integer",
+                            "description": "Numeric challenge id.",
+                        },
+                    },
+                    "required": ["exercise_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "gcs_submit_flag",
+                "description": (
+                    "Submit a flag for a challenge. The competition caps "
+                    "submissions per challenge and forbids brute-forcing, so "
+                    "only a limited number of attempts run automatically; "
+                    "further attempts escalate to human confirmation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "exercise_id": {
+                            "type": "integer",
+                            "description": "Numeric challenge id.",
+                        },
+                        "flag": {
+                            "type": "string",
+                            "description": "The flag value to submit.",
+                        },
+                    },
+                    "required": ["exercise_id", "flag"],
+                },
+            },
+        },
+    ]
+
+
+GCS_TOOL_NAMES_BY_SCHEMA: list[str] = [s["function"]["name"] for s in gcs_tool_schemas()]
+
+
+def _format(payload: dict | list | str) -> str:
+    """Compact-JSON pretty render for LLM consumption (truncate huge bodies)."""
+    if isinstance(payload, str):
+        return payload[:4000]
+    try:
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(payload)[:4000]
+    return rendered[:4000]
+
+
+async def _guard_config() -> str | None:
+    """Return an error message when the GCS access key is not configured."""
+    if not _client.is_configured():
+        return (
+            "[gcs_config] GCS agent access key not configured. Set the "
+            "VULNCLAW_GCS_ACCESS_KEY environment variable (team access key "
+            "issued by the competition platform), then retry."
+        )
+    return None
+
+
+async def _handle_match_info(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.match_info()
+    except Exception as exc:
+        return f"[gcs_error] fetch match info failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_notice_list(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.notice_list()
+        return _format(payload)
+    except Exception as exc:
+        return f"[gcs_error] list notices failed: {exc}"
+
+
+async def _handle_notice_detail(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.notice_detail(int(args["notice_id"]))
+    except Exception as exc:
+        return f"[gcs_error] read notice failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_overview(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.overview()
+    except Exception as exc:
+        return f"[gcs_error] query overview failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_exercise_list(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.exercise_list()
+    except Exception as exc:
+        return f"[gcs_error] list exercises failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_read_exercise(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    try:
+        payload = await _client.exercise(int(args["exercise_id"]))
+    except Exception as exc:
+        return f"[gcs_error] read exercise failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_build_env(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    exercise_id = int(args["exercise_id"])
+    try:
+        payload = await _client.build_environment(exercise_id)
+    except Exception as exc:
+        return f"[gcs_error] build environment failed: {exc}"
+    return _format(payload)
+
+
+async def _handle_recover_env(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    exercise_id = int(args["exercise_id"])
+    try:
+        payload = await _client.recover_environment(exercise_id)
+    except Exception as exc:
+        return f"[gcs_error] recover environment failed: {exc}"
+    return _format(payload)
+
+
+def _submit_accepted(payload: dict | list | str) -> bool:
+    """Best-effort check whether a submit payload reports a correct flag."""
+    try:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data, dict) and "isCorrect" in data:
+            return bool(data["isCorrect"])
+        if isinstance(payload, dict) and "isCorrect" in payload:
+            return bool(payload["isCorrect"])
+        if isinstance(payload, dict) and "success" in payload:
+            return bool(payload["success"])
+    except (AttributeError, TypeError):
+        pass
+    return False
+
+
+async def _handle_submit_flag(args: dict[str, Any]) -> str:
+    blocking = await _guard_config()
+    if blocking:
+        return blocking
+    exercise_id = int(args["exercise_id"])
+    flag = args["flag"]
+
+    guard = _get_submit_guard()
+    allowed, reason = guard.allow(str(exercise_id), str(exercise_id), flag)
+    if not allowed:
+        return _guard_message(exercise_id, reason)
+
+    try:
+        payload = await _client.submit_answer(exercise_id, flag)
+    except Exception as exc:
+        guard.record(str(exercise_id), str(exercise_id), accepted=False, flag=flag)
+        return f"[gcs_error] submit flag failed: {exc}"
+
+    accepted = _submit_accepted(payload)
+    guard.record(str(exercise_id), str(exercise_id), accepted=accepted, flag=flag)
+    return _format(payload)
+
+
+def _get_submit_guard():
+    from vulnclaw.ctf_platform.submit_guard import get_guard
+
+    return get_guard()
+
+
+def _guard_message(exercise_id: int, reason: str) -> str:
+    from vulnclaw.ctf_platform.submit_guard import guard_reason_to_message
+
+    return guard_reason_to_message(str(exercise_id), str(exercise_id), reason)
+
+
+def _build_handlers() -> dict[str, Callable[[dict[str, Any]], Awaitable[str]]]:
+    return {
+        "gcs_match_info": _handle_match_info,
+        "gcs_notice_list": _handle_notice_list,
+        "gcs_notice_detail": _handle_notice_detail,
+        "gcs_overview": _handle_overview,
+        "gcs_exercise_list": _handle_exercise_list,
+        "gcs_read_exercise": _handle_read_exercise,
+        "gcs_build_env": _handle_build_env,
+        "gcs_recover_env": _handle_recover_env,
+        "gcs_submit_flag": _handle_submit_flag,
+    }
+
+
+_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] = _build_handlers()
+
+
+async def dispatch_gcs_tool(tool_name: str, args: dict[str, Any]) -> str:
+    """Route a GCS competition tool call to its handler."""
+    if tool_name not in GCS_TOOL_NAMES_BY_SCHEMA:
+        return f"[gcs_error] unknown GCS tool: {tool_name}"
+    handler = _HANDLERS[tool_name]
+    return await handler(args)
+
+
+async def exercise_ready_poll(exercise_id: int, timeout: float = 60.0) -> str:
+    """Poll ``gcs_read_exercise`` until the environment is usable.
+
+    Returns a compact JSON summary of the exercise state. Call after
+    ``gcs_build_env``; the prompt tells the agent to retry until the detail
+    shows ``isNeedCheck: false`` and populated endpoints.  Treats network
+    errors as transient (keeps polling until the timeout).
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    delay = 2.0
+    while True:
+        try:
+            payload = await _client.exercise(exercise_id)
+            text = _format(payload)
+            check = (
+                str(payload.get("data", {}).get("isNeedCheck"))
+                if isinstance(payload.get("data"), dict)
+                else str(payload)
+            )
+            if "False" in check or "false" in check:
+                return text
+        except Exception:
+            pass
+        if asyncio.get_event_loop().time() >= deadline:
+            return f"[gcs_error] environment not ready after {timeout:.0f}s"
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, 10.0)

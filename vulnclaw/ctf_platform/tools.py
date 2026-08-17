@@ -280,6 +280,33 @@ async def _guard_config() -> str | None:
     return None
 
 
+def _guard() -> "SubmitGuard":
+    from vulnclaw.ctf_platform.submit_guard import get_guard
+
+    return get_guard()
+
+
+def _guard_message(practice_id: str, challenge_id: str, reason: str) -> str:
+    from vulnclaw.ctf_platform.submit_guard import guard_reason_to_message
+
+    return guard_reason_to_message(practice_id, challenge_id, reason)
+
+
+def _submit_accepted(payload: dict | list | str) -> bool:
+    """Best-effort check whether a submit payload reports an accepted flag."""
+    try:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data, dict) and "accepted" in data:
+            return bool(data["accepted"])
+        if isinstance(payload, dict) and "accepted" in payload:
+            return bool(payload["accepted"])
+        if isinstance(payload, dict) and "success" in payload:
+            return bool(payload["success"])
+    except (AttributeError, TypeError):
+        pass
+    return False
+
+
 async def _named(practice_id: str, challenge_id: str) -> tuple[str, str]:
     return practice_id, challenge_id
 
@@ -349,11 +376,22 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     blocking = await _guard_config()
     if blocking:
         return blocking
+    usage, challenge = await _named(args["practice_id"], args["challenge_id"])
+    flag = args["flag"]
+
+    guard = _guard()
+    allowed, reason = guard.allow(usage, challenge, flag)
+    if not allowed:
+        return _guard_message(usage, challenge, reason)
+
     try:
-        usage, challenge = await _named(args["practice_id"], args["challenge_id"])
-        payload = await _client.submit_flag(usage, challenge, args["flag"])
+        payload = await _client.submit_flag(usage, challenge, flag)
     except Exception as exc:
+        guard.record(usage, challenge, accepted=False, flag=flag)
         return f"[ctf2_error] submit flag failed: {exc}"
+
+    accepted = _submit_accepted(payload)
+    guard.record(usage, challenge, accepted=accepted, flag=flag)
     return _format(payload)
 
 

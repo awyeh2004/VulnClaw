@@ -68,6 +68,11 @@ from vulnclaw.ctf_platform import (
     ctf2_tool_schemas,
     dispatch_ctf2_tool,
 )
+from vulnclaw.gcs_platform import (
+    GCS_TOOL_NAMES,
+    dispatch_gcs_tool,
+    gcs_tool_schemas,
+)
 
 
 def role_allows_tool(role: str | None, tool_name: str) -> bool:
@@ -880,6 +885,9 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     if tool_name in CTF_TOOL_NAMES:
         return await dispatch_ctf2_tool(tool_name, args)
 
+    if tool_name in GCS_TOOL_NAMES:
+        return await dispatch_gcs_tool(tool_name, args)
+
     if tool_name in TRAFFIC_TOOL_NAMES:
         store = resolve_traffic_store(agent)
         if tool_name == "traffic_repeat":
@@ -1363,6 +1371,9 @@ def build_openai_tools(
         append_tool(tool)
 
     for tool in ctf2_tool_schemas():
+        append_tool(tool)
+
+    for tool in gcs_tool_schemas():
         append_tool(tool)
 
     if mcp_manager:

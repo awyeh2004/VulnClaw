@@ -299,6 +299,9 @@ class AgentState(BaseModel):
     tool_health: dict[str, ToolHealth] = Field(default_factory=dict)
     pending_questions: list[str] = Field(default_factory=list)
     compact_summary: str = ""
+    llm_usage_prompt_tokens: int = 0
+    llm_usage_completion_tokens: int = 0
+    llm_requests: int = 0
     context_digest: ContextDigest = Field(default_factory=ContextDigest)
     context_compactions: list[ContextCompactionEvent] = Field(default_factory=list)
     completion_rejections: list[str] = Field(default_factory=list)
@@ -378,6 +381,9 @@ class AgentState(BaseModel):
         self.completed = False
         self.complete_reason = ""
         self.final_answer = ""
+        self.llm_usage_prompt_tokens = 0
+        self.llm_usage_completion_tokens = 0
+        self.llm_requests = 0
         self.evidence_seq = 0
         self.step_seq = 0
         self.claim_seq = 0
@@ -538,6 +544,12 @@ class AgentState(BaseModel):
                     "or take a non-evidence action based on the existing content."
                 )
         return ""
+
+    def record_llm_usage(self, *, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """Accumulate LLM token usage for the current solve run."""
+        self.llm_usage_prompt_tokens += max(0, int(prompt_tokens or 0))
+        self.llm_usage_completion_tokens += max(0, int(completion_tokens or 0))
+        self.llm_requests += 1
 
     def record_tool_health(
         self,
