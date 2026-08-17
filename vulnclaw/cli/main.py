@@ -77,6 +77,8 @@ from vulnclaw.config.settings import (
 from vulnclaw.config.token_provider import has_llm_credentials
 from vulnclaw.ctf_platform.client import is_configured as ctf2_is_configured
 from vulnclaw.ctf_platform.client import read_challenge as ctf2_read_challenge
+from vulnclaw.gcs_platform.client import is_configured as gcs_is_configured
+from vulnclaw.gcs_platform.client import exercise as gcs_exercise
 from vulnclaw.i18n import _
 from vulnclaw.i18n.phases import localized_phase_name
 from vulnclaw.repl_runner import run_repl_call
@@ -118,6 +120,70 @@ def _emit_solve_report_if_completed(agent: Any, config: Any) -> str:
     )
     if session is None or getattr(session, "solve_report_show", True):
         console.print(Text(report_text), soft_wrap=True)
+    return str(report_path)
+
+
+def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Optional[str]:
+    """Write a single-challenge competition writeup with text-evidence (no screenshots).
+
+    Uses the completed AgentState to render the solution chain, key evidence
+    excerpts with exact line numbers (as screenshot stand-ins), and the scripts
+    the agent wrote. Team info comes from the environment; the model name is
+    taken from the active LLM config.
+    """
+    state = getattr(getattr(getattr(agent, "context", None), "state", None), "agent_state", None)
+    if state is None or not getattr(state, "completed", False):
+        return None
+    try:
+        from pathlib import Path
+
+        from vulnclaw.report.writeup import (
+            WriteupMeta,
+            default_writeup_dir,
+            generate_writeup,
+            render_evidence_popup,
+        )
+    except Exception as exc:
+        console.print(
+            Panel(f"{_('cli.auto_writeup_generation_failed')}: {exc}", title="Writeup", border_style="red")
+        )
+        return None
+
+    model_name = ""
+    if getattr(config, "llm", None) is not None:
+        model_name = str(getattr(config.llm, "model", "") or "")
+    meta = WriteupMeta(
+        team_name=os.environ.get("VULNCLAW_TEAM_NAME", ""),
+        rank=os.environ.get("VULNCLAW_TEAM_RANK", ""),
+        solved_count=os.environ.get("VULNCLAW_TEAM_SOLVED", ""),
+        total_tokens=int(getattr(state, "llm_usage_prompt_tokens", 0) or 0)
+        + int(getattr(state, "llm_usage_completion_tokens", 0) or 0),
+        model_name=model_name,
+        exercise_name=getattr(state, "origin", ""),
+    )
+    try:
+        resolved_dir = writeup_dir if writeup_dir is not None else Path(default_writeup_dir())
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+        report_path = generate_writeup(state, meta=meta, output_path=resolved_dir)
+    except Exception as exc:
+        console.print(
+            Panel(f"{_('cli.auto_writeup_generation_failed')}: {exc}", title="Writeup", border_style="red")
+        )
+        return None
+
+    console.print(
+        Panel(
+            f"{_('cli.auto_writeup_saved')}:\n{report_path}",
+            title="Writeup",
+            border_style="green",
+        )
+    )
+    try:
+        popup = render_evidence_popup(state)
+        if popup:
+            console.print(Panel(popup, title="Evidence Lines", border_style="cyan"))
+    except Exception:
+        pass
     return str(report_path)
 
 # 鈹€鈹€ REPL 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -1322,6 +1388,9 @@ def solve(
     stream: bool = typer.Option(
         False, "--stream", help="Emit newline-delimited JSON events for the Rust TUI"
     ),
+    writeup_dir: Optional[str] = typer.Option(
+        None, "--writeup-dir", help="Generate a competition writeup into this directory on success"
+    ),
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = load_config()
@@ -1422,6 +1491,8 @@ def solve(
         live_agent = holder.get("agent")
         if live_agent is not None:
             _emit_solve_report_if_completed(live_agent, config)
+            if writeup_dir:
+                _emit_competition_writeup(live_agent, config, Path(writeup_dir))
 
 
 @app.command("ctf2")
@@ -1493,6 +1564,88 @@ def ctf2(
     # Hand off to the standard solve loop; reuse its full orchestration.
     solve(
         target=practice_id,
+        goal=goal,
+        max_steps=max_steps,
+        resume=False,
+    )
+
+
+@app.command("gcs")
+def gcs(
+    exercise_id: int = typer.Argument(..., help="西湖论剑 challenge (exercise) id"),
+    max_steps: int = typer.Option(
+        240, "--max-steps", help="Runaway safety budget for autonomous turns"
+    ),
+) -> None:
+    """Solve a West Lake Sword Competition (西湖论剑) challenge by exercise id.
+
+    Reads the challenge via the competition agent API (X-Agent-AccessKey),
+    builds a focused solve goal, then hands off to the standard model-led
+    solve loop. The agent manages the full environment lifecycle itself:
+    build-exercise-env -> poll until ready -> attack endpoints -> submit flag
+    -> recover-exercise-env.
+    """
+    if not gcs_is_configured():
+        err_console.print(
+            "[!] GCS agent access key not configured. Set the "
+            "VULNCLAW_GCS_ACCESS_KEY environment variable, then retry."
+        )
+        raise typer.Exit(1)
+
+    if not has_llm_credentials(load_config().llm):
+        err_console.print("[!] Configure LLM credentials first (api_key or auth_mode).")
+        raise typer.Exit(1)
+
+    chall_data: dict = {}
+
+    async def _load_exercise():
+        payload = await gcs_exercise(exercise_id)
+        chall_data.update(payload.get("data") or {})
+
+    try:
+        asyncio.run(_load_exercise())
+    except Exception as exc:  # network or platform errors must not crash
+        err_console.print(f"[!] Failed to read exercise from GCS: {exc}")
+        raise typer.Exit(1)
+
+    name = chall_data.get("name")
+    if not name:
+        err_console.print("[!] Exercise not found for the given id.")
+        raise typer.Exit(1)
+
+    difficulty = chall_data.get("difficulty") or ""
+    score = chall_data.get("score") or ""
+    description = str(chall_data.get("description") or "").strip()
+    has_solved = bool(chall_data.get("hasSolved"))
+    needs_init = bool(chall_data.get("isNeedInit"))
+    if has_solved:
+        err_console.print(f"[*] Exercise [bold]{name}[/] already solved — skipping.")
+        return
+
+    goal = (
+        f"Solve the West Lake Sword Competition challenge '{name}' "
+        f"(difficulty {difficulty}, score {score}). Achieve the flag and submit "
+        f"it with gcs_submit_flag (exercise_id {exercise_id}). "
+        f"exercise_id is {exercise_id}. Challenge description follows:\n{description}\n"
+        f"Use gcs_exercise_list / gcs_read_exercise to fetch attachments and target "
+        f"endpoints. "
+        + (
+            "The environment needs initialization: call gcs_build_env then poll "
+            "gcs_read_exercise until isNeedCheck is false and endpoints are "
+            "available, attack the target endpoints, submit the flag, then call "
+            "gcs_recover_env to release quota."
+            if needs_init
+            else "No environment initialization required; attack the provided endpoints directly, then submit the flag."
+        )
+        + " Note the flag format from gcs_match_info; follow the competition rules."
+    )
+    console.print(
+        f"[*] GCS exercise [bold]{name}[/] | difficulty [bold]{difficulty}[/] | "
+        f"score [bold]{score}[/]"
+    )
+    # Hand off to the standard solve loop; reuse its full orchestration.
+    solve(
+        target=str(exercise_id),
         goal=goal,
         max_steps=max_steps,
         resume=False,

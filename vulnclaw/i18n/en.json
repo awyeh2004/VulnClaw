@@ -19,6 +19,8 @@
   "cli.report_generated": "[+] Report generated: [bold]{path}[/]",
   "cli.auto_solve_report_generation_failed": "Automatic solve report generation failed",
   "cli.auto_review_report_saved": "Automated review report saved",
+  "cli.auto_writeup_generation_failed": "Automatic writeup generation failed",
+  "cli.auto_writeup_saved": "Automated writeup saved",
   "cli.slash_palette_off": "slash palette off: stdin is not a TTY",
   "cli.slash_palette_on": "slash palette on",
   "cli.config_reloaded": "Config reloaded",

@@ -41,6 +41,8 @@
   "cli.init.step_tui": "  4. 打开 TUI: [bold]vulnclaw tui[/]",
   "cli.auto_solve_report_generation_failed": "自动 solve 报告生成失败",
   "cli.auto_review_report_saved": "自动复盘报告已保存",
+  "cli.auto_writeup_generation_failed": "自动 writeup 生成失败",
+  "cli.auto_writeup_saved": "自动 writeup 已保存",
   "cli.slash_palette_off": "反斜杆颜色转译已关闭，stdin不是一个TTY设备",
   "cli.slash_palette_on": "反斜杆颜色转译已开启",
   "cli.config_reloaded": "配置重新加载",

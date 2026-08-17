@@ -647,10 +647,38 @@ async def _call_with_persistent_retries(
         actual_tokens = _record_subagent_llm_usage(agent, response)
         _settle_subagent_llm_admission(agent, admission, actual_tokens)
         admission = None
+        _record_main_llm_usage(agent, response)
         return response, retries
     finally:
         if admission is not None:
             _fail_subagent_llm_admission(agent, admission)
+
+
+def _record_main_llm_usage(agent: AgentContext, response: Any) -> None:
+    """Accumulate LLM token usage onto the main solve AgentState, if any.
+
+    Sub-agent calls keep their own budgets; the main solve run wants a single
+    per-challenge token counter for the writeup header.  Guarded so a chat
+    session without an ``agent_state`` simply does nothing.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    prompt = int(
+        getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None) or 0
+    )
+    completion = int(
+        getattr(usage, "completion_tokens", None)
+        or getattr(usage, "output_tokens", None)
+        or 0
+    )
+    try:
+        state = getattr(agent.context.state, "agent_state", None)
+        record = getattr(state, "record_llm_usage", None)
+        if record is not None:
+            record(prompt_tokens=prompt, completion_tokens=completion)
+    except Exception:
+        pass
 
 
 def _prepend_retry_notice(text: str, retry_attempts: int) -> str:

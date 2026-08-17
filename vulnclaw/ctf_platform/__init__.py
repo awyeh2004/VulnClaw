@@ -8,6 +8,7 @@ without manual platform interaction.
 from __future__ import annotations
 
 from vulnclaw.ctf_platform.client import api_token, is_configured, session_token
+from vulnclaw.ctf_platform.submit_guard import SubmitGuard, get_guard, reset_guard
 from vulnclaw.ctf_platform.tools import (
     CTF_TOOL_NAMES,
     CTF_TOOL_NAMES_BY_SCHEMA,
@@ -20,9 +21,12 @@ __all__ = [
     "CTF_TOOL_NAMES",
     "CTF_TOOL_NAMES_BY_SCHEMA",
     "CTF_READ_TOOLS",
+    "SubmitGuard",
     "api_token",
     "ctf2_tool_schemas",
     "dispatch_ctf2_tool",
+    "get_guard",
     "is_configured",
+    "reset_guard",
     "session_token",
 ]
