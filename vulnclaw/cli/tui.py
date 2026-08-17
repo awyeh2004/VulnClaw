@@ -1526,8 +1526,11 @@ def _cmd_language(session: dict[str, Any], args: str) -> None:
 
 def _apply_language_pt(session: dict[str, Any], lang: str) -> None:
     """Apply language switch (prompt_toolkit backend)."""
+    from vulnclaw.i18n import set_language_pref
+
     session["config"].session.language = lang
     save_config(session["config"])
+    set_language_pref(lang)
     init_i18n(lang=lang if lang != "auto" else None, config=session["config"])
     rebuild_translations()
 
