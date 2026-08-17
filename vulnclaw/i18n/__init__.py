@@ -5,7 +5,69 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Optional
+
+# User language preference is persisted across sessions so an explicit
+# choice (e.g. /language zh, or "回答请用中文") survives restarts instead of
+# being forgotten. The pref file lives next to the config dir; it is a tiny
+# plain-text file (just "zh" or "en") that i18n can read without importing
+# config.settings (avoiding a dependency cycle).
+def _language_pref_file() -> Path:
+    config_dir = Path(os.environ.get("VULNCLAW_CONFIG_DIR", str(Path.home() / ".vulnclaw")))
+    return config_dir / "language_pref"
+
+
+def get_language_pref() -> Optional[str]:
+    """Return the persisted user language preference, if any."""
+    try:
+        pref = _language_pref_file().read_text(encoding="utf-8").strip().lower()
+    except (OSError, UnicodeError):
+        return None
+    return pref if pref in ("zh", "en") else None
+
+
+def set_language_pref(lang: str) -> None:
+    """Persist the user language preference so later sessions remember it."""
+    lang = str(lang or "").strip().lower()
+    if lang not in ("zh", "en"):
+        return
+    try:
+        _language_pref_file().parent.mkdir(parents=True, exist_ok=True)
+        _language_pref_file().write_text(lang, encoding="utf-8")
+    except OSError:
+        logging.getLogger(__name__).warning("Failed to persist language preference.")
+
+
+def _detect_system_locale() -> Optional[str]:
+    """Detect the OS UI language on Windows (and best-effort on POSIX).
+
+    Returns 'zh' for a Chinese UI system, 'en' for an English one, else None.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0xFF
+            if primary == 0x04:  # LANG_CHINESE
+                return "zh"
+            if primary == 0x09:  # LANG_ENGLISH
+                return "en"
+        except (AttributeError, OSError):
+            pass
+        try:
+            import locale
+
+            code, _ = locale.getdefaultlocale()
+            if code:
+                if code.lower().startswith("zh"):
+                    return "zh"
+                if code.lower().startswith("en"):
+                    return "en"
+        except Exception:
+            pass
+        return None
+    return None
 
 
 class I18nLoader:
@@ -61,17 +123,25 @@ class I18nLoader:
 
     @staticmethod
     def detect_language() -> str:
-        """Detect language from environment or config.
+        """Detect language from environment, persisted preference, or the OS.
 
         Priority:
         1. VULNCLAW_LANG environment variable
-        2. LANG environment variable
-        3. Default to 'zh'
+        2. Persisted user preference (~/.vulnclaw/language_pref)
+        3. LANG environment variable
+        4. OS UI locale (Windows: GetUserDefaultUILanguage)
+        5. Default to 'zh' (VulnClaw is a Chinese-first project).
         """
         # Check VulnClaw specific env var
         lang_env = os.environ.get("VULNCLAW_LANG", "").lower()
         if lang_env in ("zh", "en"):
             return lang_env
+
+        # Check persisted user preference (explicit /language switch, or a
+        # mid-session "用中文回答" directive recorded by the agent).
+        pref = get_language_pref()
+        if pref in ("zh", "en"):
+            return pref
 
         # Check system LANG
         system_lang = os.environ.get("LANG", "").lower()
@@ -80,9 +150,16 @@ class I18nLoader:
         elif system_lang.startswith("en"):
             return "en"
 
-        # Default to English when no environment signal is present so new
-        # users do not land in a language they cannot read.
-        return "en"
+        # Check the OS UI locale so a Chinese Windows user gets zh without
+        # needing any env var or config change.
+        system_locale = _detect_system_locale()
+        if system_locale in ("zh", "en"):
+            return system_locale
+
+        # Default to Chinese: this is the pre-upstream-merge behavior and the
+        # project's native language. Explicit env vars / config / pref file
+        # all override it above.
+        return "zh"
 
 
 # Global translator instance

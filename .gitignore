@@ -39,6 +39,7 @@ Desktop.ini
 sessions/
 reports/
 pocs/
+vulnclaw-output/
 
 # Test / coverage
 .pytest_cache/

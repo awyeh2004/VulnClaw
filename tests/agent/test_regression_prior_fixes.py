@@ -172,5 +172,63 @@ class TestBuiltinToolSchemaSet:
         assert recon_names <= full_names
 
 
+class TestRepetitionGuardRecordsLoop:
+    """The repetition guard must persist its firing into cross-turn memory.
+
+    The guard's user-notice only lives in the live message window, which the
+    upstream context-budget digest folds away after a few rounds — erasing the
+    correction signal and letting the model loop again. It must also write a
+    step into ``agent_state.steps`` (read by the digest's "Recent outcomes and
+    failed paths" block) so compaction cannot erase the loop evidence.
+    """
+
+    @staticmethod
+    def _block() -> str:
+        return "\n".join(
+            [
+                "analysis line A - reconstruct ThinkPHP gadget chain here",
+                "analysis line B - use Windows pipes destructor order",
+                "analysis line C - file_exists triggers removeFiles LFI",
+                "analysis line D - chain back to Query where and execute",
+            ]
+        )
+
+    def test_guard_firing_records_step_when_context_reachable(self):
+        from vulnclaw.agent.agent_state import AgentState
+        from vulnclaw.agent.llm_client import _apply_repetition_guard
+
+        class _State:
+            def __init__(self):
+                self.agent_state = AgentState()
+
+        class _Context:
+            def __init__(self):
+                self.state = _State()
+
+        class _Agent:
+            def __init__(self):
+                self.context = _Context()
+
+        agent = _Agent()
+        _apply_repetition_guard(agent, "\n\n".join([self._block()] * 4))
+        steps = agent.context.state.agent_state.steps
+        assert len(steps) >= 1
+        assert "repetition guard" in steps[-1].reason
+
+    def test_guard_firing_records_nothing_without_state(self):
+        from vulnclaw.agent.llm_client import _apply_repetition_guard
+
+        class _Context:
+            def __init__(self):
+                self.state = None
+
+        class _Agent:
+            def __init__(self):
+                self.context = _Context()
+
+        # Must not raise when the agent exposes no reachable agent_state.
+        _apply_repetition_guard(_Agent(), "\n\n".join([self._block()] * 4))
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -106,6 +106,7 @@ async def auto_pentest(
     if detected_phase:
         agent.context.state.advance_phase(detected_phase)
 
+    agent._apply_user_language_directive(user_input)
     agent.context.add_user_message(user_input)
     agent._reset_runtime_state(user_input=user_input, detected_phase=detected_phase)
     _configure_reflexion(agent)

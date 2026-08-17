@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from vulnclaw.agent.anti_loop import (
     detect_attack_path,
@@ -455,6 +458,52 @@ class AgentCore:
         """Extract target from user input."""
         return detect_target(user_input)
 
+    def _apply_user_language_directive(self, user_input: str) -> None:
+        """Honor an explicit mid-session language directive from the user.
+
+        Upstream's bilingual merge changed the language default to en, so a
+        user who previously got Chinese (and told the agent to reply in
+        Chinese mid-session) loses that preference after the merge unless the
+        directive is persisted. This detects a request like "用中文回答" /
+        "please answer in Chinese" and both (a) switches the running i18n
+        translator and (b) records the preference so later sessions keep it.
+        """
+        text = str(user_input or "").strip().lower()
+        if not text:
+            return
+        from vulnclaw.i18n import current_lang, init_i18n, set_language_pref
+
+        zh_directives = (
+            "用中文",
+            "说中文",
+            "中文回答",
+            "中文回复",
+            "请说中文",
+            "请用中文",
+            "使用中文",
+            "回复用中文",
+            "回答请用中文",
+        )
+        en_directives = (
+            "use english",
+            "in english",
+            "speak english",
+            "please answer in english",
+            "reply in english",
+            "answer in english",
+        )
+        target_lang: Optional[str] = None
+        if any(d in text for d in zh_directives):
+            target_lang = "zh"
+        elif any(d in text for d in en_directives):
+            target_lang = "en"
+        if target_lang is None or target_lang == current_lang():
+            return
+
+        set_language_pref(target_lang)
+        init_i18n(lang=target_lang)
+        logger.info("User language directive: switching to '%s' and persisting preference.", target_lang)
+
     # ── Single-turn chat (for manual REPL interaction) ──────────────
 
     async def chat(
@@ -473,6 +522,9 @@ class AgentCore:
 
         # Chat mode is free-form — don't inherit constraints from previous sessions
         self.context.state.task_constraints = TaskConstraints()
+
+        # Honor an explicit language directive (e.g. "用中文回答") and persist it.
+        self._apply_user_language_directive(user_input)
 
         # Detect target and phase from input
         detected_target = target or self._detect_target(user_input)
@@ -587,6 +639,7 @@ class AgentCore:
         if detected_target:
             self.context.state.target = detected_target
         self._reset_runtime_state(user_input=user_input)
+        self._apply_user_language_directive(user_input)
         self.context.add_user_message(user_input)
 
         resolved_goal = goal or user_input

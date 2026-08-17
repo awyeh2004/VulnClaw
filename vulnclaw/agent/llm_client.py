@@ -53,10 +53,10 @@ _DEFAULT_AUTO_TOOL_ROUNDS = 6
 # block verbatim (without new evidence or tool calls) burns budget and never
 # converges. Tuned against a real stuck run that repeated a ~18-line block 15
 # times in one response (~16k chars of pure duplication).
-_SELF_REP_MIN_BLOCK_LINES = 4
-_SELF_REP_MIN_REPEATS = 3
-_SELF_REP_MIN_BLOCK_CHARS = 80
-_SELF_REP_STREAM_CHECK_INTERVAL = 3000
+_SELF_REP_MIN_BLOCK_LINES = 3
+_SELF_REP_MIN_REPEATS = 2
+_SELF_REP_MIN_BLOCK_CHARS = 60
+_SELF_REP_STREAM_CHECK_INTERVAL = 2000
 
 
 def _line_signature(line: str) -> str:
@@ -131,7 +131,30 @@ def _apply_repetition_guard(
     if detected_count <= 0:
         return kept
     _append_context_message(agent, {"role": "user", "content": _REPETITION_GUARD_NOTICE.format(count=detected_count)})
+    _record_repetition_loop(agent, detected_count)
     return kept
+
+
+def _record_repetition_loop(agent: AgentContext, detected_count: int) -> None:
+    """Persist a repetition-guard firing into cross-turn memory.
+
+    The guard's user-notice lives only in the live message window, which the
+    context-budget digest folds away after a few rounds. Recording the loop in
+    ``agent_state.steps`` keeps it visible to every later turn via the digest's
+    "Recent outcomes and failed paths" block, so compaction no longer erases the
+    correction signal that stops the agent from re-running the same analysis.
+    """
+    state = getattr(getattr(getattr(agent, "context", None), "state", None), "agent_state", None)
+    if state is None or not hasattr(state, "record_step"):
+        return
+    try:
+        state.record_step(
+            reason=f"repetition guard fired: single response repeated the same block {detected_count}x",
+            observation="No new evidence or tool call produced; duplicated tail truncated by the guard.",
+            tool_calls=[],
+        )
+    except Exception:  # pragma: no cover - never let memory recording break generation
+        pass
 
 _TOOL_LOOP_TARGET_RATIO = 26_000 / 32_000
 _SYNC_STREAM_END = object()

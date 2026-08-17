@@ -60,7 +60,6 @@ _FAILURE_MARKERS = (
     "[!]",
     "failed locally",
     "traceback",
-    "exception",
     "timed out",
     "timeout",
     "connection refused",
@@ -68,6 +67,32 @@ _FAILURE_MARKERS = (
     "constraint_violation",
     "role_tool_violation",
 )
+_EXIT_CODE_RE = re.compile(r"(?im)^\s*exit code:\s*(\d+)\s*$")
+_HTTP_STATUS_RE = re.compile(
+    r"""(?im)(?:^|[\s;])(?:http\s*status|http_status|status_code|status)\s*[:=]\s*([1-5][0-9]{2})\b"""
+)
+
+
+def _explicit_tool_ok(raw: str) -> bool | None:
+    r"""Return success when the tool output carries an explicit signal.
+
+    Structured signals outrank the substring heuristics below: CTF source
+    text routinely contains words like ``exception`` even when the command
+    succeeded, so a successful ``shell_command`` whose output mentions
+    ``think\db\exception`` must not be treated as a failure.
+
+    * ``Exit code: 0``            -> success
+    * ``Exit code: <nonzero>``    -> failure
+    * ``Status: 200`` / ``status=200`` -> success (HTTP responses are data,
+      not tool health; 4xx/5xx are valid probe results)
+    * otherwise                   -> None (fall back to markers)
+    """
+    text = str(raw or "")
+    if _EXIT_CODE_RE.search(text):
+        return _EXIT_CODE_RE.search(text).group(1) == "0"
+    if _HTTP_STATUS_RE.search(text):
+        return True
+    return None
 _PROGRESS_MARKERS = (
     "flag",
     "ctf{",
@@ -194,7 +219,13 @@ def after_tool_call(
 
     raw = str(raw_output or "")
     lower = raw.lower()
-    ok = error is None and not any(marker in lower for marker in _FAILURE_MARKERS)
+    explicit = _explicit_tool_ok(raw)
+    if error is not None:
+        ok = False
+    elif explicit is not None:
+        ok = explicit
+    else:
+        ok = not any(marker in lower for marker in _FAILURE_MARKERS)
     evidence_id = evidence.id if evidence is not None else ""
     signal = CorrectionSignal(tool=tool, ok=ok, duration_ms=duration_ms, evidence_id=evidence_id)
 

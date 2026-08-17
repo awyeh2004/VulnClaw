@@ -45,17 +45,18 @@ DEFAULT_TOOL_MAX_CONCURRENT = 5
 # re-executed, so the model stops spinning on a dead path.
 _REPEAT_TOOL_LIMITS = {
     "brute_force_login": 2,
-    "http_probe_batch": 3,
-    "dir_enum": 3,
-    "source_extract": 3,
-    "runtime_diff_probe": 3,
-    "space_search": 3,
-    "subdomain_enum": 3,
-    "js_recon": 3,
-    "fetch": 5,
-    "python_execute": 4,
+    "http_probe_batch": 2,
+    "dir_enum": 2,
+    "source_extract": 2,
+    "runtime_diff_probe": 2,
+    "space_search": 2,
+    "subdomain_enum": 2,
+    "js_recon": 2,
+    "fetch": 4,
+    "python_execute": 3,
+    "shell_command": 4,
 }
-_DEFAULT_REPEAT_TOOL_LIMIT = 5
+_DEFAULT_REPEAT_TOOL_LIMIT = 4
 _GUARD_LAST_RESULT_MAX_CHARS = 1500
 
 # URLs appearing inside python_execute / shell code strings, used so the

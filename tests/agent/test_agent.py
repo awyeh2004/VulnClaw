@@ -264,6 +264,65 @@ class TestAgentAutoSave:
         assert saved["count"] == 0
 
 
+class TestUserLanguageDirective:
+    """Mid-session "用中文回答" directives must switch i18n and persist."""
+
+    def _make_agent(self, tmp_path):
+        from vulnclaw.agent.core import AgentCore
+        from vulnclaw.config.schema import VulnClawConfig
+
+        config = VulnClawConfig()
+        config.session.output_dir = tmp_path
+        return AgentCore(config)
+
+    def test_chinese_directive_switches_and_persists(self, monkeypatch, tmp_path):
+        import os
+
+        os.environ.pop("VULNCLAW_LANG", None)
+        os.environ.pop("LANG", None)
+        monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+        from vulnclaw.i18n import init_i18n
+
+        init_i18n(lang="en")
+        agent = self._make_agent(tmp_path)
+        agent._apply_user_language_directive("请用中文回答后续问题")
+
+        from vulnclaw.i18n import current_lang, get_language_pref
+
+        assert current_lang() == "zh"
+        assert get_language_pref() == "zh"
+
+    def test_english_directive_switches_and_persists(self, monkeypatch, tmp_path):
+        import os
+
+        os.environ.pop("VULNCLAW_LANG", None)
+        os.environ.pop("LANG", None)
+        monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+        from vulnclaw.i18n import init_i18n
+
+        init_i18n(lang="zh")
+        agent = self._make_agent(tmp_path)
+        agent._apply_user_language_directive("please reply in English from now on")
+
+        from vulnclaw.i18n import current_lang, get_language_pref
+
+        assert current_lang() == "en"
+        assert get_language_pref() == "en"
+
+    def test_non_language_input_does_not_change_preference(self, monkeypatch, tmp_path):
+        import os
+
+        os.environ.pop("VULNCLAW_LANG", None)
+        os.environ.pop("LANG", None)
+        monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+        from vulnclaw.i18n import get_language_pref, init_i18n
+
+        init_i18n(lang="zh")
+        agent = self._make_agent(tmp_path)
+        agent._apply_user_language_directive("扫一下这个网站是否有sql注入")
+        assert get_language_pref() is None
+
+
 class TestTargetState:
     """Test target-level resume state."""
 

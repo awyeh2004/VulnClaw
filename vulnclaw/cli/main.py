@@ -75,6 +75,8 @@ from vulnclaw.config.settings import (
     set_config_value,
 )
 from vulnclaw.config.token_provider import has_llm_credentials
+from vulnclaw.ctf_platform.client import is_configured as ctf2_is_configured
+from vulnclaw.ctf_platform.client import read_challenge as ctf2_read_challenge
 from vulnclaw.i18n import _
 from vulnclaw.i18n.phases import localized_phase_name
 from vulnclaw.repl_runner import run_repl_call
@@ -254,7 +256,7 @@ def _run_repl_command(name: str, args: str, agent: Any, config: Any) -> Any:
 def _repl_switch_language(args: str, agent: Any, config: Any) -> Any:
     """Switch the interface language from the classic REPL."""
     from vulnclaw.cli.tui import _SUPPORTED_LANGUAGES, rebuild_translations
-    from vulnclaw.i18n import init_i18n
+    from vulnclaw.i18n import init_i18n, set_language_pref
 
     lang = args.strip().lower()
     if lang not in _SUPPORTED_LANGUAGES:
@@ -267,6 +269,7 @@ def _repl_switch_language(args: str, agent: Any, config: Any) -> Any:
 
     config.session.language = lang
     save_config(config)
+    set_language_pref(lang)
     init_i18n(lang=lang if lang != "auto" else None, config=config)
     rebuild_translations()
     agent.apply_config(config)
@@ -1419,6 +1422,81 @@ def solve(
         live_agent = holder.get("agent")
         if live_agent is not None:
             _emit_solve_report_if_completed(live_agent, config)
+
+
+@app.command("ctf2")
+def ctf2(
+    challenge_id: str = typer.Argument(..., help="CTF2 challenge id"),
+    practice_id: str = typer.Argument(
+        ..., help="CTF2 practice ground id the challenge belongs to"
+    ),
+    max_steps: int = typer.Option(
+        240, "--max-steps", help="Runaway safety budget for autonomous turns"
+    ),
+) -> None:
+    """Solve a CTF2 (DASCTF) challenge directly from its ids.
+
+    Reads the challenge via the CTF2 open API, builds a focused solve goal,
+    then hands off to the standard model-led solve loop. Only the two ids are
+    needed; attachment download is intentionally out of scope (the open API
+    exposes no file endpoint).
+    """
+    if not ctf2_is_configured():
+        err_console.print(
+            "[!] CTF2 platform token not configured. Set the VULNCLAW_CTF2_API_KEY "
+            "environment variable, then retry."
+        )
+        raise typer.Exit(1)
+
+    if not has_llm_credentials(load_config().llm):
+        err_console.print("[!] Configure LLM credentials first (api_key or auth_mode).")
+        raise typer.Exit(1)
+
+    chall_data: dict = {}
+
+    async def _load_challenge():
+        payload = await ctf2_read_challenge(practice_id, challenge_id)
+        chall_data.update(payload.get("data") or {})
+
+    try:
+        asyncio.run(_load_challenge())
+    except Exception as exc:  # network or platform errors must not crash
+        err_console.print(f"[!] Failed to read challenge from CTF2: {exc}")
+        raise typer.Exit(1)
+
+    name = chall_data.get("name")
+    if not name:
+        err_console.print("[!] Challenge not found for the given ids.")
+        raise typer.Exit(1)
+
+    category = chall_data.get("category") or ""
+    difficulty = chall_data.get("difficulty") or ""
+    description = str(chall_data.get("description") or "").strip()
+    requires_env = bool(chall_data.get("has_container"))
+    goal = (
+        f"Solve CTF2 challenge '{name}' (category {category}, difficulty "
+        f"{difficulty}) on practice {practice_id}. Achieve the flag and submit it "
+        f"with ctf2_submit_flag (practice_id {practice_id}, challenge_id "
+        f"{challenge_id}). "
+        f"challenge_id is {challenge_id}. Challenge description follows:\n{description}\n"
+        f"CTF2 open API cannot download attachments; do not attempt to fetch files "
+        f"or attack ctf2*.dasctf.com hosts. "
+        f"Solve from the description "
+        + ("and, if a dynamic target is required, start it with ctf2_start_environment and inspect the authored target, then submit the flag."
+            if requires_env
+            else "(this challenge needs no running environment).")
+    )
+    console.print(
+        f"[*] CTF2 challenge [bold]{name}[/] | category [bold]{category}[/] | "
+        f"difficulty [bold]{difficulty}[/]"
+    )
+    # Hand off to the standard solve loop; reuse its full orchestration.
+    solve(
+        target=practice_id,
+        goal=goal,
+        max_steps=max_steps,
+        resume=False,
+    )
 
 
 @app.command()

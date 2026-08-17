@@ -224,3 +224,95 @@ def test_correction_layer_pins_php_pop_chain_entry_and_sink_hint():
     )
     assert any("entry/sink property relationships" in item for item in state.correction_hints)
     assert "PHP POP/deserialization chain observed" in signal.model_hint()
+
+
+def test_correction_layer_trusts_exit_code_over_failure_markers_in_source_text():
+    """A successful shell_command whose output mentions 'exception' (PHP source
+    paths like think\\db\\exception) must not be marked as a tool failure."""
+    agent = _agent()
+    raw = (
+        "Command: cd $env:TEMP; Get-ChildItem -Recurse www_src -Directory\n"
+        "Workdir: D:\\tmp\n"
+        "Exit code: 0\n"
+        "Wall time: 200ms\n"
+        "Output:\n"
+        "C:\\tmp\\www_src\\thinkphp\\library\\think\\db\\exception\n"
+        "C:\\tmp\\www_src\\thinkphp\\library\\think\\route\n"
+    )
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="shell_command",
+        arguments={"command": "Get-ChildItem"},
+        raw_output=raw,
+        duration_ms=200,
+        evidence=record,
+    )
+
+    assert signal.ok is True
+    assert agent.context.state.agent_state.tool_health["shell_command"].status == "healthy"
+
+
+def test_correction_layer_marks_nonzero_exit_code_as_failure():
+    agent = _agent()
+    raw = (
+        "Command: php probe.php\n"
+        "Exit code: 1\n"
+        "Output:\n"
+        "warning only, no exception word here\n"
+    )
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="shell_command",
+        arguments={"command": "php probe.php"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    assert signal.ok is False
+    assert agent.context.state.agent_state.tool_health["shell_command"].status == "degraded"
+
+
+def test_correction_layer_treats_http_status_as_probe_result_not_tool_health():
+    agent = _agent()
+    raw = (
+        "Request: GET http://target/www.zip\n"
+        "Final URL: http://target/www.zip\n"
+        "Status: 200\n"
+        "Headers: {'content-type': 'application/zip', 'content-length': '493604'}\n"
+        "Body (length 471106 chars): PK\x03\x04 ...binary...\n"
+    )
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="fetch",
+        arguments={"url": "http://target/www.zip"},
+        raw_output=raw,
+        duration_ms=500,
+        evidence=record,
+    )
+
+    assert signal.ok is True
+    assert agent.context.state.agent_state.tool_health["fetch"].status == "healthy"
+
+
+def test_correction_layer_falls_back_to_markers_without_structured_signal():
+    agent = _agent()
+    raw = "Tool python_execute failed locally: TimeoutError: probe timed out"
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="python_execute",
+        arguments={"code": "print('x')"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    assert signal.ok is False
