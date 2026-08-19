@@ -8,6 +8,7 @@ Tool choice and investigation strategy are deliberately left to the model.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -739,10 +740,18 @@ async def _solve_impl(
             )
         except Exception as exc:
             repeated_errors += 1
-            reason = f"stopped after repeated LLM/tool errors: {exc}"
-            emit("error", {"step": step, "error": str(exc)})
-            if repeated_errors >= 3:
+            err_text = str(exc)
+            reason = f"stopped after repeated LLM/tool errors: {err_text}"
+            emit("error", {"step": step, "error": err_text})
+            # A billing/gateway hard stop (e.g. 402 Insufficient Balance) will not
+            # recover by retrying; stop immediately with a loud, explicit reason
+            # instead of burning three silent retries.
+            if "402" in err_text or "Insufficient Balance" in err_text:
+                state.complete_reason = reason
                 break
+            if repeated_errors >= 5:
+                break
+            await asyncio.sleep(2.0 * repeated_errors)
             continue
 
         repeated_errors = 0
@@ -768,6 +777,14 @@ async def _solve_impl(
 
         stall_guard_message = ""
         stop_for_stall = False
+        if not cleaned and not tools_used and not new_evidence_count:
+            hint = (
+                "The model returned neither text nor a tool call for this turn. "
+                "Pick the single highest-value next action and emit its tool call now; "
+                "do not continue thinking without acting."
+            )
+            state.add_correction_hint(hint)
+            stall_guard_message = f"[empty turn] {hint}"
         repetition_hint = _thinking_repetition_hint(state, cleaned)
         if repetition_hint and tools_used and not new_evidence_count:
             state.add_correction_hint(repetition_hint)
@@ -883,7 +900,7 @@ async def _solve_impl(
         reason = state.complete_reason
     elif needs_user and reason == "runaway safety budget reached":
         reason = "waiting for user input"
-    elif repeated_errors >= 3:
+    elif repeated_errors >= 5:
         reason = reason or "stopped after repeated errors"
 
     finalization_error = await finalize_parent(agent, state)
@@ -892,6 +909,11 @@ async def _solve_impl(
         state.complete_reason = finalization_error
         reason = finalization_error
         state.add_correction_hint(finalization_error)
+
+    # Surface the real termination reason to the CLI/report even when the run
+    # did not complete, instead of the generic "not complete" placeholder.
+    if not state.completed and not state.complete_reason:
+        state.complete_reason = reason
 
     try:
         agent.context.state.save()

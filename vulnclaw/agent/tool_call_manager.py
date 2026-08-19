@@ -52,11 +52,14 @@ _REPEAT_TOOL_LIMITS = {
     "space_search": 2,
     "subdomain_enum": 2,
     "js_recon": 2,
-    "fetch": 4,
-    "python_execute": 3,
-    "shell_command": 4,
+    # Generic observation/probe tools get generous budgets: stateful web
+    # challenges legitimately re-fetch the same endpoint (e.g. the file list)
+    # many times to observe changing state (bot-posted exfil results).
+    "fetch": 50,
+    "python_execute": 30,
+    "shell_command": 30,
 }
-_DEFAULT_REPEAT_TOOL_LIMIT = 4
+_DEFAULT_REPEAT_TOOL_LIMIT = 8
 _GUARD_LAST_RESULT_MAX_CHARS = 1500
 
 # URLs appearing inside python_execute / shell code strings, used so the
@@ -127,6 +130,28 @@ def _target_fingerprint(tool_name: str, func_args: dict[str, Any]) -> str:
     return f"{tool_name}::{ '|'.join(sorted(urls)) }"
 
 
+def _repeat_tool_limit(agent: AgentContext, tool_name: str) -> int:
+    """Resolve the repetition-guard threshold, preferring session config.
+
+    ``session.repeat_tool_limits[tool_name]`` wins; otherwise the module table,
+    then ``session.repeat_tool_limit_default``, then the module default.
+    """
+    cfg = getattr(getattr(agent, "config", None), "session", None)
+    if cfg is not None:
+        limits = getattr(cfg, "repeat_tool_limits", None) or {}
+        if limits:
+            value = limits.get(tool_name)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
+        dflt = getattr(cfg, "repeat_tool_limit_default", 0) or 0
+        if dflt and tool_name not in _REPEAT_TOOL_LIMITS:
+            return int(dflt)
+    return _REPEAT_TOOL_LIMITS.get(tool_name, _DEFAULT_REPEAT_TOOL_LIMIT)
+
+
 def _repeat_guard_violation(
     agent: AgentContext, tool_name: str, func_args: dict[str, Any]
 ) -> str | None:
@@ -137,7 +162,7 @@ def _repeat_guard_violation(
     fp = _target_fingerprint(tool_name, func_args)
     if not fp:
         return None
-    limit = _REPEAT_TOOL_LIMITS.get(tool_name, _DEFAULT_REPEAT_TOOL_LIMIT)
+    limit = _repeat_tool_limit(agent, tool_name)
     count = int(runtime.tool_target_calls.get(fp, 0))
     if count < limit:
         runtime.tool_target_calls[fp] = count + 1

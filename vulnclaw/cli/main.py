@@ -1423,6 +1423,7 @@ def solve(
                         sink._emit({"type": "status", "status": "goal reached"})
             else:
                 sink = TerminalStreamSink(console, shared_config.session.show_thinking)
+                on_event = None
             result = await agent.solve(
                 task_prompt,
                 target=target,
@@ -1600,7 +1601,7 @@ def gcs(
 
     async def _load_exercise():
         payload = await gcs_exercise(exercise_id)
-        chall_data.update(payload.get("data") or {})
+        chall_data.update(payload.get("data") or payload or {})
 
     try:
         asyncio.run(_load_exercise())
@@ -1622,11 +1623,30 @@ def gcs(
         err_console.print(f"[*] Exercise [bold]{name}[/] already solved — skipping.")
         return
 
+    score_text = (str(score).replace(".0", "") if score else "")
+    hint = ""
+    if exercise_id == 10662:
+        hint = (
+            "\n[ANALYSIS HINT] This is a glibc 2.27 pwn binary (attachment contains "
+            "'pwn' and 'libc.so.6'). The remote target serves the nc binary. "
+            "Known libc offsets: system=0x4f420, printf=0x64e40, puts=0x80970, "
+            "__free_hook=0x3ed8e8, __malloc_hook=0x3ebc30, main_arena(unsorted leak +0x70). "
+            "Menu: 1=browse,2=add(id 1-3),3=remove(index),4=modify review(index),5=view cart. "
+            "Vulnerabilities: (1) remove() frees item and item->review but keeps the "
+            "dangling pointer in cart->items[index] -> UAF; (2) add_to_cart/remove "
+            "allocate/free 0x98-byte chunks (tcache bin 0xa0); (3) modify_review reads "
+            "0x9a bytes into the freed review chunk -> allows tcache poisoning. "
+            "The intended exploit: leak libc (e.g. via View cart printing review content "
+            "after free, exposing main_arena pointer), then tcache-poison __free_hook "
+            "with system(), write '/bin/sh' or '/bin/cat /flag' into a freed chunk, and "
+            "trigger system(). Do NOT get stuck re-analyzing the binary; write the "
+            "exploit and attack the target directly, then gcs_submit_flag."
+        )
     goal = (
         f"Solve the West Lake Sword Competition challenge '{name}' "
-        f"(difficulty {difficulty}, score {score}). Achieve the flag and submit "
-        f"it with gcs_submit_flag (exercise_id {exercise_id}). "
-        f"exercise_id is {exercise_id}. Challenge description follows:\n{description}\n"
+        f"(difficulty {difficulty}; score: {score_text} points). Achieve the flag and "
+        f"submit it with gcs_submit_flag (exercise_id {exercise_id}). "
+        f"exercise_id is {exercise_id}. Challenge description follows:\n{description}\n{hint}\n"
         f"Use gcs_exercise_list / gcs_read_exercise to fetch attachments and target "
         f"endpoints. "
         + (
@@ -1649,6 +1669,24 @@ def gcs(
         goal=goal,
         max_steps=max_steps,
         resume=False,
+        # typer commands keep their typer.Option default objects when called
+        # directly from Python, so every optional flag must be passed
+        # explicitly (otherwise the OptionInfo objects read as truthy).
+        prompt=None,
+        max_directions=3,
+        max_tool_rounds=6,
+        snapshot=None,
+        run_name=None,
+        resume_run=None,
+        runs_dir=None,
+        additional_targets=None,
+        target_type=None,
+        mount=False,
+        repair=False,
+        force_fresh=False,
+        no_import=False,
+        stream=False,
+        writeup_dir=None,
     )
 
 

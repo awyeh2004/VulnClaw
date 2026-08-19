@@ -127,6 +127,25 @@ def detect_phase(user_input: str) -> Optional[PentestPhase]:
     return None
 
 
+def _is_plausible_host(candidate: str) -> bool:
+    """Return True when ``candidate`` can be a real scan target host.
+
+    Guards against version strings like ``glibc 2.27`` or ``node 18.3`` being
+    mistaken for hosts: a purely numeric dotted token is only accepted when it is
+    a valid IPv4 address (four octets in 0-255). Hostnames must contain letters,
+    or be a localhost/IPv6-form token that the caller already accepted as a URL.
+    """
+    if any(ch.isalpha() for ch in candidate):
+        last = candidate.rsplit(".", 1)[-1].lower()
+        if not last.isalpha():
+            return False
+        return True
+    octets = candidate.split(".")
+    if len(octets) == 4:
+        return all(o.isdigit() and 0 <= int(o) <= 255 for o in octets)
+    return False
+
+
 def detect_target(user_input: str) -> Optional[str]:
     """Extract target from user input."""
     for pattern in (
@@ -134,9 +153,15 @@ def detect_target(user_input: str) -> Optional[str]:
         r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})",
         r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)",
     ):
-        match = re.search(pattern, user_input)
-        if match:
-            return match.group(1).rstrip("/.") if match.groups() else match.group(0)
+        for match in re.finditer(pattern, user_input):
+            candidate = (
+                match.group(1).rstrip("/.") if match.groups() else match.group(0)
+            )
+            if not candidate:
+                continue
+            if not _is_plausible_host(candidate):
+                continue
+            return candidate
     return None
 
 

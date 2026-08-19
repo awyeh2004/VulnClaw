@@ -51,6 +51,7 @@ from vulnclaw.agent.system_prompt import build_dynamic_system_prompt
 from vulnclaw.agent.tool_call_manager import safe_parse_tool_args
 from vulnclaw.config.schema import VulnClawConfig, resolve_engine
 from vulnclaw.config.settings import make_openai_client
+from vulnclaw.gcs_platform.gateway_proxy import is_gateway_url
 from vulnclaw.i18n import _
 from vulnclaw.target_state.store import save_target_state
 
@@ -352,9 +353,21 @@ class AgentCore:
             token = resolve_llm_token(llm)
         if self._client is None:
             try:
+                base_url = llm.base_url
+                if is_gateway_url(base_url):
+                    # The DASCTF gateway treats the bare URL as the complete
+                    # endpoint, so route chat.completions through a local proxy
+                    # that strips the SDK's "/chat/completions" suffix.
+                    from vulnclaw.gcs_platform.gateway_proxy import (
+                        ensure_gateway_proxy_running,
+                    )
+
+                    base_url = ensure_gateway_proxy_running(
+                        upstream=llm.base_url, api_key=token or ""
+                    )
                 self._client = make_openai_client(
                     api_key=token or "placeholder",
-                    base_url=llm.base_url,
+                    base_url=base_url,
                 )
             except ImportError:
                 raise RuntimeError("请安装 openai 包: pip install openai")

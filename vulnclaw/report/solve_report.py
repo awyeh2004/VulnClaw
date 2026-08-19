@@ -140,6 +140,12 @@ def render_solve_report(state: AgentState) -> str:
         f"- Result: {state.complete_reason or '(none)'}",
         f"- Generated at: {datetime.now().isoformat(timespec='seconds')}",
     ]
+    prompt_tokens = int(getattr(state, "llm_usage_prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(state, "llm_usage_completion_tokens", 0) or 0)
+    lines.append(
+        f"- LLM usage: prompt={prompt_tokens} completion={completion_tokens} "
+        f"total={prompt_tokens + completion_tokens}"
+    )
     if flags:
         lines.append(f"- Flag / proof: `{flags[0]}`")
 
