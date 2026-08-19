@@ -123,6 +123,35 @@ def _emit_solve_report_if_completed(agent: Any, config: Any) -> str:
     return str(report_path)
 
 
+def _resolve_team_meta_from_gcs() -> tuple[str, str]:
+    """Fetch overall rank and solved-challenge count from the competition API.
+
+    Returns ``(rank, solved_count)`` as strings. rank comes from
+    ``answer-panel/overview`` (``stageRank``); solved_count is the number of
+    ``hasSolved`` entries across the exercise corpus. Best-effort: returns
+    empty strings on any failure so callers can fall back to env vars.
+    """
+    import asyncio
+
+    try:
+        from vulnclaw.gcs_platform import client as gcs
+
+        async def _fetch() -> tuple[str, str]:
+            overview = await gcs.overview()
+            rank = str(overview.get("stageRank") or "")
+            solved = 0
+            tree = await gcs.exercise_list()
+            for category in tree or []:
+                for item in category.get("corpus", []):
+                    if item.get("hasSolved"):
+                        solved += 1
+            return rank, str(solved)
+
+        return asyncio.run(_fetch())
+    except Exception:
+        return "", ""
+
+
 def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Optional[str]:
     """Write a single-challenge competition writeup with text-evidence (no screenshots).
 
@@ -131,12 +160,14 @@ def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Opt
     the agent wrote. Team info comes from the environment; the model name is
     taken from the active LLM config.
     """
+    from pathlib import Path
+
     state = getattr(getattr(getattr(agent, "context", None), "state", None), "agent_state", None)
     if state is None or not getattr(state, "completed", False):
         return None
+    if writeup_dir is not None and not isinstance(writeup_dir, Path):
+        writeup_dir = Path(writeup_dir)
     try:
-        from pathlib import Path
-
         from vulnclaw.report.writeup import (
             WriteupMeta,
             default_writeup_dir,
@@ -152,10 +183,25 @@ def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Opt
     model_name = ""
     if getattr(config, "llm", None) is not None:
         model_name = str(getattr(config.llm, "model", "") or "")
+    team_name = os.environ.get("VULNCLAW_TEAM_NAME", "").strip()
+    rank = os.environ.get("VULNCLAW_TEAM_RANK", "").strip()
+    solved_count = os.environ.get("VULNCLAW_TEAM_SOLVED", "").strip()
+    # When the rank / solved-count env vars are unset, try to fetch them from
+    # the competition API so the writeup header is populated automatically:
+    # rank = overview.stageRank (overall), solved_count = number of hasSolved.
+    if (not rank or not solved_count) and gcs_is_configured():
+        try:
+            auto_rank, auto_solved = _resolve_team_meta_from_gcs()
+            if not rank:
+                rank = auto_rank
+            if not solved_count:
+                solved_count = auto_solved
+        except Exception:
+            pass
     meta = WriteupMeta(
-        team_name=os.environ.get("VULNCLAW_TEAM_NAME", ""),
-        rank=os.environ.get("VULNCLAW_TEAM_RANK", ""),
-        solved_count=os.environ.get("VULNCLAW_TEAM_SOLVED", ""),
+        team_name=team_name,
+        rank=rank,
+        solved_count=solved_count,
         total_tokens=int(getattr(state, "llm_usage_prompt_tokens", 0) or 0)
         + int(getattr(state, "llm_usage_completion_tokens", 0) or 0),
         model_name=model_name,
@@ -1493,7 +1539,7 @@ def solve(
         if live_agent is not None:
             _emit_solve_report_if_completed(live_agent, config)
             if writeup_dir:
-                _emit_competition_writeup(live_agent, config, Path(writeup_dir))
+                _emit_competition_writeup(live_agent, config, writeup_dir)
 
 
 @app.command("ctf2")
