@@ -101,6 +101,62 @@ def make_openai_client(api_key: str, base_url: str, timeout: float | None = None
     return OpenAI(**kwargs)
 
 
+# ── Per-category model routing ─────────────────────────────────────
+# Ordered difficulty ranks so "EASY" < "MEDIUM" < "HARD" (case-insensitive).
+_DIFFICULTY_RANK = {"easy": 1, "medium": 2, "hard": 3, "insane": 4}
+
+
+def _diff_rank(value: str) -> int:
+    return _DIFFICULTY_RANK.get(str(value or "").strip().lower(), 0)
+
+
+def resolve_llm_route(config: Any, category: str, difficulty: str):
+    """Pick the first route whose categories match ``category`` and whose
+    ``max_difficulty`` is not lower than ``difficulty``.
+
+    Returns the matched ``LLMRouteConfig``, or ``None`` when routing is disabled
+    or no route matches (caller falls back to the top-level model).
+    """
+    llm = getattr(config, "llm", None)
+    if llm is None or not getattr(llm, "route_enabled", False):
+        return None
+    routes = list(getattr(llm, "routes", None) or [])
+    if not routes:
+        return None
+    cat = str(category or "").strip().lower()
+    diff = _diff_rank(difficulty)
+    for route in routes:
+        cats = [c.strip().lower() for c in (getattr(route, "categories", None) or [])]
+        if cats and cat not in cats:
+            continue
+        max_diff = _diff_rank(getattr(route, "max_difficulty", "") or "")
+        if max_diff and diff > max_diff:
+            continue
+        return route
+    return None
+
+
+def apply_llm_route(config: Any, route: Any) -> None:
+    """Overwrite ``config.llm``'s top-level connection fields with the route.
+
+    This mutates the in-memory config so the agent builds its OpenAI client from
+    the routed model. Only non-empty route fields are applied.
+    """
+    if route is None:
+        return
+    llm = getattr(config, "llm", None)
+    if llm is None:
+        return
+    for field, value in (
+        ("provider", getattr(route, "provider", "")),
+        ("base_url", getattr(route, "base_url", "")),
+        ("api_key", getattr(route, "api_key", "")),
+        ("model", getattr(route, "model", "")),
+    ):
+        if value:
+            setattr(llm, field, value)
+
+
 # ── Load / Save ────────────────────────────────────────────────────
 
 

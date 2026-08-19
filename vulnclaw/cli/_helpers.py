@@ -462,6 +462,52 @@ def _append_action_constraints(
     return f"{prompt} {' '.join(constraints)}."
 
 
+def _apply_task_model_route(config: Any, target: str) -> None:
+    """Resolve and apply the per-category model route for a numeric exercise id.
+
+    When ``target`` looks like an exercise id (digits), the challenge's category
+    and difficulty are looked up from the GCS platform and the first matching
+    ``llm.routes`` entry (if routing is enabled) is applied to ``config.llm``.
+    Non-numeric targets (plain URLs/IPs) keep the default model.
+    """
+    target_str = str(target or "").strip()
+    if not target_str.isdigit():
+        return
+    llm = getattr(config, "llm", None)
+    if llm is None or not getattr(llm, "route_enabled", False):
+        return
+    try:
+        from vulnclaw.gcs_platform import client as gcs
+
+        import asyncio
+
+        async def _fetch() -> tuple[str, str]:
+            tree = await gcs.exercise_list()
+            category = ""
+            for cat in tree or []:
+                for item in cat.get("corpus", []):
+                    if str(item.get("id")) == target_str:
+                        category = cat.get("name") or ""
+                        break
+                if category:
+                    break
+            detail = await gcs.exercise(int(target_str))
+            difficulty = str((detail or {}).get("difficulty") or "")
+            return category, difficulty
+
+        category, difficulty = asyncio.run(_fetch())
+        if not category:
+            return
+        from vulnclaw.config.settings import apply_llm_route, resolve_llm_route
+
+        route = resolve_llm_route(config, category, difficulty)
+        if route is not None:
+            apply_llm_route(config, route)
+    except Exception:
+        # Best-effort: any lookup failure keeps the default model.
+        return
+
+
 async def _run_cli_orchestrated_task(
     *,
     command: str,
@@ -478,6 +524,9 @@ async def _run_cli_orchestrated_task(
     from vulnclaw.orchestrator import run_agent_task
 
     config = load_config()
+    # Per-category model routing: if enabled, resolve the model from the
+    # challenge's category/difficulty before the agent builds its LLM client.
+    _apply_task_model_route(config, target)
     mcp_manager = MCPLifecycleManager(config)
     mcp_manager.start_enabled_servers()
     agent = AgentCore(config, mcp_manager)

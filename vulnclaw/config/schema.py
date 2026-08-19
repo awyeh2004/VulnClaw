@@ -116,6 +116,34 @@ PROVIDER_PRESETS: dict[LLMProvider, dict[str, str]] = {
 }
 
 
+class LLMRouteConfig(BaseModel):
+    """A per-category model route (alternative to the single top-level model).
+
+    When ``LLMConfig.route_enabled`` is true, the solve entry picks the first
+    route whose ``categories`` contains the challenge category and whose
+    ``max_difficulty`` (if set) is not lower than the challenge difficulty.
+    The chosen route's connection fields then override ``LLMConfig``'s
+    top-level provider/base_url/api_key/model for that run.
+    """
+
+    name: str = Field(default="", description="Route label (e.g. 'glm', 'ds')")
+    provider: str = Field(default="openai", description="Provider name")
+    base_url: str = Field(default="", description="OpenAI-compatible API base URL")
+    api_key: str = Field(default="", description="Static API key for this route")
+    model: str = Field(default="", description="Model name for this route")
+    categories: list[str] = Field(
+        default_factory=list,
+        description="Challenge categories this route applies to (e.g. ['CRYPTO','Misc','Pwn'])",
+    )
+    max_difficulty: str = Field(
+        default="",
+        description=(
+            "Highest difficulty this route handles (EASY/MEDIUM/HARD). Empty = any. "
+            "Challenges above this difficulty fall through to later routes."
+        ),
+    )
+
+
 class LLMConfig(BaseModel):
     """LLM provider configuration."""
 
@@ -162,6 +190,24 @@ class LLMConfig(BaseModel):
     temperature: float = Field(default=0.1, description="Sampling temperature")
     reasoning_effort: str = Field(
         default="high", description="Reasoning effort level (OpenAI o-series only)"
+    )
+    # ── Per-category model routing ─────────────────────────────────────
+    # When ``route_enabled`` is true, the solve entry resolves the effective
+    # model from ``routes`` based on the challenge category/difficulty instead
+    # of always using the fields above. ``routes`` are tried in order; the
+    # first whose ``categories`` contains the challenge category AND whose
+    # ``max_difficulty`` (if set) is >= the challenge difficulty wins. If no
+    # route matches, the top-level fields are used (default behavior).
+    route_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable per-category model routing (regression check switch). When false, "
+            "the single top-level model is always used (legacy behavior)."
+        ),
+    )
+    routes: list["LLMRouteConfig"] = Field(
+        default_factory=list,
+        description="Ordered per-category model routes used when route_enabled=true",
     )
 
     def key_pool(self) -> list[str]:
