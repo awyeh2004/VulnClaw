@@ -126,6 +126,9 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "regression: regression check for the per-category model routing (run with -m regression)",
+]
 
 # Coverage is opt-in to keep normal runs fast:
 #   pytest --cov=vulnclaw --cov-report=term-missing
