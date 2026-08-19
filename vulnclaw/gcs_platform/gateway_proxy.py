@@ -66,7 +66,16 @@ class _GatewayProxyHandler(BaseHTTPRequestHandler):
     def _send_raw(self, resp: httpx.Response) -> None:
         self.send_response(resp.status_code)
         for key, value in resp.headers.items():
-            if key.lower() in ("transfer-encoding", "connection", "content-length"):
+            # The upstream body has already been decoded by httpx, so re-adding
+            # content-encoding/content-length/transfer-encoding would corrupt
+            # the response for the SDK (e.g. it would try to gunzip an already
+            # decoded body). Strip them and let httpx recompute on our side.
+            if key.lower() in (
+                "transfer-encoding",
+                "connection",
+                "content-length",
+                "content-encoding",
+            ):
                 continue
             try:
                 self.send_header(key, value)
