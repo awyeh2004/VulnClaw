@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from vulnclaw.agent.blackboard import Blackboard
 from vulnclaw.agent.context import TaskConstraints
+from vulnclaw.agent.web_map import WebMap
 
 try:
     from vulnclaw.agent.reflexion import ReflexionEngine
@@ -83,6 +84,7 @@ class RuntimeState:
     consecutive_errors: int = 0
 
     blackboard: Blackboard = field(default_factory=Blackboard)
+    web_map: WebMap = field(default_factory=WebMap)
 
     # Cross-round tool-call suppression: keyed by (tool_name, target fingerprint).
     tool_target_calls: dict[str, int] = field(default_factory=dict)
@@ -102,3 +104,14 @@ def get_or_create_blackboard(agent: Any) -> Blackboard:
         if bb is not None:
             return bb
     return _BB()
+
+
+def get_or_create_web_map(agent: Any) -> WebMap:
+    """Get or create a WebMap from agent.runtime."""
+    from vulnclaw.agent.web_map import WebMap as _WM
+
+    if hasattr(agent, "runtime"):
+        wm = getattr(agent.runtime, "web_map", None)
+        if wm is not None:
+            return wm
+    return _WM()

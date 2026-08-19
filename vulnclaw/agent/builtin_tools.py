@@ -911,6 +911,14 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         except Exception as e:
             return f"[!] blackboard 工具执行错误: {e}"
 
+# ── WebMap site-structure recorder ──
+    if tool_name in ("web_map_add", "web_map_link", "web_map_render", "web_map_summary", "web_map_reset"):
+        try:
+            from vulnclaw.agent.web_map import dispatch_web_map_tool
+            return dispatch_web_map_tool(agent, tool_name, args)
+        except Exception as e:
+            return f"[!] web_map 工具执行错误: {e}"
+
     if tool_name == "memory_search":
         query = str(args.get("query") or "").strip()
         if not query:
@@ -1139,6 +1147,21 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "blackboard_add_intent",
     "blackboard_start_intent",
     "blackboard_reject_intent",
+    "web_map_add",
+    "web_map_link",
+    "web_map_render",
+    "web_map_summary",
+    "web_map_reset",
+    # GCS platform tools (exercise read / env lifecycle / flag submission) are
+    # essential for the DASCTF solve loop and must never be pruned by the
+    # task-type tool inference (e.g. a CRYPTO task bundle would otherwise drop
+    # gcs_submit_flag and leave the agent unable to submit a solved flag).
+    "gcs_notice_list",
+    "gcs_exercise_list",
+    "gcs_read_exercise",
+    "gcs_build_env",
+    "gcs_recover_env",
+    "gcs_submit_flag",
 })
 
 # Task-specific tool bundles keyed by inferred task type. Names not listed here
@@ -1366,6 +1389,77 @@ def build_openai_tools(
 
     for tool in intel_tool_schemas():
         append_tool(tool)
+
+    # ── WebMap site-structure recorder tools ─────────────────────────
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "web_map_add",
+                "description": "Record a discovered web page or endpoint into the site map (URL, HTTP method, query/form params, content-type, notes). Use this whenever you discover a new path or endpoint so later rounds and teammates do not re-scrape it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Full URL of the page or endpoint, e.g. http://host/index.php"},
+                        "method": {"type": "string", "description": "HTTP method observed (GET/POST/etc.)"},
+                        "params": {"type": "string", "description": "Query string or form parameters observed"},
+                        "content_type": {"type": "string", "description": "Response content type (e.g. text/html, application/json)"},
+                        "notes": {"type": "string", "description": "What this page does or notable details"},
+                    },
+                    "required": ["url"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "web_map_link",
+                "description": "Record how one mapped page reaches another (kind: link, form, redirect, iframe, ajax, script). Unknown endpoints are auto-created as placeholder pages so the graph stays connected.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from_url": {"type": "string", "description": "Source page URL"},
+                        "to_url": {"type": "string", "description": "Target page or endpoint URL"},
+                        "kind": {"type": "string", "description": "Relationship kind: link, form, redirect, iframe, ajax, script"},
+                        "notes": {"type": "string", "description": "Optional detail (e.g. form field names)"},
+                    },
+                    "required": ["from_url", "to_url"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "web_map_render",
+                "description": "Render the recorded site map as a Mermaid flowchart plus a text summary. Paste the mermaid block into https://mermaid.live to visualize the site structure.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "web_map_summary",
+                "description": "Read the recorded site map as text: every page/endpoint and the links between them. Useful before planning further exploration.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "web_map_reset",
+                "description": "Clear the site map (e.g. when starting a fresh target).",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
 
     for tool in traffic_tool_schemas():
         append_tool(tool)
@@ -2140,6 +2234,59 @@ def _write_python_audit(
 # ── Blackboard tools ────────────────────────────────────────────────
 
 
+# HTTP-client call names whose string-literal URL argument is a real outbound
+# request the script makes. Payload/document strings (SVG xmlns, DTD refs,
+# SSRF/redirect urls inside crafted payloads) contain http(s):// text too, but
+# the script never requests those hosts itself, so they must not trip the scope
+# check. Matching the actual call sites keeps the out-of-scope protection while
+# no longer false-positiving on payload content (e.g. "http://www.w3.org/2000/svg").
+_HTTP_CALL_NAMES = {
+    "requests.get", "requests.post", "requests.put", "requests.patch",
+    "requests.delete", "requests.head", "requests.options", "requests.request",
+    "httpx.get", "httpx.post", "httpx.put", "httpx.patch", "httpx.delete",
+    "httpx.head", "httpx.request",
+    "urllib.request.urlopen", "urlopen", "request.urlopen",
+    "session.get", "session.post", "session.put", "session.patch", "session.delete",
+}
+
+
+def _call_full_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _call_full_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _extract_request_urls(code: str) -> list[tuple[str, str]]:
+    """Return (host, path) pairs for http(s) URLs the script will actually request."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return re.findall(r"https?://([a-zA-Z0-9._:-]+)(/[^\s'\"`]*)?", code or "")
+    out: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_full_name(node.func) not in _HTTP_CALL_NAMES:
+            continue
+        arg: ast.AST | None = None
+        if node.args:
+            arg = node.args[0]
+        else:
+            for kw in node.keywords:
+                if kw.arg in {"url", "uri", "path"}:
+                    arg = kw.value
+                    break
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            m = re.match(r"https?://([a-zA-Z0-9._:-]+)(/[^\s'\"`]*)?", arg.value.strip())
+            if m:
+                host = m.group(1).split(":", 1)[0].lower()
+                out.append((host, m.group(2) or ""))
+    return out
+
+
 async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
     code = args.get("code", "")
     purpose = args.get("purpose", "")
@@ -2147,13 +2294,7 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
     if not code.strip():
         return "[!] Code is empty; nothing executed"
 
-    url_matches = re.findall(r"https?://([a-zA-Z0-9._:-]+)(/[^\s'\"`]*)?", code)
-    for raw_host, path in url_matches:
-        # Strip the port before the scope check so an in-scope target referenced
-        # with a port (e.g. localhost:3000) is not falsely flagged out of scope.
-        # The fetch tool already compares against urlparse().hostname (no port);
-        # this keeps python_execute consistent with that behavior.
-        host = raw_host.split(":", 1)[0].lower()
+    for host, path in _extract_request_urls(code):
         host_violation = enforce_host_path_constraints(
             agent,
             host=host,

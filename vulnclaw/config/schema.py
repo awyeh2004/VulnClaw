@@ -383,6 +383,32 @@ class SessionConfig(BaseModel):
         default=1,
         description="Deprecated for model-led solve; retained for team/legacy integrations",
     )
+    # Cross-round repetition guard. Its purpose is to stop pathological spinning
+    # on one dead probe path, but for stateful web challenges the model
+    # legitimately re-fetches the same endpoint (e.g. a file list or status page)
+    # many times to observe changing state (bot-posted exfil results). These
+    # generic observation tools therefore get generous budgets, and the whole
+    # table is overridable from config so a platform can tune per exercise.
+    repeat_tool_limits: dict[str, int] = Field(
+        default_factory=lambda: {
+            "brute_force_login": 2,
+            "http_probe_batch": 2,
+            "dir_enum": 2,
+            "source_extract": 2,
+            "runtime_diff_probe": 2,
+            "space_search": 2,
+            "subdomain_enum": 2,
+            "js_recon": 2,
+            "fetch": 50,
+            "python_execute": 30,
+            "shell_command": 30,
+        },
+        description="Per-tool cross-round repetition-guard threshold, keyed by tool name",
+    )
+    repeat_tool_limit_default: int = Field(
+        default=8,
+        description="Cross-round repetition-guard threshold for tools without a table entry",
+    )
     context_auto_compact: bool = Field(
         default=True,
         description="Automatically compact model context across all LLM call paths before overflow",
