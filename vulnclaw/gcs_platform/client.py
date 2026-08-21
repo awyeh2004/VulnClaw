@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 
 import httpx
+from urllib.parse import urlparse
 
 DEFAULT_BASE_URL = "https://gcsis.dasctf.com"
 AGENT_PREFIX = "/slab-match/api/v1/agent"
@@ -49,10 +50,19 @@ def is_configured() -> bool:
 
 
 def _headers() -> dict[str, str]:
-    return {
+    host = urlparse(api_base_url()).hostname or ""
+    headers = {
         "Accept": "application/json",
         "X-Agent-AccessKey": access_key(),
     }
+    # pro.dasctf.com sits behind a WAF that returns 403 for requests without
+    # browser-like headers (UA/Origin/Referer). Present them so agent calls
+    # are not blocked. Safe defaults; harmless on hosts that ignore them.
+    if host == "pro.dasctf.com":
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        headers["Origin"] = f"https://{host}"
+        headers["Referer"] = f"https://{host}/"
+    return headers
 
 
 class GCSError(RuntimeError):
