@@ -607,6 +607,21 @@ class SessionConfig(BaseModel):
         default="L4", description="Minimum evidence level for report inclusion"
     )
 
+class GCSPLatformConfig(BaseModel):
+    """GCS (DASCTF competition) platform credentials.
+
+    Fallback source for ``VULNCLAW_GCS_ACCESS_KEY`` / ``VULNCLAW_GCS_BASE_URL``
+    so the platform can be used without exporting environment variables. Env
+    vars still take precedence over these fields.
+    """
+
+    access_key: str = Field(default="", description="Team agent AccessKey")
+    base_url: str = Field(
+        default="https://pro.dasctf.com",
+        description="Competition API host (slab-match endpoints)",
+    )
+
+
 class VulnClawConfig(BaseModel):
     """Top-level VulnClaw configuration."""
 
@@ -616,6 +631,7 @@ class VulnClawConfig(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     recon: ReconConfig = Field(default_factory=ReconConfig)
+    gcs: "GCSPLatformConfig" = Field(default_factory=lambda: GCSPLatformConfig())
 
     model_config = ConfigDict(
         env_prefix="VULNCLAW_",
