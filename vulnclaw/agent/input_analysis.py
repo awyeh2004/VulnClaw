@@ -13,6 +13,19 @@ from vulnclaw.i18n import _
 # skill launch apart from an ordinary target-first task.
 _SKILL_LAUNCH_RE = re.compile(r"^\s*Use VulnClaw skill\s+([A-Za-z0-9_-]+)\.", re.IGNORECASE)
 
+# Common attachment/archive extensions. A token ending in one of these is a file
+# name (e.g. ``real-03.zip``), not a host — deriving an allowed-host scope from it
+# would lock the run out of the real target machine.
+_FILENAME_EXT_RE = re.compile(
+    r"\.(zip|tar\.gz|tgz|7z|rar|gz|bz2|xz|pdf|png|jpg|jpeg|gif|svg|pyc|py|txt|md|enc|lime|bin|exe|elf|jar|apk|pcap|pcapng)$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_filename(token: str) -> bool:
+    """Return True when ``token`` looks like a file name rather than a host."""
+    return bool(_FILENAME_EXT_RE.search(token or ""))
+
 
 def _is_self_discovering_skill_launch(text: str) -> bool:
     """Return True when ``text`` launches a ``requires_target: false`` skill.
@@ -247,7 +260,7 @@ def extract_task_constraints(user_input: str) -> TaskConstraints:
                 host = host_match.group(1)
                 if host and host not in constraints.allowed_hosts:
                     constraints.allowed_hosts.append(host)
-        elif "." in target_lower:
+        elif "." in target_lower and not _looks_like_filename(target_lower):
             if target_lower not in constraints.allowed_hosts:
                 constraints.allowed_hosts.append(target_lower)
 
