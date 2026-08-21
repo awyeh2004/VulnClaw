@@ -1437,6 +1437,14 @@ def solve(
     writeup_dir: Optional[str] = typer.Option(
         None, "--writeup-dir", help="Generate a competition writeup into this directory on success"
     ),
+    model: str = typer.Option(
+        "auto",
+        "--model",
+        help=(
+            "Model selection: 'auto' (route by challenge category/difficulty), "
+            "'glm' (force glm-5.3), or 'ds' (force deepseek-v4-pro)"
+        ),
+    ),
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = load_config()
@@ -1489,6 +1497,7 @@ def solve(
             resume=resume,
             snapshot=snapshot,
             runner=runner,
+            model_override=model,
             **_run_context_kwargs(
                 run_name=run_name,
                 resume_run_name=resume_run,

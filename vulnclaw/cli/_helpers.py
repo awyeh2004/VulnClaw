@@ -462,19 +462,36 @@ def _append_action_constraints(
     return f"{prompt} {' '.join(constraints)}."
 
 
-def _apply_task_model_route(config: Any, target: str) -> None:
-    """Resolve and apply the per-category model route for a numeric exercise id.
+def _apply_task_model_route(config: Any, target: str, model_override: str = "auto") -> None:
+    """Resolve and apply the model for a numeric exercise id.
 
-    When ``target`` looks like an exercise id (digits), the challenge's category
-    and difficulty are looked up from the GCS platform and the first matching
-    ``llm.routes`` entry (if routing is enabled) is applied to ``config.llm``.
-    Non-numeric targets (plain URLs/IPs) keep the default model.
+    When ``model_override`` is ``glm`` or ``ds`` (explicit --model), that route
+    is applied directly without querying the platform. Otherwise (default
+    ``auto``) the challenge's category/difficulty is looked up from the GCS
+    platform and the first matching ``llm.routes`` entry is applied. Numeric
+    targets keep the default model when routing is disabled or unmatched.
     """
     target_str = str(target or "").strip()
     if not target_str.isdigit():
         return
     llm = getattr(config, "llm", None)
-    if llm is None or not getattr(llm, "route_enabled", False):
+    if llm is None:
+        return
+    override = str(model_override or "auto").strip().lower()
+
+    def _apply_by_name(name: str) -> bool:
+        for route in list(getattr(llm, "routes", None) or []):
+            if str(getattr(route, "name", "") or "").strip().lower() == name:
+                from vulnclaw.config.settings import apply_llm_route
+
+                apply_llm_route(config, route)
+                return True
+        return False
+
+    if override in ("glm", "ds"):
+        _apply_by_name(override)
+        return
+    if not getattr(llm, "route_enabled", False):
         return
     try:
         from vulnclaw.gcs_platform import client as gcs
@@ -515,6 +532,7 @@ async def _run_cli_orchestrated_task(
     resume: bool,
     snapshot: Optional[str],
     runner: Any,
+    model_override: str = "auto",
 ) -> Any:
     """Run a CLI task through the shared orchestrator helpers."""
 
@@ -526,7 +544,8 @@ async def _run_cli_orchestrated_task(
     config = load_config()
     # Per-category model routing: if enabled, resolve the model from the
     # challenge's category/difficulty before the agent builds its LLM client.
-    _apply_task_model_route(config, target)
+    # An explicit --model override (glm/ds) takes precedence over routing.
+    _apply_task_model_route(config, target, model_override)
     mcp_manager = MCPLifecycleManager(config)
     mcp_manager.start_enabled_servers()
     agent = AgentCore(config, mcp_manager)
