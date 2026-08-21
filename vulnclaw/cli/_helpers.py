@@ -533,6 +533,7 @@ async def _run_cli_orchestrated_task(
     snapshot: Optional[str],
     runner: Any,
     model_override: str = "auto",
+    **kwargs: Any,
 ) -> Any:
     """Run a CLI task through the shared orchestrator helpers."""
 
@@ -556,6 +557,17 @@ async def _run_cli_orchestrated_task(
                 f"[*] Restored saved target state: [bold]{restore_result.target or target}[/]"
             )
 
+        _KNOWN_TASK_KWARGS = {
+            "run_name",
+            "resume_run_name",
+            "runs_dir",
+            "additional_targets",
+            "target_type",
+            "mount",
+            "repair",
+            "force_fresh",
+            "no_import",
+        }
         return await run_agent_task(
             agent=agent,
             command=command,
@@ -564,6 +576,7 @@ async def _run_cli_orchestrated_task(
             snapshot_id=snapshot,
             on_restored=on_restored,
             runner=lambda shared_agent: runner(shared_agent, config),
+            **{k: v for k, v in kwargs.items() if k in _KNOWN_TASK_KWARGS and v is not None},
         )
     finally:
         import signal

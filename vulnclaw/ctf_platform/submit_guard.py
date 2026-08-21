@@ -144,6 +144,17 @@ class SubmitGuard:
             entry["accepted"] = True
         self._save()
 
+    def record_error(self, practice_id: str, challenge_id: str) -> None:
+        """Account for an infrastructure failure (network / platform error).
+
+        Unlike ``record``, this does NOT consume an attempt and does NOT
+        remember the flag: the platform never judged it, so retrying the same
+        flag later must not be blocked by the dedup / anti brute-force rule.
+        """
+        self._entry(practice_id, challenge_id)
+        # no counter changes; just touch the entry so state shape stays stable
+        self._save()
+
 
 _default_guard: SubmitGuard | None = None
 

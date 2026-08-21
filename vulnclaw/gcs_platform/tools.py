@@ -360,7 +360,9 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     try:
         payload = await _client.submit_answer(exercise_id, flag)
     except Exception as exc:
-        guard.record(str(exercise_id), str(exercise_id), accepted=False, flag=flag)
+        # Infrastructure failure (network / platform error): the flag was not
+        # judged, so do not consume an attempt or dedup-block future retries.
+        guard.record_error(str(exercise_id), str(exercise_id))
         return f"[gcs_error] submit flag failed: {exc}"
 
     accepted = _submit_accepted(payload)

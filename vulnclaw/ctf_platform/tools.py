@@ -387,7 +387,9 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     try:
         payload = await _client.submit_flag(usage, challenge, flag)
     except Exception as exc:
-        guard.record(usage, challenge, accepted=False, flag=flag)
+        # Infrastructure failure: the flag was not judged, so do not consume an
+        # attempt or dedup-block future retries of the same flag.
+        guard.record_error(usage, challenge)
         return f"[ctf2_error] submit flag failed: {exc}"
 
     accepted = _submit_accepted(payload)
