@@ -34,14 +34,33 @@ AGENT_PREFIX = "/slab-match/api/v1/agent"
 _SUCCESS_CODE = "00000"
 
 
+def _gcs_config():
+    """Best-effort read of the ``gcs`` section from the loaded config."""
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return getattr(load_config(), "gcs", None)
+    except Exception:
+        return None
+
+
 def access_key() -> str:
     """Return the configured GCS agent AccessKey, or an empty string."""
-    return os.environ.get("VULNCLAW_GCS_ACCESS_KEY", "").strip()
+    env = os.environ.get("VULNCLAW_GCS_ACCESS_KEY", "").strip()
+    if env:
+        return env
+    gcs = _gcs_config()
+    return str(getattr(gcs, "access_key", "") or "").strip()
 
 
 def api_base_url() -> str:
-    """Return the GCS API host, honouring an optional environment override."""
-    return os.environ.get("VULNCLAW_GCS_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    """Return the GCS API host, honouring env override then config fallback."""
+    env = os.environ.get("VULNCLAW_GCS_BASE_URL", "").strip()
+    if env:
+        return env
+    gcs = _gcs_config()
+    configured = str(getattr(gcs, "base_url", "") or "").strip()
+    return configured or DEFAULT_BASE_URL
 
 
 def is_configured() -> bool:
