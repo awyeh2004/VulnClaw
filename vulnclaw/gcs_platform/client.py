@@ -45,22 +45,34 @@ def _gcs_config():
 
 
 def access_key() -> str:
-    """Return the configured GCS agent AccessKey, or an empty string."""
-    env = os.environ.get("VULNCLAW_GCS_ACCESS_KEY", "").strip()
-    if env:
-        return env
+    """Return the GCS agent AccessKey.
+
+    A value explicitly persisted in the config ``gcs.access_key`` takes
+    precedence so a stale ``VULNCLAW_GCS_ACCESS_KEY`` lingering in the current
+    process tree (e.g. set during an earlier test round) cannot silently use
+    the wrong credentials. The env var remains a fallback / override when the
+    config field is empty.
+    """
     gcs = _gcs_config()
-    return str(getattr(gcs, "access_key", "") or "").strip()
+    configured = str(getattr(gcs, "access_key", "") or "").strip()
+    if configured:
+        return configured
+    return os.environ.get("VULNCLAW_GCS_ACCESS_KEY", "").strip()
 
 
 def api_base_url() -> str:
-    """Return the GCS API host, honouring env override then config fallback."""
-    env = os.environ.get("VULNCLAW_GCS_BASE_URL", "").strip()
-    if env:
-        return env
+    """Return the GCS API host.
+
+    Precedence: config ``gcs.base_url`` (if set), then env override, then the
+    default host. The config field is the persisted source; the env var is a
+    fallback / override for hosts without a config file.
+    """
     gcs = _gcs_config()
     configured = str(getattr(gcs, "base_url", "") or "").strip()
-    return configured or DEFAULT_BASE_URL
+    if configured:
+        return configured
+    env = os.environ.get("VULNCLAW_GCS_BASE_URL", "").strip()
+    return env or DEFAULT_BASE_URL
 
 
 def is_configured() -> bool:
