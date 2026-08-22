@@ -60,6 +60,31 @@ coverage.xml
 _test_output*.txt
 _test_report_raw.txt
 
+# Agent/CTF 解题临时文件(测试请求/响应、注入 payload 实验)
+# 做题过程的中间产物一律不入库,保留在本地工作目录
+/fpc*.txt
+/pl_*.txt
+/pv*.txt
+/pv*.html
+/body*.txt
+/c[0-9].txt
+/c[0-9].html
+/e[0-9].html
+/vt*.txt
+/vt*.html
+/m_sleep.txt
+/m_undef.txt
+/o_echo.txt
+/o_ls.txt
+/sh[0-9].txt
+/payload_post.txt
+/wwwsrc/
+/dis[0-9]*.txt
+/dis_full*.txt
+/solve_*.log
+/solve_*.err.log
+/swarm_*.log
+
 # Frontend build / deps
 frontend/node_modules/
 frontend/dist/

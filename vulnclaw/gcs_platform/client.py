@@ -33,6 +33,18 @@ AGENT_PREFIX = "/slab-match/api/v1/agent"
 
 _SUCCESS_CODE = "00000"
 
+# Shared module-level client so connection pools are reused across calls.
+_client: httpx.AsyncClient | None = None
+
+
+def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Return the shared AsyncClient, creating it lazily. Reuses connections
+    instead of opening a fresh client per endpoint call."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=timeout)
+    return _client
+
 
 def _gcs_config():
     """Best-effort read of the ``gcs`` section from the loaded config."""
@@ -141,80 +153,80 @@ async def _request(
 
 async def match_info() -> dict:
     """Return competition notes and rules (``data: {note, rule}``)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/match/notice/match-info")
+    client = get_client()
+    return await _request(client, "GET", "/match/notice/match-info")
 
 
 async def notice_list() -> dict:
     """Return the list of recent competition announcements."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/match/notice/now-list")
+    client = get_client()
+    return await _request(client, "GET", "/match/notice/now-list")
 
 
 async def notice_detail(notice_id: int) -> dict:
     """Return a single announcement, including any attached file."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client, "GET", "/match/notice/detail", params={"id": notice_id}
-        )
+    client = get_client()
+    return await _request(
+        client, "GET", "/match/notice/detail", params={"id": notice_id}
+    )
 
 
 # --- scoreboard -----------------------------------------------------------
 
 async def overview() -> dict:
     """Return the team's current score and rank (``data: {stagePoint, stageRank}``)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/answer-panel/overview")
+    client = get_client()
+    return await _request(client, "GET", "/answer-panel/overview")
 
 
 # --- exercises ------------------------------------------------------------
 
 async def exercise_list() -> dict:
     """Return the challenge tree (``data: [{id, name, corpus: [...]}]``)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/ctf/exercise-list")
+    client = get_client()
+    return await _request(client, "GET", "/ctf/exercise-list")
 
 
 async def exercise(exercise_id: int) -> dict:
     """Return challenge detail: description, attachments, endpoints, env flags."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client, "GET", "/ctf/exercise", params={"exerciseId": exercise_id}
-        )
+    client = get_client()
+    return await _request(
+        client, "GET", "/ctf/exercise", params={"exerciseId": exercise_id}
+    )
 
 
 # --- environment lifecycle --------------------------------------------------
 
 async def build_environment(exercise_id: int) -> dict:
     """Start a challenge environment (async; poll ``exercise()`` until ready)."""
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        return await _request(
-            client,
-            "POST",
-            "/ctf/build-exercise-env",
-            json={"exerciseId": exercise_id},
-        )
+    client = get_client(timeout=120.0)
+    return await _request(
+        client,
+        "POST",
+        "/ctf/build-exercise-env",
+        json={"exerciseId": exercise_id},
+    )
 
 
 async def recover_environment(exercise_id: int) -> dict:
     """Recover (destroy) a challenge environment, releasing quota."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        return await _request(
-            client,
-            "POST",
-            "/ctf/recover-exercise-env",
-            json={"exerciseId": exercise_id},
-        )
+    client = get_client(timeout=60.0)
+    return await _request(
+        client,
+        "POST",
+        "/ctf/recover-exercise-env",
+        json={"exerciseId": exercise_id},
+    )
 
 
 # --- submission ------------------------------------------------------------
 
 async def submit_answer(exercise_id: int, flag: str) -> dict:
     """Submit an answer flag. ``data: {isCorrect: bool}`` when accepted for grading."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client,
-            "POST",
-            "/answer-panel/answer",
-            json={"exerciseId": exercise_id, "flag": flag},
-        )
+    client = get_client()
+    return await _request(
+        client,
+        "POST",
+        "/answer-panel/answer",
+        json={"exerciseId": exercise_id, "flag": flag},
+    )

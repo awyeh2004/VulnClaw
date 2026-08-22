@@ -68,15 +68,12 @@ class CodeBlock:
 def default_writeup_dir() -> Path:
     """Resolve the directory for generated competition writeups.
 
-    Priority: ``VULNCLAW_WRITEUP_DIR`` env var, else ``E:\\vulnclaw\\writeup``
-    when it exists, else the configured sessions dir.
+    Priority: ``VULNCLAW_WRITEUP_DIR`` env var, else the configured sessions dir.
     """
     import os
 
     if env_dir := os.environ.get("VULNCLAW_WRITEUP_DIR", "").strip():
         return Path(env_dir)
-    if Path(r"E:\vulnclaw\writeup").exists():
-        return Path(r"E:\vulnclaw\writeup")
     try:
         from vulnclaw.config.settings import SESSIONS_DIR
 

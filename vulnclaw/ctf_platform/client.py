@@ -30,6 +30,23 @@ DEFAULT_BASE_URL = "https://ctf2.dasctf.com"
 API_PREFIX = "/api/open/v1/user"
 SESSION_PREFIX = "/api/v1"
 
+# Shared module-level client so connection pools are reused across calls
+# instead of opening a fresh connection per endpoint (standard httpx practice).
+_client: httpx.AsyncClient | None = None
+
+
+def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Return the module-level shared AsyncClient, creating it lazily.
+
+    httpx.AsyncClient is thread-safe and reuses TCP/TLS connections, so a single
+    instance for all endpoint calls avoids the per-call handshake overhead of the
+    old ``async with httpx.AsyncClient(...)`` pattern.
+    """
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=timeout)
+    return _client
+
 
 def api_token() -> str:
     """Return the configured CTF2 personal access token, or an empty string."""
@@ -106,35 +123,35 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, **kwargs) 
 
 async def list_practice(limit: int = 20) -> dict:
     """List visible public practice grounds."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/practice/", params={"limit": limit})
+    client = get_client()
+    return await _request(client, "GET", "/practice/", params={"limit": limit})
 
 
 async def list_daily(limit: int = 20) -> dict:
     """List visible daily challenges."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/daily/", params={"limit": limit})
+    client = get_client()
+    return await _request(client, "GET", "/daily/", params={"limit": limit})
 
 
 async def read_challenge(practice_id: str, challenge_id: str) -> dict:
     """Read a practice challenge description."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client,
-            "GET",
-            f"/practice/{practice_id}/challenges/{challenge_id}/",
-        )
+    client = get_client()
+    return await _request(
+        client,
+        "GET",
+        f"/practice/{practice_id}/challenges/{challenge_id}/",
+    )
 
 
 async def start_environment(practice_id: str, challenge_id: str) -> dict:
     """Start (or reuse) a practice environment, returning its connection info."""
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        return await _request(
-            client,
-            "POST",
-            f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
-            json={},
-        )
+    client = get_client(timeout=120.0)
+    return await _request(
+        client,
+        "POST",
+        f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
+        json={},
+    )
 
 
 async def _session_request(
@@ -158,59 +175,59 @@ async def get_target(practice_id: str, challenge_id: str) -> dict:
     Requires the front-end session token (Bearer JWT) — the Open API cannot see
     target addresses. May return ``{"data": null}`` until a target is running.
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        return await _session_request(
-            client,
-            "GET",
-            f"/practice/{practice_id}/challenges/{challenge_id}/target/",
-        )
+    client = get_client(timeout=60.0)
+    return await _session_request(
+        client,
+        "GET",
+        f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+    )
 
 
 async def create_target(practice_id: str, challenge_id: str) -> dict:
     """Queue creation of a practice target (moves the challenge to running)."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        return await _session_request(
-            client,
-            "POST",
-            f"/practice/{practice_id}/challenges/{challenge_id}/target/",
-            json={},
-        )
+    client = get_client(timeout=60.0)
+    return await _session_request(
+        client,
+        "POST",
+        f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+        json={},
+    )
 
 
 async def submit_flag(practice_id: str, challenge_id: str, flag: str) -> dict:
     """Submit a confirmed practice flag (requires ``confirmation: true``)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client,
-            "POST",
-            f"/practice/{practice_id}/challenges/{challenge_id}/submit/",
-            json={"flag": flag, "confirmation": True},
-        )
+    client = get_client()
+    return await _request(
+        client,
+        "POST",
+        f"/practice/{practice_id}/challenges/{challenge_id}/submit/",
+        json={"flag": flag, "confirmation": True},
+    )
 
 
 async def list_competitions(limit: int = 20) -> dict:
     """List visible competitions."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(client, "GET", "/competitions/", params={"limit": limit})
+    client = get_client()
+    return await _request(client, "GET", "/competitions/", params={"limit": limit})
 
 
 async def list_stage_challenges(stage_id: str, limit: int = 50) -> dict:
     """List visible challenges in a competition stage."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client,
-            "GET",
-            f"/stages/{stage_id}/challenges/",
-            params={"limit": limit},
-        )
+    client = get_client()
+    return await _request(
+        client,
+        "GET",
+        f"/stages/{stage_id}/challenges/",
+        params={"limit": limit},
+    )
 
 
 async def list_submissions(limit: int = 20) -> dict:
     """List current user submissions (recent flag attempts)."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await _request(
-            client,
-            "GET",
-            "/submissions/",
-            params={"limit": limit},
-        )
+    client = get_client()
+    return await _request(
+        client,
+        "GET",
+        "/submissions/",
+        params={"limit": limit},
+    )
