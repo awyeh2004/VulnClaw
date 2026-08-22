@@ -745,6 +745,19 @@ async def _solve_impl(
 
     state = _prepare_state(agent, origin=origin, goal=goal)
     agent._subagent_ctx.event_sink = on_event
+    # 让工具 schema 按 goal 裁剪：写入 runtime.auto_skill_input 后，
+    # _infer_allowed_tools 可基于 goal 关键词返回工具子集，显著减少每次
+    # API 调用的工具 schema 体积（72 工具约 10.9k token -> 子集远小于此）。
+    try:
+        runtime = getattr(agent, "runtime", None)
+        if runtime is not None:
+            prev = getattr(runtime, "auto_skill_input", "") or ""
+            if prev:
+                runtime.auto_skill_input = f"{prev} | {goal}"
+            else:
+                runtime.auto_skill_input = goal
+    except Exception:
+        pass
     if hints:
         state.compact_summary = (
             state.compact_summary + "\nUser hints: " + " | ".join(hints)
