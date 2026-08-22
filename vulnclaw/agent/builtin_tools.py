@@ -914,6 +914,12 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         except Exception as e:
             return f"[!] blackboard 工具执行错误: {e}"
 
+    # ── 后台任务（爆破等耗时操作不阻塞）───────────────────────────────────────
+    if tool_name in _BG_TOOL_NAMES:
+        if tool_name == "bg_launch":
+            return execute_bg_launch(agent, args)
+        return execute_bg_result(agent, args)
+
     # ── OCR（本地 GPU 加速）────────────────────────────────────────────────────
     if tool_name in _OCR_TOOL_NAMES:
         return execute_ocr(agent, args)
@@ -1554,6 +1560,48 @@ def build_openai_tools(
                     "type": "object",
                     "properties": {},
                     "required": [],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "bg_launch",
+                "description": "在后台启动一个爆破/纯计算命令(hashcat/john/python计算)，不阻塞当前探索。仅允许白名单命令前缀，禁止 shell 管道/下载/编码执行。启动后可用 bg_result 查询结果。适用于 hash 爆破、字典穷举等耗时任务，让 agent 边跑边干别的。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要后台执行的命令。仅允许: hashcat/john/hydra/medusa/fcrackzip/zip2john/python 开头的纯计算命令。禁止 | > < & curl wget powershell -enc base64 等危险模式。",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "超时秒数(默认180, 最大3600)",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "bg_result",
+                "description": "查询后台任务(bg_launch 启动)的状态和输出。注意: 后台爆破出的密码/结果必须用真实请求验证后才能采信, 不能直接当成已确认事实。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "后台任务ID (如 bg1)",
+                        },
+                    },
+                    "required": ["task_id"],
                 },
             },
         }
@@ -2862,6 +2910,174 @@ async def execute_brute_force(agent: AgentContext, args: dict[str, Any]) -> str:
     summary.append(f"    尝试: {attempts}/{total}")
 
     return "\n".join(summary)
+
+
+# ── 后台任务（爆破等耗时操作不阻塞 agent，白名单受限）────────────────────────
+
+_BG_TOOL_NAMES = {"bg_launch", "bg_result"}
+
+import threading as _threading
+
+_bg_tasks: dict[str, dict] = {}
+_bg_lock = _threading.Lock()
+_bg_seq = 0
+_BG_MAX_CONCURRENT = 3
+
+# 允许后台运行的命令前缀（爆破/纯计算类）。拒绝 shell 管道、下载、编码执行。
+_BG_ALLOWED_PREFIXES = (
+    "hashcat",
+    "john",
+    "hydra",
+    "medusa",
+    "fcrackzip",
+    "zip2john",
+    "python",
+    "python3",
+    "cmd /c python",
+)
+# 禁止出现的危险模式（配合前缀二次过滤）
+_BG_BLOCKED_PATTERNS = (
+    "|",
+    ">",
+    "<",
+    "&",
+    "curl",
+    "wget",
+    "powershell",
+    "-enc",
+    "nc ",
+    "bash -c",
+    "sh -c",
+    "base64",
+    ";/",
+)
+
+
+def _bg_new_id() -> str:
+    global _bg_seq
+    with _bg_lock:
+        _bg_seq += 1
+        return f"bg{_bg_seq}"
+
+
+def _bg_validate_command(cmd_raw: str) -> str | None:
+    """Return an error message if the command is not allowed in background, else None."""
+    stripped = cmd_raw.strip()
+    if not stripped:
+        return "command is empty"
+    lowered = stripped.lower()
+    # 前缀白名单
+    if not any(lowered.startswith(p) for p in _BG_ALLOWED_PREFIXES):
+        return f"command not allowed in background; allowed prefixes: {', '.join(_BG_ALLOWED_PREFIXES)}"
+    # 危险模式拦截
+    for pat in _BG_BLOCKED_PATTERNS:
+        if pat in lowered:
+            return f"command contains blocked pattern: {pat!r}"
+    # 不允许后台起 shell 管道类
+    return None
+
+
+def _bg_run(task_id: str, cmd: list[str], timeout: int) -> None:
+    """Background worker: run subprocess, capture output, update task state."""
+    import subprocess as _sp
+
+    try:
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        with _bg_lock:
+            _bg_tasks[task_id]["status"] = "finished"
+            _bg_tasks[task_id]["returncode"] = proc.returncode
+            _bg_tasks[task_id]["output"] = (proc.stdout or "")[:4000]
+            _bg_tasks[task_id]["stderr"] = (proc.stderr or "")[:2000]
+    except _sp.TimeoutExpired:
+        with _bg_lock:
+            _bg_tasks[task_id]["status"] = "timeout"
+            _bg_tasks[task_id]["output"] = ""
+    except Exception as e:
+        with _bg_lock:
+            _bg_tasks[task_id]["status"] = "failed"
+            _bg_tasks[task_id]["error"] = str(e)[:500]
+
+
+def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
+    """Launch a command in the background so the agent can keep working.
+
+    Restricted to brute-force / pure-computation commands (hashcat, john, python
+    computation). Shell pipelines, downloads, and encoded execution are blocked.
+    The agent continues exploring and checks the result later via ``bg_result``.
+    """
+    cmd_raw = str(args.get("command") or args.get("cmd") or "").strip()
+    if not cmd_raw:
+        return "[!] bg_launch requires 'command'"
+    blocked = _bg_validate_command(cmd_raw)
+    if blocked:
+        return f"[!] bg_launch rejected: {blocked}"
+    # 并发上限
+    with _bg_lock:
+        running = sum(1 for t in _bg_tasks.values() if t.get("status") == "running")
+        if running >= _BG_MAX_CONCURRENT:
+            return f"[!] bg_launch rejected: {running} background tasks already running (max {_BG_MAX_CONCURRENT})"
+    timeout = max(10, min(3600, int(args.get("timeout", 180))))
+    if os.name == "nt":
+        cmd = ["cmd", "/c", cmd_raw]
+    else:
+        import shlex
+
+        cmd = shlex.split(cmd_raw)
+    task_id = _bg_new_id()
+    with _bg_lock:
+        _bg_tasks[task_id] = {"status": "running", "cmd": cmd_raw, "started": time.time()}
+    t = _threading.Thread(target=_bg_run, args=(task_id, cmd, timeout), daemon=True)
+    t.start()
+    return (
+        f"[bg_launch] task {task_id} started in background (restricted: brute-force only).\n"
+        f"Command: {cmd_raw}\n"
+        f"Use bg_result(task_id={task_id!r}) later to check status/output. "
+        f"Meanwhile continue exploring other attack paths."
+    )
+
+
+def execute_bg_result(agent: AgentContext, args: dict[str, Any]) -> str:
+    """Query a background task's status and output."""
+    task_id = str(args.get("task_id") or "").strip()
+    if not task_id:
+        return "[!] bg_result requires 'task_id'"
+    with _bg_lock:
+        task = _bg_tasks.get(task_id)
+        if task is None:
+            return f"[bg_result] unknown task: {task_id} (task ids look like bg1, bg2, ...)"
+        snapshot = dict(task)
+    status = snapshot.get("status", "unknown")
+    lines = [f"[bg_result] task {task_id}: {status}"]
+    if snapshot.get("cmd"):
+        lines.append(f"  command: {snapshot['cmd']}")
+    if status == "running":
+        lines.append("  still running; call bg_result again later, or continue other work")
+    elif status == "finished":
+        lines.append(f"  returncode: {snapshot.get('returncode')}")
+        out = snapshot.get("output") or ""
+        if out:
+            lines.append("  output:")
+            lines.append(out[:3000])
+        if snapshot.get("stderr"):
+            lines.append(f"  stderr: {snapshot['stderr'][:1000]}")
+        # 关键安全提示：后台结果必须用真实请求验证后才能采信
+        lines.append(
+            "\n[!] REMINDER: a background result is NOT confirmed. "
+            "Verify any recovered password/secret with a real request "
+            "before treating it as a fact."
+        )
+    elif status == "timeout":
+        lines.append(f"  timed out after the configured limit")
+    else:
+        lines.append(f"  error: {snapshot.get('error', 'unknown')}")
+    return "\n".join(lines)
 
 
 # ── OCR 工具（本地 GPU 加速）────────────────────────────────────────────────────
