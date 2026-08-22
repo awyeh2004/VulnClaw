@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -425,6 +426,43 @@ def _append_cli_constraints(
     if not constraints:
         return prompt
     return f"{prompt} {' '.join(constraints)}."
+
+
+def _local_challenge_dirs() -> list[str]:
+    """Directories to search for downloaded local CTF attachments. Configured via
+    environment variables only, so no personal machine paths leak into the repo."""
+    dirs: list[str] = []
+    for key in ("VULNCLAW_ATTACH_DIR", "VULNCLAW_WORK_DIR"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            dirs.append(os.path.expandvars(val))
+    return dirs
+
+
+def _inject_local_challenge_hint(prompt: str, target: str) -> str:
+    """For ``local-NNNNN`` targets, auto-detect the downloaded challenge
+    attachment under the local work dir and append its path to the prompt so the
+    agent does not waste turns scanning ports/hosts hunting for the target."""
+    if not re.fullmatch(r"local-\d+", target or ""):
+        return prompt
+    num = target.split("-", 1)[1]
+    hint_lines = [f"local challenge {num}: this is a downloaded CTF attachment, not a network service."]
+    found = None
+    # 从环境变量读取附件目录(运行时读取,避免模块加载时固化)
+    for base in _local_challenge_dirs():
+        if not base or not os.path.isdir(base):
+            continue
+        hits = sorted(glob.glob(os.path.join(base, f"{num}_*")))
+        if hits:
+            found = hits[0]
+            break
+    if found:
+        hint_lines.append(f"Attachment located at: {found}")
+        if os.path.isdir(found):
+            children = sorted(os.listdir(found))[:10]
+            if children:
+                hint_lines.append("Contents: " + ", ".join(children))
+    return prompt + "\n\n[local challenge hint]\n" + "\n".join(hint_lines)
 
 
 def _append_cli_constraints_compat(

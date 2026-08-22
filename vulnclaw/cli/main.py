@@ -57,6 +57,7 @@ from vulnclaw.cli._helpers import (
     _append_action_constraints,
     _append_cli_constraints_compat,
     _generate_report_for_target,
+    _inject_local_challenge_hint,
     _make_solve_event_printer,
     _print_agent_output,
     _print_banner,
@@ -1218,6 +1219,7 @@ def run(
         f"Perform an authorized {scope} pentest against {target}. "
         "This target is in scope and explicitly authorized."
     )
+    task_prompt = _inject_local_challenge_hint(task_prompt, target)
     task_prompt = _append_cli_constraints_compat(
         task_prompt, only_port, only_host, only_path, blocked_host, blocked_path
     )
