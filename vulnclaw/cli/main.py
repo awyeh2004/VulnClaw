@@ -1763,6 +1763,8 @@ def competition(
       so the match strategy should force single-agent when latency is high.
     - ``plan``: fetch the challenge list (if the platform is reachable) and
       print an easy-first order; otherwise summarize local attachments.
+    - ``download``: batch-download every challenge attachment at match start
+      so a slow/closing backend never blocks local analysis (insurance).
     - ``solve <eid>``: run one challenge with competition strategy (fail-fast on
       stalls, easy-first ordering) instead of the default open-ended solve.
     """
@@ -1777,6 +1779,9 @@ def competition(
     if mode == "plan":
         _competition_plan(cfg)
         return
+    if mode == "download":
+        _competition_download(cfg)
+        return
     if mode == "solve":
         if exercise_id is None:
             err_console.print("[!] 'competition solve' requires an exercise_id argument.")
@@ -1784,7 +1789,7 @@ def competition(
         _competition_solve(cfg, exercise_id)
         return
     err_console.print(
-        f"[!] unknown competition mode: {mode} (use: latency | plan | solve <eid>)"
+        f"[!] unknown competition mode: {mode} (use: latency | plan | download | solve <eid>)"
     )
     raise typer.Exit(1)
 
@@ -1854,6 +1859,114 @@ def _competition_plan(cfg: Any) -> None:
                 console.print(f"    {os.path.basename(f)}")
             return
     console.print("[*] No challenges or attachments found (platform down + no local work dir).")
+
+
+def _competition_download(cfg: Any) -> None:
+    """Batch-download all challenge attachments at match start (insurance).
+
+    Only runs when the GCS platform is reachable. Field names for the download
+    link are matched defensively (several candidates) so a platform schema
+    change degrades to a warning, not a crash.
+    """
+    import asyncio
+    import os
+    from urllib.parse import unquote
+
+    try:
+        from vulnclaw.gcs_platform import client as gcs
+    except Exception as exc:
+        err_console.print(f"[!] gcs_platform import failed: {exc}")
+        raise typer.Exit(1)
+
+    if not gcs.is_configured():
+        err_console.print(
+            "[!] GCS access key not configured; cannot download attachments. "
+            "Set VULNCLAW_GCS_ACCESS_KEY / config gcs.access_key and retry."
+        )
+        raise typer.Exit(1)
+
+    work = os.environ.get("VULNCLAW_WORK_DIR", os.path.expandvars(r"%USERPROFILE%\vulnclaw\work"))
+    attach_dir = os.path.join(work, "attachments")
+    os.makedirs(attach_dir, exist_ok=True)
+
+    # 1. List all challenges
+    try:
+        payload = asyncio.run(gcs.exercise_list())
+    except Exception as exc:
+        err_console.print(f"[!] exercise_list failed (platform may be closed): {exc}")
+        raise typer.Exit(1)
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    items = data if isinstance(data, list) else (data or {}).get("list") or []
+    if not items:
+        err_console.print("[!] No challenges returned by platform.")
+        raise typer.Exit(1)
+
+    console.print(f"[*] Downloading attachments for {len(items)} challenges -> {attach_dir}")
+
+    import httpx
+
+    def _candidate_link(obj: dict) -> str:
+        """Try several plausible attachment-url field names."""
+        for key in ("attachmentUrl", "fileUrl", "downloadUrl", "attachUrl", "attachment", "file"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.startswith(("http", "/")):
+                return v
+        # nested: {"attachment": {"url": ...}} or {"file": {"download_url": ...}}
+        for key in ("attachment", "file"):
+            v = obj.get(key)
+            if isinstance(v, dict):
+                for k2 in ("url", "download_url", "downloadUrl", "path"):
+                    u = v.get(k2)
+                    if isinstance(u, str) and u:
+                        return u
+        return ""
+
+    ok = 0
+    fail = 0
+    with httpx.Client(timeout=60, verify=False) as client:
+        for item in items:
+            eid = item.get("id") or item.get("exerciseId")
+            name = str(item.get("name") or eid or "unknown")
+            if eid is None:
+                continue
+            try:
+                detail = asyncio.run(gcs.exercise(int(eid)))
+                d = detail.get("data") if isinstance(detail, dict) else detail
+                d = d if isinstance(d, dict) else {}
+                link = _candidate_link(d)
+                if not link:
+                    # maybe attachment lives under corpus/children
+                    for child in (d.get("corpus") or []) if isinstance(d.get("corpus"), list) else []:
+                        link = _candidate_link(child) if isinstance(child, dict) else ""
+                        if link:
+                            break
+                if not link:
+                    fail += 1
+                    console.print(f"    [skip] {name}: no download link in payload")
+                    continue
+                if link.startswith("/"):
+                    link = f"{gcs.api_base_url()}{link}"
+                local = os.path.join(attach_dir, f"{eid}_{name}.zip")
+                with client.stream("GET", link, follow_redirects=True) as resp:
+                    if resp.status_code != 200:
+                        fail += 1
+                        console.print(f"    [fail] {name}: HTTP {resp.status_code}")
+                        continue
+                    with open(local, "wb") as fh:
+                        for chunk in resp.iter_bytes(8192):
+                            fh.write(chunk)
+                ok += 1
+                console.print(f"    [ok]   {name} -> {os.path.basename(local)}")
+            except Exception as exc:
+                fail += 1
+                console.print(f"    [fail] {name}: {type(exc).__name__}: {str(exc)[:100]}")
+    console.print(f"\n[*] Download complete: {ok} ok, {fail} failed/skipped.")
+    if fail:
+        console.print(
+            "[i] Some attachments could not be downloaded; the platform may be "
+            "closing or the schema changed. The ones downloaded are already a "
+            "local insurance for analysis."
+        )
 
 
 def _competition_solve(cfg: Any, exercise_id: int) -> None:
