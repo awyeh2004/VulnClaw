@@ -545,7 +545,16 @@ def _flag_token_grounded(flag: str, evidence_text: str, evidence_flags: list[str
 
 
 def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]]:
-    """Verify model-declared completion against recorded evidence."""
+    """Verify model-declared completion against recorded evidence.
+
+    Whitelist-style gate (ported from Muteki's ``flag_ok``): a completion passes
+    when the claimed flag is grounded in recorded evidence (verbatim or
+    normalized match) — citations are advisory, NOT a rejection condition. An
+    unknown evidence id in the final text is at most a warning, never a reason to
+    reject: a flag such as ``CTF2{8ff2d98e-e990-...}`` contains ``e990`` which a
+    strict citation parser could misread as an evidence id, and rejecting on
+    that would loop the agent forever despite a fully-grounded flag.
+    """
 
     cleaned = strip_think_tags(text or "")
     final_text = _after_marker(cleaned, _FINAL_MARKERS) or cleaned
@@ -553,8 +562,6 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
     cited = _cited_evidence_ids(final_text)
     known_ids = set(state.evidence_ids())
     missing = [item for item in cited if item not in known_ids]
-    if missing:
-        return False, f"completion cited unknown evidence ids: {', '.join(missing)}", cited
 
     flags_in_answer = extract_flags(final_text)
     evidence_flags = extract_flags(evidence_text)
@@ -584,7 +591,12 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
     if not state.evidence:
         return False, "FINAL has no recorded tool evidence", cited
 
+    # Whitelist completion: the flag is grounded (or there is evidence backing a
+    # non-flag goal), so unknown/extra citations no longer reject. Unknown cited
+    # ids are surfaced as a soft note only when there is something to note.
     if cited:
+        if missing:
+            return True, final_text.strip() + f"\n[note: unknown evidence id(s) {', '.join(missing)} ignored]", cited
         return True, final_text.strip(), cited
 
     # Non-flag goals may be complete without explicit citations only if there is
