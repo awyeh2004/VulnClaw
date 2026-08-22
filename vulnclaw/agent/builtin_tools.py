@@ -74,6 +74,9 @@ from vulnclaw.gcs_platform import (
     gcs_tool_schemas,
 )
 
+# 本地化工具名（新增）
+_OCR_TOOL_NAMES = {"ocr"}
+
 
 def role_allows_tool(role: str | None, tool_name: str) -> bool:
     """Return whether the active team role may see or call a tool."""
@@ -904,14 +907,26 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         return execute_evidence_tool(agent, tool_name, args)
 
 # ── Blackboard reasoning graph ──
-    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent"):
+    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_verify_fact", "blackboard_challenge_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent", "blackboard_review"):
         try:
             from vulnclaw.agent.blackboard import dispatch_blackboard_tool
             return await dispatch_blackboard_tool(agent, tool_name, args)
         except Exception as e:
             return f"[!] blackboard 工具执行错误: {e}"
 
-# ── WebMap site-structure recorder ──
+    # ── OCR（本地 GPU 加速）────────────────────────────────────────────────────
+    if tool_name in _OCR_TOOL_NAMES:
+        return execute_ocr(agent, args)
+
+    # ── pyc 字节码分析（CTF REVERSE）──────────────────────────────────────────
+    if tool_name in _PYC_TOOL_NAMES:
+        return execute_pyc_analyze(agent, args)
+
+    # ── PDF 取证分析（CTF forensics）──────────────────────────────────────────
+    if tool_name in _PDF_TOOL_NAMES:
+        return execute_pdf_analyze(agent, args)
+
+    # ── WebMap site-structure recorder ──
     if tool_name in ("web_map_add", "web_map_link", "web_map_render", "web_map_summary", "web_map_reset"):
         try:
             from vulnclaw.agent.web_map import dispatch_web_map_tool
@@ -1144,9 +1159,12 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "shell_command",
     "blackboard_summary",
     "blackboard_add_fact",
+    "blackboard_verify_fact",
+    "blackboard_challenge_fact",
     "blackboard_add_intent",
     "blackboard_start_intent",
     "blackboard_reject_intent",
+    "blackboard_review",
     "web_map_add",
     "web_map_link",
     "web_map_render",
@@ -1299,13 +1317,13 @@ def build_openai_tools(
             "type": "function",
             "function": {
                 "name": "blackboard_add_fact",
-                "description": "Record a confirmed objective finding on the blackboard (e.g. 'Port 80 is open', 'SQL injection confirmed at /login'). Facts persist and are visible to all agents.",
+                "description": "Record a finding on the blackboard. With an evidence_ref whose tool output contains the description, the fact is CONFIRMED; otherwise it is stored as an unverified candidate until you verify it. Facts persist and are visible to all agents.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "description": {
                             "type": "string",
-                            "description": "Description of the confirmed finding",
+                            "description": "Description of the finding (state it exactly as it appears in the tool output so it can be verified)",
                         },
                         "parent_id": {
                             "type": "string",
@@ -1313,10 +1331,52 @@ def build_openai_tools(
                         },
                         "evidence_ref": {
                             "type": "string",
-                            "description": "Optional evidence ID reference",
+                            "description": "Evidence ID the finding was witnessed in (e.g. e001). Strongly recommended: facts without a matching evidence_ref stay unverified candidates.",
                         },
                     },
                     "required": ["description"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_verify_fact",
+                "description": "Confirm a candidate fact by checking its description against its referenced evidence output. Only succeeds when the description was actually witnessed in real tool output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "The candidate fact node ID to verify (e.g. n5)",
+                        },
+                    },
+                    "required": ["node_id"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_challenge_fact",
+                "description": "Mark a previously recorded fact as disputed when new evidence contradicts it. Challenged facts are excluded from the trusted context until re-verified.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "The fact node ID to challenge (e.g. n2)",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why this fact is now in doubt",
+                        },
+                    },
+                    "required": ["node_id", "reason"],
                 },
             },
         }
@@ -1481,9 +1541,101 @@ def build_openai_tools(
                         "parameters": schema.get(
                             "inputSchema", {"type": "object", "properties": {}}
                         ),
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_review",
+                "description": "Review the blackboard for factual disputes and dead ends. Challenges facts not witnessed in evidence, merges superseded facts, and flags dead-end intents. Run periodically to clean up stale information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "ocr",
+                "description": "本地 OCR：提取图片中的文字（优先 easyocr GPU 加速，降级到 pytesseract/Windows.Media.Ocr）。完全本地运行，无需外部 API。适用于验证码、截图分析等场景。",                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "图片路径（必需）",
+                        },
+                        "method": {
+                            "type": "string",
+                            "description": "OCR 方法：auto（自动选择）/easyocr（GPU 加速，推荐）/pytesseract（需 tesseract）/windows（Windows 10/11 原生）",
+                            "enum": ["auto", "easyocr", "pytesseract", "windows"],
+                        },
+                        "lang": {
+                            "type": "string",
+                            "description": "语言代码，默认 en（easyocr 支持 ch_sim 中文）",
+                        },
                     },
-                }
-            )
+                    "required": ["image_path"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "pyc_analyze",
+                "description": "CTF REVERSE 助手：分析 Python 字节码文件（.pyc）。自动检测/修复被篡改的 magic 头（CTF 常见手法），提供反汇编、反编译、常量/字符串提取。适用于逆向 .pyc 找 flag 或加密逻辑。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pyc_path": {
+                            "type": "string",
+                            "description": ".pyc 文件路径（必需）",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "分析模式：auto（全部，默认）/disasm（反汇编）/decompile（反编译）/consts（提取常量）",
+                            "enum": ["auto", "disasm", "decompile", "consts"],
+                        },
+                    },
+                    "required": ["pyc_path"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "pdf_analyze",
+                "description": "CTF 取证助手：提取 PDF 文本（PyMuPDF），按页输出，可列出图片并提示用 ocr 处理。适用于 PDF 藏 flag、Flate 流压缩文本、图片版题面等场景。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pdf_path": {
+                            "type": "string",
+                            "description": "PDF 文件路径（必需）",
+                        },
+                        "extract_images": {
+                            "type": "boolean",
+                            "description": "是否列出每页图片数量（默认 false）",
+                        },
+                        "page_limit": {
+                            "type": "integer",
+                            "description": "最多打印多少页（默认 20，全部文本仍会提取）",
+                        },
+                    },
+                    "required": ["pdf_path"],
+                },
+            },
+        }
+    )
 
     return tools
 
@@ -2706,3 +2858,472 @@ async def execute_brute_force(agent: AgentContext, args: dict[str, Any]) -> str:
     summary.append(f"    尝试: {attempts}/{total}")
 
     return "\n".join(summary)
+
+
+# ── OCR 工具（本地 GPU 加速）────────────────────────────────────────────────────
+
+_OCR_TOOL_NAMES = {"ocr"}
+_OCR_READER_CACHE: dict[str, Any] = {}
+
+
+def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
+    """Run easyocr on the image, reusing a process-wide cached Reader to avoid
+    reloading the model on every call (GPU warm-up dominates single-shot cost)."""
+    import threading
+
+    key = (lang, "en")
+    reader = _OCR_READER_CACHE.get(key)
+    if reader is None:
+        with threading.Lock():
+            reader = _OCR_READER_CACHE.get(key)
+            if reader is None:
+                reader = easyocr_module.Reader([lang], gpu=True)
+                _OCR_READER_CACHE[key] = reader
+    chunks = reader.readtext(image_path, detail=0)
+    return " ".join(chunk for chunk in chunks if chunk)
+
+
+def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
+    """本地 OCR：优先 easyocr（GPU 加速），降级到 pytesseract/Windows.Media.Ocr。
+    
+    完全本地运行，无需外部 API。easyocr reader 进程内缓存复用，避免重复加载模型。
+    
+    Args:
+        agent: Agent 上下文
+        args: {"image_path": str, "method": str, "lang": str}
+            - image_path: 图片路径（必需）
+            - method: "auto"（默认）/"easyocr"/"pytesseract"/"windows"
+            - lang: 语言代码，默认 "en"（easyocr 支持 "ch_sim" 中文）
+    """
+    image_path = str(args.get("image_path", "")).strip()
+    method = str(args.get("method", "auto")).strip().lower()
+    lang = str(args.get("lang", "en")).strip()
+    
+    if not image_path:
+        return "[!] ocr requires 'image_path'"
+    
+    # 检查文件是否存在
+    if not os.path.exists(image_path):
+        return f"[!] image not found: {image_path}"
+    
+    results = []
+    
+    # 尝试 easyocr（推荐，GPU 加速；进程内缓存 reader）
+    if method in {"auto", "easyocr"}:
+        try:
+            import easyocr as _easyocr
+        except ImportError:
+            results.append("[!] easyocr not installed")
+        else:
+            try:
+                text = _ocr_with_cached_reader(_easyocr, image_path, lang)
+                if text.strip():
+                    confidence = len([c for c in text if c.isalpha()]) / max(len(text), 1)
+                    results.append(f"[+] easyocr: {text.strip()} (confidence={confidence:.2f})")
+                    if method == "easyocr":
+                        return "\n".join(results)
+            except Exception as e:
+                results.append(f"[!] easyocr failed: {str(e)[:100]}")
+    
+    # 尝试 pytesseract
+    if method in {"auto", "pytesseract"}:
+        try:
+            import pytesseract
+            from PIL import Image
+            img = Image.open(image_path)
+            text = pytesseract.image_to_string(img, lang=lang).strip()
+            if text:
+                results.append(f"[+] pytesseract: {text}")
+                if method == "pytesseract":
+                    return "\n".join(results)
+        except Exception as e:
+            results.append(f"[!] pytesseract failed: {str(e)[:100]}")
+    
+    # 尝试 Windows.Media.Ocr（Windows 10/11 原生）
+    if method in {"auto", "windows"}:
+        try:
+            ps_code = f"""
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime] | Out-Null
+$null=[Windows.ApplicationModel.Core.CoreApplication,Windows.ApplicationModel.Core,ContentType=WindowsRuntime] | Out-Null
+$b=[Windows.Storage.StorageFile]::GetFileFromPathAsync('{image_path.replace(chr(92), chr(92)*2)}')
+$r=await $b
+$e=[Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+$a=await $e.RecognizeAsync($r)
+$a.Text
+"""
+            result = run_subprocess_capture(
+                ["powershell", "-Command", ps_code],
+                timeout=10,
+                errors="replace",
+            )
+            if result["success"] and result["stdout"].strip():
+                results.append(f"[+] Windows OCR: {result['stdout'].strip()}")
+        except Exception as e:
+            results.append(f"[!] Windows OCR failed: {str(e)[:100]}")
+    
+    if not results:
+        return "[!] All OCR methods failed. Install easyocr for GPU-accelerated OCR."
+    
+    return "\n".join(results)
+
+
+# ── pyc 字节码分析工具（CTF REVERSE 高频）────────────────────────────────────
+
+_PYC_TOOL_NAMES = {"pyc_analyze"}
+
+_PYC_MAGICS = {
+    0x0A0D0D55: (3, 5, 0), 0x0A0D0D56: (3, 5, 0),
+    0x0A0D0D57: (3, 6, 0), 0x300D0D0A: (3, 6, 1),
+    0x31: (3, 7, 0), 0x33: (3, 7, 3), 0x40: (3, 8, 0),
+    0x41: (3, 8, 1), 0x42: (3, 8, 4), 0x4F: (3, 9, 0),
+    0x55: (3, 9, 2), 0x5E: (3, 9, 5), 0x60: (3, 10, 0),
+    0x61: (3, 11, 0), 0x63: (3, 11, 5),
+    # 3.9's magic bytes (61 0d 0d 0a / 0x0A0D0D61) are shared with a few builds;
+    # resolve ambiguity via xdis validation in _detect_pyc_magic.
+    0x0A0D0D61: (3, 9, 0),
+    0x0A0D0D62: (3, 12, 0), 0x0A0D0D63: (3, 12, 0),
+}
+
+
+def _detect_pyc_magic(raw: bytes) -> tuple[Optional[tuple[int, int, int]], bytes]:
+    """Return (version, corrected_16_bytes_header) or (None, raw[:16]).
+    Handles the common CTF trick of patching the first 4 magic bytes so the
+    standard marshal loader rejects the file. Version detection prefers xdis's
+    built-in magic table; our dict is only a fallback for unpatched headers."""
+    head = raw[:16]
+    if len(head) < 16:
+        return None, head
+    # Fast path: known magic + xdis validates the code object parses.
+    magic_le = head[:4]
+    try:
+        from xdis.load import load_module as _xdis_load
+        import tempfile
+        import os as _os
+
+        with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as tf:
+            tf.write(raw)
+            tmp = tf.name
+        try:
+            ver, _ts, _mi, co, _py, _ss, _sh = _xdis_load(tmp)
+            if co is not None:
+                return ver, head
+        except Exception:
+            pass
+        finally:
+            if _os.path.exists(tmp):
+                _os.unlink(tmp)
+    except Exception:
+        pass
+    # Fallback: match the magic as little-endian int against the known table.
+    magic_int = int.from_bytes(magic_le, "little")
+    if magic_int in _PYC_MAGICS:
+        return _PYC_MAGICS[magic_int], head
+    rest = head[4:]
+    for magic_int, ver in _PYC_MAGICS.items():
+        cand = magic_int.to_bytes(4, "little") + rest
+        if _pyc_marshal_ok(cand, raw):
+            return ver, cand
+    return None, head
+
+
+def _pyc_marshal_ok(candidate_header: bytes, raw: bytes) -> bool:
+    """Cheap check: does the marshal payload parse via xdis (cross-version)?
+    Local marshal can only parse the running interpreter's bytecode version, so
+    we rely on xdis, which understands 3.5+ across versions."""
+    import tempfile
+    import os as _os
+
+    try:
+        from xdis.load import load_module as _xdis_load
+    except Exception:
+        return False
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as tf:
+            tf.write(candidate_header + raw[16:])
+            tmp = tf.name
+        _ver, _ts, _mi, co, _py, _ss, _sh = _xdis_load(tmp)
+        return co is not None
+    except Exception:
+        return False
+    finally:
+        if tmp and _os.path.exists(tmp):
+            _os.unlink(tmp)
+
+
+def _pyc_disasm_via_xdis(pyc_path: str) -> str:
+    import io
+    from xdis.disasm import disco
+    from xdis.load import load_module
+
+    version, ts, magic_int, co, ispypy, source_size, sip_hash = load_module(pyc_path)
+    out = io.StringIO()
+    try:
+        disco(version, co, ts, out)
+    except TypeError:
+        disco(version, co, ts, out)
+    return out.getvalue()
+
+
+def _pyc_decompile_via_decompyle3(pyc_path: str) -> str:
+    from decompyle3.main import decompile_file
+    import io
+
+    out = io.StringIO()
+    decompile_file(pyc_path, outstream=out)
+    return out.getvalue()
+
+
+def _pyc_scan_consts(co, depth: int = 0, out: list[str] | None = None) -> list[str]:
+    """Recursively collect printable constants / strings from a code object."""
+    out = out if out is not None else []
+    consts = getattr(co, "co_consts", ()) or ()
+    for c in consts:
+        if isinstance(c, str):
+            if c.strip():
+                out.append(c)
+        elif hasattr(c, "co_consts"):
+            _pyc_scan_consts(c, depth + 1, out)
+    return out
+
+
+def execute_pyc_analyze(agent: AgentContext, args: dict[str, Any]) -> str:
+    """CTF 逆向助手:分析 pyc 字节码文件。
+
+    自动处理被篡改的 magic 头（CTF 常见），提供反汇编/反编译/常量提取。
+    """
+    pyc_path = str(args.get("pyc_path", "")).strip()
+    mode = str(args.get("mode", "auto")).strip().lower()
+    if not pyc_path:
+        return "[!] pyc_analyze requires 'pyc_path'"
+    if not os.path.exists(pyc_path):
+        return f"[!] pyc not found: {pyc_path}"
+
+    raw = open(pyc_path, "rb").read()
+    ver, fixed_head = _detect_pyc_magic(raw)
+    magic_hex = raw[:4].hex()
+
+    lines = [f"[pyc] path={pyc_path} size={len(raw)}B magic={magic_hex}"]
+    if ver:
+        lines.append(f"[pyc] detected python {ver[0]}.{ver[1]}.{ver[2]} (magic ok)")
+    else:
+        lines.append(f"[pyc] magic not recognized; trying fixed headers: {fixed_head[:4].hex()}")
+
+    # 修复 magic 到临时文件
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as tf:
+        fixed_path = tf.name
+        if ver:
+            fixed_path = pyc_path
+        else:
+            tf.write(fixed_head + raw[16:])
+
+    try:
+        if mode in {"auto", "disasm"}:
+            try:
+                dis = _pyc_disasm_via_xdis(fixed_path if not ver else pyc_path)
+                lines.append(f"[pyc] disasm: {len(dis)} chars")
+                lines.append(dis[:3000])
+            except Exception as e:
+                lines.append(f"[pyc] disasm failed: {str(e)[:120]}")
+
+        if mode in {"auto", "decompile"}:
+            try:
+                src = _pyc_decompile_via_decompyle3(pyc_path)
+                lines.append(f"[pyc] decompiled: {len(src)} chars")
+                lines.append(src[:2000])
+            except Exception as e:
+                lines.append(f"[pyc] decompile failed: {str(e)[:120]}")
+
+        if mode in {"auto", "consts"}:
+            try:
+                from xdis.load import load_module as _xdis_load
+                _ver, _ts, _mi, co, _py, _ss, _sh = _xdis_load(pyc_path)
+                consts = _pyc_scan_consts(co)
+                lines.append(f"[pyc] consts/strings ({len(consts)}):")
+                for c in consts[:40]:
+                    lines.append(f"  {c!r}")
+            except Exception as e:
+                lines.append(f"[pyc] consts extraction failed: {str(e)[:120]}")
+    finally:
+        if fixed_path != pyc_path and os.path.exists(fixed_path):
+            os.unlink(fixed_path)
+
+    return "\n".join(lines)
+
+
+# ── subprocess 封装（避免重复代码）────────────────────────────────────────────────────
+
+def run_subprocess_capture(
+    cmd: str | list[str],
+    shell: bool = False,
+    cwd: str | None = None,
+    timeout: int | None = None,
+    encoding: str = "utf-8",
+    errors: str = "ignore",
+) -> dict[str, Any]:
+    """安全的 subprocess 调用，统一返回格式。
+    
+    Returns:
+        {
+            "success": bool,
+            "stdout": str,
+            "stderr": str,
+            "returncode": int,
+            "timeout": bool
+        }
+    """
+    import subprocess
+    
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=shell,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding=encoding,
+            errors=errors,
+            timeout=timeout,
+        )
+        return {
+            "success": proc.returncode == 0,
+            "stdout": proc.stdout or "",
+            "stderr": proc.stderr or "",
+            "returncode": proc.returncode,
+            "timeout": False,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Command timed out after {timeout}s",
+            "returncode": -1,
+            "timeout": True,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": str(e),
+            "returncode": -1,
+            "timeout": False,
+        }
+
+
+# ── PDF 文本提取封装（避免重复代码）────────────────────────────────────────────────────
+
+_PDF_TOOL_NAMES = {"pdf_analyze"}
+
+def extract_pdf_text(pdf_path: str, extract_images: bool = False) -> dict[str, Any]:
+    """PDF 文本提取：优先 fitz（PyMuPDF），支持图片 OCR。
+    
+    Returns:
+        {
+            "success": bool,
+            "text": str,
+            "pages": int,
+            "images": list[str],
+            "error": str | None
+        }
+    """
+    import fitz
+    from pathlib import Path
+    
+    if not os.path.exists(pdf_path):
+        return {
+            "success": False,
+            "text": "",
+            "pages": 0,
+            "images": [],
+            "error": f"PDF not found: {pdf_path}",
+        }
+    
+    try:
+        doc = fitz.open(pdf_path)
+        pages = len(doc)
+        text = ""
+        images = []
+        
+        for page in doc:
+            # 提取文本
+            text += page.get_text()
+            
+            # 如果需要提取图片
+            if extract_images:
+                for img in page.get_images():
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    if base_image:
+                        images.append(base_image["image"])
+        
+        doc.close()
+        
+        return {
+            "success": True,
+            "text": text.strip(),
+            "pages": pages,
+            "images": images,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "text": "",
+            "pages": 0,
+            "images": [],
+            "error": str(e),
+        }
+
+
+def execute_pdf_analyze(agent: AgentContext, args: dict[str, Any]) -> str:
+    """CTF 取证助手:提取 PDF 文本(优先 fitz/PyMuPDF),可按页输出并提取图片。
+
+    适用于 PDF 里藏 flag、题面文字在 Flate 流中、图片版 PDF 等场景。
+    """
+    pdf_path = str(args.get("pdf_path", "")).strip()
+    extract_images = bool(args.get("extract_images", False))
+    page_limit = max(1, min(50, int(args.get("page_limit", 20))))
+    if not pdf_path:
+        return "[!] pdf_analyze requires 'pdf_path'"
+    if not os.path.exists(pdf_path):
+        return f"[!] pdf not found: {pdf_path}"
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return "[!] PyMuPDF (fitz) not installed; pip install pymupdf"
+
+    try:
+        doc = fitz.open(pdf_path)
+        total = len(doc)
+        lines = [f"[pdf] {pdf_path} | {total} pages"]
+        full_text = []
+        for i, page in enumerate(doc[:page_limit]):
+            txt = page.get_text().strip()
+            img_info = ""
+            if extract_images:
+                imgs = page.get_images()
+                if imgs:
+                    img_info = f" | {len(imgs)} images"
+            header = f"\n===== PAGE {i + 1}{img_info} ====="
+            if txt:
+                lines.append(header)
+                lines.append(txt[:1500])
+            elif img_info:
+                lines.append(header + " (no text; images only — use ocr on rendered pages)")
+            else:
+                lines.append(header + " (empty)")
+            full_text.append(txt)
+        if total > page_limit:
+            lines.append(f"\n[... {total - page_limit} more pages not shown; text still extracted below ...]")
+
+        # 追加全部文本供后续搜索(不受 page_limit 截断)
+        all_text = "\n".join(full_text)
+        lines.append("\n=== FULL TEXT (page-limited) ===")
+        lines.append(all_text[:4000])
+        doc.close()
+        return "\n".join(lines)
+    except Exception as e:
+        return f"[!] pdf_analyze failed: {str(e)[:200]}"
