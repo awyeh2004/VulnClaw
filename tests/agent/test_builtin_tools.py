@@ -157,8 +157,9 @@ class TestBuiltinPythonExecute:
 
         results, _ = await handle_tool_calls_with_results(agent, message)
 
+        # 模型侧只拿有界预览(尾部关键信息保留),不倾倒全量输出
         assert "RAW_END" in results[0]["content"]
-        assert "raw output stored" not in results[0]["content"]
+        assert len(results[0]["content"]) < len("A" * 5000 + "RAW_END")
         raw = agent.context.state.agent_state.evidence[0].content
         assert "RAW_END" in raw
         assert "...[truncated]..." not in raw
