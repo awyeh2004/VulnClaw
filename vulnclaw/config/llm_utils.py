@@ -74,3 +74,47 @@ def build_chat_completion_kwargs(
         extra["thinking"] = {"type": "disabled"}
         kwargs["extra_body"] = extra
     return kwargs
+
+
+def probe_llm_latency(llm_config: Any, *, samples: int = 2) -> tuple[float, bool]:
+    """Probe the configured LLM endpoint and report average latency.
+
+    Returns ``(avg_seconds, ok)``. A tiny no-op request is sent ``samples``
+    times; the caller uses the average to decide single vs. multi-agent (a slow
+    shared backend gets worse with more parallel workers). ``ok=False`` when the
+    endpoint is unreachable or errors.
+    """
+    import time
+
+    api_key = str(getattr(llm_config, "api_key", "") or "")
+    base_url = str(getattr(llm_config, "base_url", "") or "").rstrip("/")
+    model = str(getattr(llm_config, "model", "") or "")
+    if not api_key or not base_url or not model:
+        return 0.0, False
+
+    import httpx
+
+    latencies: list[float] = []
+    for _ in range(max(1, samples)):
+        started = time.perf_counter()
+        try:
+            r = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 4,
+                },
+                timeout=20,
+            )
+            if r.status_code == 200:
+                latencies.append(time.perf_counter() - started)
+        except Exception:
+            continue
+    if not latencies:
+        return 0.0, False
+    return sum(latencies) / len(latencies), True

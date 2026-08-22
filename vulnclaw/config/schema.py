@@ -634,6 +634,41 @@ class GCSPLatformConfig(BaseModel):
     )
 
 
+class CompetitionConfig(BaseModel):
+    """Competition-mode strategy knobs (used by ``vulnclaw competition``).
+
+    These tune the agent for a time-pressured CTF match: fail fast on dead
+    paths, prefer easy/high-score challenges first, and avoid burning the whole
+    match waiting on a slow LLM backend.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable competition-mode strategy when running solve.",
+    )
+    # 服务端延迟阈值(秒): 首轮探测 LLM API 延迟, 超过此值判定服务端过载,
+    # 强制单 agent(禁用并行), 避免多 agent 放大公共瓶颈。
+    slow_llm_threshold_s: float = Field(
+        default=5.0,
+        description="LLM first-call latency (s) above which the backend is treated as overloaded -> force single-agent.",
+    )
+    # 单题止损轮次: 超过仍未产出新 flag/证据, 主动放弃换下一题, 避免死循环烧时间。
+    stall_turns: int = Field(
+        default=8,
+        description="After this many turns with no new finding, abort the challenge and move on.",
+    )
+    # 先易后难: 跑题前是否对题目列表按难度/分数排序, 优先做简单高分题。
+    easy_first: bool = Field(
+        default=True,
+        description="Sort challenge list to tackle easy/high-score challenges before hard ones.",
+    )
+    # 附件预下载: 平台可用时, 开局批量下载所有题目附件作为保险(服务端波动时转本地分析)。
+    predownload_attachments: bool = Field(
+        default=True,
+        description="At match start, download all challenge attachments so a slow backend never blocks analysis.",
+    )
+
+
 class VulnClawConfig(BaseModel):
     """Top-level VulnClaw configuration."""
 
@@ -644,6 +679,7 @@ class VulnClawConfig(BaseModel):
     subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     recon: ReconConfig = Field(default_factory=ReconConfig)
     gcs: "GCSPLatformConfig" = Field(default_factory=lambda: GCSPLatformConfig())
+    competition: CompetitionConfig = Field(default_factory=CompetitionConfig)
 
     model_config = ConfigDict(
         env_prefix="VULNCLAW_",
