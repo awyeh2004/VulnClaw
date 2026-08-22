@@ -1747,6 +1747,130 @@ def gcs(
     )
 
 
+@app.command("competition")
+def competition(
+    mode: str = typer.Argument(
+        ..., help="Action: latency (probe LLM delay) | plan (easy-first order) | solve <eid>"
+    ),
+    exercise_id: int = typer.Argument(
+        None, help="Challenge id for 'solve' mode (optional)"
+    ),
+) -> None:
+    """Competition-mode strategy helpers (西湖论剑/DASCTF).
+
+    - ``latency``: probe the LLM backend latency and recommend single vs
+      multi-agent. A slow shared backend gets worse with more parallel workers,
+      so the match strategy should force single-agent when latency is high.
+    - ``plan``: fetch the challenge list (if the platform is reachable) and
+      print an easy-first order; otherwise summarize local attachments.
+    - ``solve <eid>``: run one challenge with competition strategy (fail-fast on
+      stalls, easy-first ordering) instead of the default open-ended solve.
+    """
+    from vulnclaw.config.settings import load_config
+    from vulnclaw.config.llm_utils import probe_llm_latency
+
+    cfg = load_config()
+
+    if mode == "latency":
+        _competition_latency(cfg, probe_llm_latency)
+        return
+    if mode == "plan":
+        _competition_plan(cfg)
+        return
+    if mode == "solve":
+        if exercise_id is None:
+            err_console.print("[!] 'competition solve' requires an exercise_id argument.")
+            raise typer.Exit(1)
+        _competition_solve(cfg, exercise_id)
+        return
+    err_console.print(
+        f"[!] unknown competition mode: {mode} (use: latency | plan | solve <eid>)"
+    )
+    raise typer.Exit(1)
+
+
+def _competition_latency(cfg: Any, probe) -> None:
+    """Probe LLM latency; recommend single vs multi-agent."""
+    llm = cfg.llm
+    threshold = float(getattr(cfg.competition, "slow_llm_threshold_s", 5.0))
+    console.print(f"[*] Probing LLM backend: {llm.model} @ {llm.base_url}")
+    avg, ok = probe(llm)
+    if not ok:
+        err_console.print(
+            "[!] LLM endpoint unreachable/errored — the backend may be overloaded. "
+            "Recommendation: force single-agent, reduce retries, avoid parallel workers."
+        )
+        raise typer.Exit(1)
+    console.print(f"    average latency: {avg:.2f}s")
+    if avg > threshold:
+        console.print(
+            f"    [bold red]LATENCY HIGH (> {threshold}s)[/] — backend overloaded. "
+            "Use SINGLE agent, low max_rounds, and fail-fast stall detection."
+        )
+    else:
+        console.print(
+            f"    [bold green]LATENCY OK (<= {threshold}s)[/] — parallel/multi-agent is viable."
+        )
+
+
+def _competition_plan(cfg: Any) -> None:
+    """Print easy-first challenge ordering (platform or local)."""
+    import glob
+    import os
+
+    comp = cfg.competition
+    if getattr(comp, "easy_first", True):
+        console.print("[*] Competition plan: easy-first ordering enabled.")
+
+    # Try to list challenges from the platform; fall back to local attachments.
+    try:
+        from vulnclaw.gcs_platform.client import exercise_list, is_configured as gcs_ok
+
+        if gcs_ok():
+            import asyncio
+
+            data = asyncio.run(exercise_list())
+            items = (data.get("data") or data or {}).get("list") or []
+            if items:
+                console.print(f"[*] {len(items)} challenges from platform:")
+                for it in sorted(items, key=lambda x: float(x.get("score") or 0), reverse=True):
+                    console.print(
+                        f"    {it.get('id')}: {it.get('name')} | score={it.get('score')} "
+                        f"| diff={it.get('difficulty')}"
+                    )
+                return
+            console.print("[*] Platform reachable but no list returned; falling back to local.")
+    except Exception as exc:
+        console.print(f"[*] Platform list unavailable ({type(exc).__name__}); using local attachments.")
+
+    # Local fallback: list attachments under the work dir.
+    work = os.environ.get("VULNCLAW_WORK_DIR", os.path.expandvars(r"%USERPROFILE%\vulnclaw\work"))
+    attach = os.path.join(work, "attachments")
+    if os.path.isdir(attach):
+        files = sorted(glob.glob(os.path.join(attach, "*")))
+        if files:
+            console.print(f"[*] Local attachments ({len(files)}):")
+            for f in files:
+                console.print(f"    {os.path.basename(f)}")
+            return
+    console.print("[*] No challenges or attachments found (platform down + no local work dir).")
+
+
+def _competition_solve(cfg: Any, exercise_id: int) -> None:
+    """Run a challenge with competition strategy (fail-fast stall detection)."""
+    comp = cfg.competition
+    stall = int(getattr(comp, "stall_turns", 8))
+    console.print(
+        f"[*] Competition solve: exercise {exercise_id} "
+        f"(stall-abort after {stall} unproductive turns)"
+    )
+    # Delegate to the GCS solve path, which manages env lifecycle + submit.
+    gcs(
+        exercise_id=exercise_id,
+        max_steps=max(60, stall * 4),
+    )
+
+
 @app.command()
 def persistent(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
