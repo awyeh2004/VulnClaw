@@ -27,6 +27,8 @@ def test_read_tools_subset_of_names():
 
 
 def test_defaults_point_at_gcsis(monkeypatch):
+    # 隔离本地 config.yaml(可能持久化了 gcs.base_url),模拟无 config 环境
+    monkeypatch.setattr(gcs_client, "_gcs_config", lambda: None)
     monkeypatch.delenv("VULNCLAW_GCS_BASE_URL", raising=False)
     monkeypatch.delenv("VULNCLAW_GCS_ACCESS_KEY", raising=False)
     assert api_base_url() == "https://gcsis.dasctf.com"
