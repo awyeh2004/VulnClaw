@@ -44,7 +44,19 @@ if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
 
 
-_EVIDENCE_ID_RE = re.compile(r"\be\d{3,}\b", re.IGNORECASE)
+# Evidence id references must look like actual citations, not accidental
+# substrings. A flag such as ``CTF2{8ff2d98e-e990-...}`` contains ``e990`` which
+# a bare ``\be\d{3,}\b`` matches (the ``-`` before it counts as a word boundary),
+# falsely rejecting a fully-grounded completion. Require an explicit citation
+# marker: "evidence e008", "[e008]", "(e008)", "eid e008", "e008@..." (the
+# marker may come before or immediately surround the id).
+_EVIDENCE_ID_RE = re.compile(
+    r"(?:evidence id|evidence|eid)\s*[#:]?\s*(e\d{3,})\b"
+    r"|\[(e\d{3,})\]"
+    r"|\((e\d{3,})\)"
+    r"|\b(e\d{3,})\s*@",
+    re.IGNORECASE,
+)
 _FINAL_MARKERS = ("FINAL:", "Final:", "final:", "DONE:", "[DONE]", "完成：", "最终结果：")
 _ASK_MARKERS = ("ASK_USER:", "Ask user:", "ask_user:", "需要用户：", "请用户确认：")
 _NO_PATH_MARKERS = ("NO_PATH:", "No viable path:", "无法继续：", "没有可继续验证的路径：")
@@ -273,7 +285,13 @@ async def structured_call(agent: AgentContext, prompt: str, *, max_tokens: int =
 
 
 def _cited_evidence_ids(text: str) -> list[str]:
-    return list(dict.fromkeys(match.lower() for match in _EVIDENCE_ID_RE.findall(text or "")))
+    ids: list[str] = []
+    for match in _EVIDENCE_ID_RE.findall(text or ""):
+        if isinstance(match, tuple):
+            ids.extend(g for g in match if g)
+        elif match:
+            ids.append(match)
+    return list(dict.fromkeys(i.lower() for i in ids))
 
 
 def _after_marker(text: str, markers: tuple[str, ...]) -> str:
