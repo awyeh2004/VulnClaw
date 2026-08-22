@@ -1563,7 +1563,7 @@ def build_openai_tools(
             "type": "function",
             "function": {
                 "name": "ocr",
-                "description": "本地 OCR：提取图片中的文字（优先 easyocr GPU 加速，降级到 pytesseract/Windows.Media.Ocr）。完全本地运行，无需外部 API。适用于验证码、截图分析等场景。",                "parameters": {
+                "description": "提取图片中的文字：优先本地 easyocr(GPU)/pytesseract/Windows OCR，全部失败时自动降级到 vision LLM(deepseek-v4-flash-vision-exp)理解图片。适用于验证码、截图、PDF渲染图、图片藏flag等场景。",                "parameters": {
                     "type": "object",
                     "properties": {
                         "image_path": {
@@ -1572,8 +1572,12 @@ def build_openai_tools(
                         },
                         "method": {
                             "type": "string",
-                            "description": "OCR 方法：auto（自动选择）/easyocr（GPU 加速，推荐）/pytesseract（需 tesseract）/windows（Windows 10/11 原生）",
-                            "enum": ["auto", "easyocr", "pytesseract", "windows"],
+                            "description": "OCR 方法：auto（自动选择）/easyocr（GPU 加速，推荐）/pytesseract（需 tesseract）/windows（Windows 10/11 原生）/llm（仅用 vision LLM）",
+                            "enum": ["auto", "easyocr", "pytesseract", "windows", "llm"],
+                        },
+                        "use_llm": {
+                            "type": "boolean",
+                            "description": "本地 OCR 全部失败时是否降级到 vision LLM（默认 true）",
                         },
                         "lang": {
                             "type": "string",
@@ -2884,20 +2888,23 @@ def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
 
 
 def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
-    """本地 OCR：优先 easyocr（GPU 加速），降级到 pytesseract/Windows.Media.Ocr。
-    
+    """本地 OCR：优先 easyocr（GPU 加速），降级到 pytesseract/Windows.Media.Ocr，
+    全部失败时可选降级到 vision LLM 理解图片。
+
     完全本地运行，无需外部 API。easyocr reader 进程内缓存复用，避免重复加载模型。
-    
+
     Args:
         agent: Agent 上下文
-        args: {"image_path": str, "method": str, "lang": str}
+        args: {"image_path": str, "method": str, "lang": str, "use_llm": bool}
             - image_path: 图片路径（必需）
             - method: "auto"（默认）/"easyocr"/"pytesseract"/"windows"
             - lang: 语言代码，默认 "en"（easyocr 支持 "ch_sim" 中文）
+            - use_llm: 本地 OCR 全部失败时是否降级到 vision LLM（默认 true）
     """
     image_path = str(args.get("image_path", "")).strip()
     method = str(args.get("method", "auto")).strip().lower()
     lang = str(args.get("lang", "en")).strip()
+    use_llm = bool(args.get("use_llm", True))
     
     if not image_path:
         return "[!] ocr requires 'image_path'"
@@ -2905,6 +2912,11 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
     # 检查文件是否存在
     if not os.path.exists(image_path):
         return f"[!] image not found: {image_path}"
+    
+    # 显式指定只用 vision LLM
+    if method == "llm":
+        vision = _ocr_via_vision_llm(image_path)
+        return f"[+] vision-llm: {vision}" if vision else "[!] vision LLM OCR failed or no credentials"
     
     results = []
     
@@ -2962,10 +2974,91 @@ $a.Text
         except Exception as e:
             results.append(f"[!] Windows OCR failed: {str(e)[:100]}")
     
+    # 本地 OCR 全部无结果时, 降级到 vision LLM 理解图片内容
+    if use_llm and not any(r.startswith("[+]") for r in results):
+        vision = _ocr_via_vision_llm(image_path)
+        if vision:
+            results.append(f"[+] vision-llm: {vision}")
+            if method in {"auto", "easyocr", "pytesseract", "windows"}:
+                return "\n".join(results)
+    
     if not results:
         return "[!] All OCR methods failed. Install easyocr for GPU-accelerated OCR."
     
     return "\n".join(results)
+
+
+def _ocr_via_vision_llm(image_path: str, prompt: str | None = None) -> str:
+    """Fallback OCR: ask a vision-capable LLM to read the image.
+
+    Uses the configured DeepSeek vision model (deepseek-v4-flash-vision-exp) via
+    the OpenAI-compatible endpoint, independent of the agent's main model so an
+    image-agnostic main model never breaks OCR. Returns the model's text answer,
+    or an empty string on any failure (OCR must never crash the tool).
+    """
+    import base64
+    import mimetypes
+
+    try:
+        from vulnclaw.config.settings import load_config
+
+        llm = load_config().llm
+        api_key = getattr(llm, "api_key", "") or ""
+        base_url = str(getattr(llm, "base_url", "") or "").rstrip("/")
+        model = str(getattr(llm, "vision_model", "") or "deepseek-v4-flash-vision-exp")
+        if not api_key:
+            return ""
+        # Vision fallback needs an OpenAI-compatible endpoint; DeepSeek and other
+        # compatible providers work. Non-standard endpoints may not accept image
+        # messages, so only attempt when base_url looks like an OpenAI-compatible
+        # API (/v1 or /chat/completions convention).
+        if "/v1" not in base_url and "/v4" not in base_url:
+            return ""
+    except Exception:
+        return ""
+
+    mime = mimetypes.guess_type(image_path)[0] or "image/png"
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+
+    text_prompt = prompt or (
+        "Extract all readable text from this image verbatim. "
+        "If it contains a flag or secret, output it exactly. "
+        "Otherwise describe the visible content concisely."
+    )
+    try:
+        import httpx
+
+        r = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{b64}"},
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 500,
+            },
+            timeout=60,
+        )
+        if r.status_code != 200:
+            return ""
+        data = r.json()
+        return (data["choices"][0]["message"].get("content") or "").strip()
+    except Exception:
+        return ""
 
 
 # ── pyc 字节码分析工具（CTF REVERSE 高频）────────────────────────────────────

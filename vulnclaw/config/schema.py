@@ -198,6 +198,11 @@ class LLMConfig(BaseModel):
             "thinking disabled) to save tokens on every call."
         ),
     )
+    vision_model: str = Field(
+        default="deepseek-v4-flash-vision-exp",
+        description="Vision-capable model used as the OCR fallback when local "
+        "OCR engines find no text. Must be a model supporting image input.",
+    )
     # ── Per-category model routing ─────────────────────────────────────
     # When ``route_enabled`` is true, the solve entry resolves the effective
     # model from ``routes`` based on the challenge category/difficulty instead
