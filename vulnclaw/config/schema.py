@@ -191,6 +191,13 @@ class LLMConfig(BaseModel):
     reasoning_effort: str = Field(
         default="high", description="Reasoning effort level (OpenAI o-series only)"
     )
+    thinking_disabled: bool = Field(
+        default=False,
+        description=(
+            "Disable the model's verbose reasoning_content (e.g. Zhipu GLM "
+            "thinking disabled) to save tokens on every call."
+        ),
+    )
     # ── Per-category model routing ─────────────────────────────────────
     # When ``route_enabled`` is true, the solve entry resolves the effective
     # model from ``routes`` based on the challenge category/difficulty instead
