@@ -1984,6 +1984,66 @@ def _competition_solve(cfg: Any, exercise_id: int) -> None:
     )
 
 
+@app.command("go")
+def go(
+    target: str = typer.Argument(..., help="Target: URL, host, or local challenge id"),
+    goal: Optional[str] = typer.Option(
+        None, "--goal", "-g", help="Success condition (default: capture the flag)"
+    ),
+    model: str = typer.Option(
+        "auto", "--model", "-m", help="Model: auto/glm/ds (default: config)"
+    ),
+    type: str = typer.Option(
+        None, "--type", "-t",
+        help="Challenge type hint (crypto/web/rev/misc) — auto-selects tools",
+    ),
+) -> None:
+    """极简解题入口：只传目标，其余自动推断。
+
+    等效于 ``solve`` 但隐藏所有长参数：
+        vulnclaw go http://target
+        vulnclaw go 10742 --type crypto
+        vulnclaw go target --goal "get a shell" --model ds
+    """
+    resolved_goal = goal or _("cli.default_goal")
+    if type:
+        type_goal = {
+            "crypto": "solve the crypto challenge and output the flag",
+            "web": "find and exploit the web vulnerability, capture the flag",
+            "rev": "reverse the binary and recover the flag",
+            "misc": "solve the forensics/misc challenge and output the flag",
+            "pwn": "exploit the binary and get the flag",
+        }.get(type.lower())
+        if type_goal:
+            resolved_goal = type_goal
+    console.print(
+        f"[*] go: target={target} | goal={resolved_goal} | model={model}"
+        + (f" | type={type}" if type else "")
+    )
+    solve(
+        target=target,
+        goal=resolved_goal,
+        prompt=None,
+        max_steps=240,
+        max_directions=3,
+        max_tool_rounds=6,
+        resume=True,
+        snapshot=None,
+        run_name=None,
+        resume_run=None,
+        runs_dir=None,
+        additional_targets=None,
+        target_type=None,
+        mount=False,
+        repair=False,
+        force_fresh=False,
+        no_import=False,
+        stream=False,
+        writeup_dir=None,
+        model=model,
+    )
+
+
 @app.command()
 def persistent(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
