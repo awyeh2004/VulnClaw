@@ -66,6 +66,64 @@ def extract_flags(text: str) -> list[str]:
     return list(dict.fromkeys(_FLAG_RE.findall(text or "")))
 
 
+# ── Placeholder / template flag rejection (ported from Muteki gate.py) ──
+# A template like `flag{...}`, `{uuid}`, `<flag>`, `flag{your_flag_here}` matches
+# the loose flag regex and, being quoted from the worker's own prose, trivially
+# satisfies a naive "appears in output" provenance check. The gate must reject
+# them explicitly.
+_ANGLE_PLACEHOLDER = re.compile(r"^<[^>]{0,30}>$")
+_PLACEHOLDER_BODIES = {
+    "...", "…", "..", ".", "____", "___", "__", "_",
+    "flag", "the flag", "flag here", "your flag here", "your_flag_here",
+    "the_flag", "flag_here", "flag_goes_here", "flaghere",
+    "uuid", "xxx", "xxxx", "xxxxx", "redacted", "redacted_flag",
+    "todo", "tbd", "placeholder", "your_flag",
+}
+
+
+def is_placeholder_flag(flag: str) -> bool:
+    """True if ``flag`` is a template/placeholder the model echoed rather than a
+    real recovered flag (``flag{...}``, ``{uuid}``, ``<flag>``, code literals,
+    truncated ``flag{abc...}`` etc.). Such tokens must not satisfy the provenance
+    gate. Ported from Muteki's ``gate.is_placeholder_flag``."""
+    f = (flag or "").strip()
+    if not f:
+        return True
+    if _ANGLE_PLACEHOLDER.match(f):
+        return True
+    m = re.search(r"\{([^}]*)\}", f)
+    if m is not None and not m.group(1).strip():
+        return True
+    # Bare braces with NO prefix — `{name}`, `{uuid}`, `{1,2,66,67,68}` — are code
+    # templates / variable references quoted from prose, not flags. A {...} whose
+    # prefix (text before the first `{`) is empty is a placeholder UNLESS its body
+    # already looks like a recovered flag (mixed case + digits, leet, multi-word).
+    if m is not None and not f[: m.start()].strip():
+        inner = m.group(1).strip()
+        if "," in inner:
+            return True
+        if re.search(r"[\[\]().:=+*/%$\\`'\"<>]", inner):
+            return True
+        looks_real = (
+            len(inner) >= 8
+            and bool(re.search(r"[0-9]", inner))
+            and bool(re.search(r"[A-Za-z]", inner))
+        )
+        if not looks_real:
+            return True
+    body = (m.group(1) if m else f).strip().strip("`'\"<>").strip()
+    low = body.lower()
+    if low in _PLACEHOLDER_BODIES:
+        return True
+    if "..." in body or "…" in body:
+        return True
+    if body and re.fullmatch(r"[.…_\-\s]+", body):
+        return True
+    if body and not re.search(r"[A-Za-z0-9]", body):
+        return True
+    return False
+
+
 def _important_lines(text: str, limit: int = 18) -> list[str]:
     """Pick lines that are likely useful when building a large-output preview."""
 

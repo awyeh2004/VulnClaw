@@ -418,9 +418,15 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
             constraints = f"\n\n{rendered}"
     bb_instruction = (
         "\n\n# Blackboard\n"
-        "Track reasoning across turns: read `blackboard_summary` first each round, "
-        "save confirmed findings with `blackboard_add_fact`, declare plans with "
-        "`blackboard_add_intent`, and `blackboard_reject_intent` dead ends so they are not revisited."
+        "Track reasoning across turns: read `blackboard_summary` first each round. "
+        "Record findings with `blackboard_add_fact` — always pass the `evidence_ref` "
+        "you witnessed the finding in; facts without witnessed evidence stay unverified "
+        "candidates until `blackboard_verify_fact` confirms them. Declare plans with "
+        "`blackboard_add_intent` (near-duplicates of known dead ends are flagged), and "
+        "`blackboard_reject_intent` dead ends so they are not revisited. If new output "
+        "contradicts a recorded fact, mark it with `blackboard_challenge_fact`. "
+        "Periodically run `blackboard_review` to challenge facts not backed by "
+        "evidence and flag dead-end intents so stale information is cleaned up."
     )
     fanout_guidance = prompt_guidance(agent)
     return (
@@ -503,7 +509,15 @@ def _flag_token_grounded(flag: str, evidence_text: str, evidence_flags: list[str
     Exact substring match first, then a whitespace/punctuation-normalized
     comparison so markdown like ``n1book{info_1` + `s_v3ry_im` + `p0rtant_hack}``
     in the answer does not defeat a genuinely grounded full flag.
+
+    A placeholder/template flag (``flag{...}``, ``{uuid}``, ``flag{your_flag}``)
+    is never accepted even if it appears in evidence, because those shapes are
+    quoted from the model's own prose and trivially self-witness.
     """
+    from vulnclaw.agent.agent_state import is_placeholder_flag
+
+    if is_placeholder_flag(flag):
+        return False
     if flag in evidence_text:
         return True
     normalized_flag = re.sub(r"[\s'\"`+]+", "", flag)
@@ -526,6 +540,11 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
 
     flags_in_answer = extract_flags(final_text)
     evidence_flags = extract_flags(evidence_text)
+    from vulnclaw.agent.agent_state import is_placeholder_flag
+
+    # Placeholder/template flags extracted from evidence are not genuine anchors;
+    # drop them so they cannot ground a claimed flag via the normalized compare.
+    evidence_flags = [f for f in evidence_flags if not is_placeholder_flag(f)]
     if _goal_wants_flag(state.goal):
         if not flags_in_answer:
             return False, "goal appears to require a flag/shell, but FINAL did not include a flag", cited
