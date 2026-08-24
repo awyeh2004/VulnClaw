@@ -14,14 +14,11 @@ from vulnclaw.traffic.models import ScopeMode, Target
 
 def _host_port(url: str) -> tuple[str, int | None, str]:
     """Return ``(host, port, path)`` for ``url`` (host lower-cased)."""
+    from vulnclaw.config.url_utils import _safe_parsed_port
+
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
-    port = parts.port
-    if port is None:
-        if parts.scheme == "https":
-            port = 443
-        elif parts.scheme == "http":
-            port = 80
+    port = _safe_parsed_port(parts)
     path = parts.path or "/"
     return host, port, path
 

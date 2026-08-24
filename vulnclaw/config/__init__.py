@@ -17,15 +17,8 @@ def infer_port_from_url(url: str) -> int | None:
 
     Returns the explicit port if present in the URL, otherwise infers
     from the scheme (443 for https, 80 for http), or None if unknown.
+    Never raises on a malformed port (e.g. trailing ``~`` from a paste).
     """
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return None
-    if parsed.port:
-        return parsed.port
-    if parsed.scheme == "https":
-        return 443
-    if parsed.scheme == "http":
-        return 80
-    return None
+    from vulnclaw.config.url_utils import infer_port_from_url as _infer
+
+    return _infer(url)

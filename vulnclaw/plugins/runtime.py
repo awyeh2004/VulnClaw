@@ -303,14 +303,10 @@ class PluginRuntime:
     def _port_for(self, target: str) -> int | None:
         if not target:
             return None
+        from vulnclaw.config.url_utils import _safe_parsed_port
+
         parsed = urlparse(target if "://" in target else f"//{target}")
-        if parsed.port is not None:
-            return parsed.port
-        if parsed.scheme == "https":
-            return 443
-        if parsed.scheme == "http":
-            return 80
-        return None
+        return _safe_parsed_port(parsed)
 
     def _path_for(self, target: str) -> str:
         if not target:

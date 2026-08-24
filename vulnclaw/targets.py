@@ -183,12 +183,15 @@ def _canonicalize_url(raw: str) -> str:
     scheme = parsed.scheme.lower()
     hostname = (parsed.hostname or "").lower().rstrip(".")
     netloc = hostname
-    if parsed.port:
-        default_port = (scheme == "http" and parsed.port == 80) or (
-            scheme == "https" and parsed.port == 443
+    from vulnclaw.config.url_utils import _safe_parsed_port
+
+    port = _safe_parsed_port(parsed)
+    if port:
+        default_port = (scheme == "http" and port == 80) or (
+            scheme == "https" and port == 443
         )
         if not default_port:
-            netloc = f"{hostname}:{parsed.port}"
+            netloc = f"{hostname}:{port}"
     path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
     return urlunsplit((scheme, netloc, path, "", ""))
 
