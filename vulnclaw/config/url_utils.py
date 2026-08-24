@@ -17,13 +17,30 @@ def infer_port_from_url(url: str) -> int | None:
 
     Returns the explicit port if present in the URL, otherwise infers
     from the scheme (443 for https, 80 for http), or None if unknown.
+    Never raises on a malformed port (e.g. trailing ``~`` from a paste):
+    a non-numeric port yields None instead of a crash.
     """
     try:
         parsed = urlparse(url)
     except Exception:
         return None
-    if parsed.port:
-        return parsed.port
+    return _safe_parsed_port(parsed)
+
+
+def _safe_parsed_port(parsed: Any) -> int | None:
+    """Return ``parsed.port`` without raising on a malformed port substring.
+
+    ``urlparse``/``urlsplit`` raise ``ValueError: Port could not be cast to
+    integer value as '19667~'`` when the port is not an integer (e.g. a
+    trailing ``~`` left over from a copy-paste). Callers that only want the
+    port (with scheme fallback) should use this instead of touching
+    ``parsed.port`` directly.
+    """
+    try:
+        if parsed.port:
+            return parsed.port
+    except ValueError:
+        return None
     if parsed.scheme == "https":
         return 443
     if parsed.scheme == "http":
