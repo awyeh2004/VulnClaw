@@ -2963,6 +2963,94 @@ def config_provider(
         )
 
 
+@config_app.command("model")
+def config_model(
+    name: Optional[str] = typer.Argument(
+        None, help="Model alias: zhipu | ds (shallow), or bare"
+    ),
+    level: Optional[str] = typer.Argument(
+        None, help="Thinking level: low | high | max (default: low)"
+    ),
+    deep: bool = typer.Option(
+        False, "--deep", "-d", help="Use the provider's deeper model (ds -> pro)"
+    ),
+) -> None:
+    """快速切换模型厂商 + API key + 思考档位。
+
+    用法:
+        vulnclaw config model                 # 显示当前
+        vulnclaw config model zhipu           # zhipu glm-5.3 + thinking=low + zhipu key
+        vulnclaw config model zhipu high      # zhipu glm-5.3 + thinking=high
+        vulnclaw config model ds              # deepseek-v4-flash + thinking=low + ds key
+        vulnclaw config model ds --deep       # deepseek-v4-pro + thinking=low
+        vulnclaw config model ds --deep max   # deepseek-v4-pro + thinking=max
+    """
+    if name is None:
+        llm = load_config().llm
+        console.print(f"[bold]当前模型:[/] {llm.provider} / {llm.model}")
+        console.print(f"    thinking_disabled: {llm.thinking_disabled}")
+        console.print(f"    reasoning_effort: {getattr(llm, 'reasoning_effort', '')}")
+        console.print(
+            "[dim]切换: vulnclaw config model <zhipu|ds> [low|high|max] [--deep][/]"
+        )
+        return
+
+    # 解析 provider 和是否 deep
+    provider = name.strip().lower()
+    if provider not in {"zhipu", "ds"}:
+        console.print(f"[!] 未知模型别名: {provider} (支持: zhipu | ds)")
+        raise typer.Exit(1)
+
+    # 解析 thinking 档位
+    thinking = (level or "low").strip().lower()
+    if thinking not in {"low", "high", "max"}:
+        console.print(f"[!] thinking 档位必须是 low/high/max, 得到: {thinking}")
+        raise typer.Exit(1)
+
+    # 模型映射
+    _MODEL_MAP = {
+        "zhipu": {
+            "shallow": "glm-5.3",
+            "deep": "glm-5.3",  # zhipu 只有 glm-5.3, 深浅靠 thinking 档位
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        },
+        "ds": {
+            "shallow": "deepseek-v4-flash",
+            "deep": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com/v1",
+        },
+    }
+    m = _MODEL_MAP[provider]
+    model = m["deep"] if deep else m["shallow"]
+
+    config = load_config()
+    llm = config.llm
+    llm.provider = provider
+    llm.model = model
+    llm.base_url = m["base_url"]
+    # thinking: 档位 low/high/max; zhipu 用 extra_body, deepseek 忽略
+    llm.thinking_disabled = False
+    llm.reasoning_effort = thinking
+    # 切换 API key(从 provider_keys 读, 缺失则保留当前)
+    keys = getattr(llm, "provider_keys", {}) or {}
+    if provider in keys and keys[provider]:
+        llm.api_key = keys[provider]
+    save_config(config)
+
+    console.print(
+        f"[+] 已切换: [bold cyan]{provider}[/] / [bold]{model}[/] "
+        f"thinking=[bold]{thinking}[/]"
+    )
+    console.print(f"    base_url: {llm.base_url}")
+    if provider in keys and keys[provider]:
+        console.print(f"    api_key: {llm.api_key[:8]}...")
+    else:
+        console.print(
+            f"[yellow]    provider_keys 里没有 {provider} 的 key, 保持当前 api_key. "
+            f"用 `vulnclaw config set llm.provider_keys.{provider} <key>` 配置.[/]"
+        )
+
+
 # 鈹€鈹€ Init command 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
