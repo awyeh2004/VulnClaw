@@ -66,13 +66,22 @@ def build_chat_completion_kwargs(
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
     # Zhipu (GLM) models output a long reasoning_content by default, which
-    # burns tokens on every call. thinking_disabled=true turns it off via the
-    # provider-specific body field (must go through extra_body; the OpenAI SDK
-    # rejects unknown top-level kwargs).
+    # burns tokens on every call. Some GLM versions reject `disabled`
+    # ("该模型始终思考，不支持关闭思考"), so thinking_disabled=true maps to
+    # the lowest legal level instead of trying to turn thinking off entirely.
     if getattr(llm_config, "thinking_disabled", False) and provider == "zhipu":
         extra = dict(kwargs.get("extra_body") or {})
-        extra["thinking"] = {"type": "disabled"}
+        thinking_level = "low"
+        extra["thinking"] = {"type": thinking_level}
         kwargs["extra_body"] = extra
+    elif provider == "zhipu" and not uses_reasoning_params:
+        # zhipu always-reasoning models accept low/high/max; surface the
+        # configured effort so users can control depth/token burn.
+        effort = str(getattr(llm_config, "reasoning_effort", "") or "").strip().lower()
+        if effort in {"low", "high", "max"}:
+            extra = dict(kwargs.get("extra_body") or {})
+            extra["thinking"] = {"type": effort}
+            kwargs["extra_body"] = extra
     return kwargs
 
 
