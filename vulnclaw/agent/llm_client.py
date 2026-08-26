@@ -595,6 +595,10 @@ async def _call_with_persistent_retries_unbudgeted(
             is_exhausted = _is_key_exhausted_error(error_text)
             is_auth = _is_non_retriable_llm_error(error_text)
 
+            # 限流/配额(429/1302/余额)用指数退避等待, 避免固定 5s 在持续限流
+            # 窗口内反复撞墙. 其他错误保持 5s.
+            backoff = (5 * (2 ** min(retry_attempts, 4))) if is_exhausted else 5
+
             # Multi-key failover: rotate past a rate-limited / quota-drained /
             # invalid key to the next one before falling back to plain retry.
             if can_rotate and (is_exhausted or is_auth):
@@ -617,10 +621,10 @@ async def _call_with_persistent_retries_unbudgeted(
                 agent.rotate_api_key()
                 retry_attempts += 1
                 logger.warning(
-                    "%s 所有 API 密钥均已限流，第 %d 次重连尝试中... (5s 后重试)",
-                    stage_label, retry_attempts,
+                    "%s 所有 API 密钥均已限流，第 %d 次重连尝试中... (%ss 后重试)",
+                    stage_label, retry_attempts, backoff,
                 )
-                await asyncio.sleep(5)
+                await asyncio.sleep(backoff)
                 continue
 
             if is_auth and not is_exhausted:
@@ -628,10 +632,10 @@ async def _call_with_persistent_retries_unbudgeted(
 
             retry_attempts += 1
             logger.warning(
-                "%s LLM 连接异常，第 %d 次重连尝试中... (%s)",
-                stage_label, retry_attempts, exc,
+                "%s LLM 连接异常，第 %d 次重连尝试中... (%ss 后重试)",
+                stage_label, retry_attempts, backoff,
             )
-            await asyncio.sleep(5)
+            await asyncio.sleep(backoff)
 
     raise RuntimeError(_("agent.llm.max_retries", stage=stage_label, retries=max_retries))
 
