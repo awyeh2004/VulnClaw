@@ -157,6 +157,12 @@ class LLMConfig(BaseModel):
         description="Optional list of API keys to fail over between when one is "
         "rate-limited, out of quota, or invalid. Overrides api_key when non-empty.",
     )
+    provider_keys: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-provider API keys, e.g. {zhipu: 'sk-...', deepseek: 'sk-...'}. "
+        "`config model <name>` switches llm.api_key to the matching entry so "
+        "swapping models/providers also swaps credentials in one step.",
+    )
     auth_mode: str = Field(
         default="static",
         description="Credential mode: static (api_key) or oauth (browser sign-in via `vulnclaw login`).",
