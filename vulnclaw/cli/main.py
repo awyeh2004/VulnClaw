@@ -236,6 +236,24 @@ def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Opt
 # 鈹€鈹€ REPL 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
+def _repl_has_in_progress_run(agent: Any) -> bool:
+    """Return True when the agent still holds an unfinished autonomous run
+    (evidence gathered / blackboard populated) that Enter should resume in place
+    rather than re-launch from scratch."""
+    try:
+        state = agent.context.state.agent_state
+        if getattr(state, "completed", False):
+            return False
+        if getattr(state, "evidence", None) or getattr(state, "tool_calls", None):
+            return True
+        bb = getattr(agent.runtime, "blackboard", None)
+        if bb is not None and bb.all_nodes():
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _prepare_repl_target(
     agent, requested_target: str, current_target: Optional[str], current_phase: str
 ) -> tuple[str, str, bool]:
@@ -442,9 +460,15 @@ def _run_repl() -> None:
             ).strip()
 
             if not user_input:
-                if last_auto_input:
+                if _repl_has_in_progress_run(agent):
+                    # A run was interrupted mid-flight: pressing Enter resumes it
+                    # in-place (same origin/goal, blackboard + evidence preserved)
+                    # instead of replaying the raw launch text from scratch.
+                    user_input = _("cli.resume_in_progress_prompt")
+                    console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}[/]")
+                elif last_auto_input:
                     user_input = last_auto_input
-                    console.print(f"[dim]↻ f{_('cli.resuming_auto_pentest')}: {last_auto_input[:60]}...[/]")
+                    console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}: {last_auto_input[:60]}...[/]")
                 else:
                     continue
 
@@ -696,6 +720,14 @@ def _run_repl() -> None:
                 # Reset auto mode on target switch
                 auto_mode_active = False
                 last_auto_input = ""
+            elif new_target and not current_target:
+                current_target = new_target
+                current_phase = "Ready"
+
+            # Local file/path targets get a hard scope guard so the run cannot
+            # traverse the whole disk or scan the operator's own network.
+            if _is_local_path_target(current_target or ""):
+                _apply_local_path_constraints(agent, current_target)
 
             # Save last auto input for resume on empty Enter
             if is_auto_mode:
@@ -3734,6 +3766,12 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
         has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
         return has_target
 
+    # Local file/path targets are multi-step analysis jobs by nature: a path,
+    # an archive (zip/tar/…), or a file-like token with an explicit task verb.
+    local_target = _extract_target_from_input(user_input)
+    if local_target and _is_local_path_target(local_target):
+        return True
+
     # Fallback: has target + multi-step task -> auto
     has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
     if has_target:
@@ -3755,20 +3793,98 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
     return False
 
 
-def _extract_target_from_input(user_input: str) -> Optional[str]:
-    """Extract target from user input string."""
+def _is_local_path_target(target: str) -> bool:
+    """Return True when a target is a local file/directory path, not a network host.
+
+    Guards the autonomous loop so a local file analysis job is NOT treated as a
+    network scan target (no host/port discovery, no outbound scanning of the
+    machine's own network from a local-file prompt).
+    """
     import re
 
-    # Try to find URL (with optional port)
-    url_match = re.search(r"(https?://[a-zA-Z0-9][-a-zA-Z0-9.:]*)", user_input)
+    if not target:
+        return False
+    # Windows drive path / POSIX absolute / home / dot-relative
+    if re.match(r"^[A-Za-z]:[\\/]", target) or target.startswith(("/", "~/", "./", "../", ".\\")):
+        return True
+    # Bare token with a file-ish extension
+    if re.search(r"\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf)$", target, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _apply_local_path_constraints(agent: Any, target: str) -> None:
+    """Scope an autonomous run to a local file/path target so it cannot touch the
+    rest of the machine (no full-disk traversal, no local network scanning).
+
+    Sets ``allowed_paths`` to the target (plus its parent when the target is a
+    directory) and blocks obvious local/loopback hosts so a local-file task never
+    turns into an outbound network recon against the operator's own network.
+    """
+    if not _is_local_path_target(target):
+        return
+    try:
+        from vulnclaw.config.domain_models import TaskConstraints
+
+        tc: TaskConstraints = agent.context.state.task_constraints
+        tc.strict_mode = True
+        if target and target not in tc.allowed_paths:
+            tc.allowed_paths.append(target)
+        for host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."):
+            if host not in tc.blocked_hosts:
+                tc.blocked_hosts.append(host)
+    except Exception:
+        pass
+
+
+def _extract_target_from_input(user_input: str) -> Optional[str]:
+    """Extract target from user input string.
+
+    Local file/directory paths are recognized FIRST so they are never
+    mis-parsed as hostnames (e.g. ``C:\\Users\\伟\\Downloads\\misc2.zip`` or a
+    bare ``misc2.zip`` must stay a local file target, not a fake domain).
+    """
+    import re
+
+    stripped = user_input.strip()
+    if not stripped:
+        return None
+
+    # 1) URL (with optional port) — must be checked before the POSIX-path branch
+    #    so "https://example.com" is never clipped to "/example.com".
+    url_match = re.search(r"(https?://[a-zA-Z0-9][-a-zA-Z0-9.:]*)", stripped)
     if url_match:
         return url_match.group(1).rstrip("/")
-    # Try to find IP address
-    ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", user_input)
+
+    # 2) Local absolute/relative paths (Windows drive, POSIX, home). Detect
+    #    before the bare-file/domain rules so a path never becomes a fake host.
+    #    The POSIX branch only accepts a single leading slash (``/home/...``),
+    #    never the ``//`` of a scheme-less URI.
+    local_path_match = re.search(
+        r"((?:[A-Za-z]:[\\/]|~[/\\]|\.\.?[/\\]|\.\\)[^\s，,；;、]+"
+        r"|(?<![A-Za-z0-9:])/(?!/)[^\s，,；;、]*)",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if local_path_match:
+        return local_path_match.group(1).rstrip("\\/")
+
+    # 3) A bare token with a file-ish extension (zip, tar, gz, png, txt, …)
+    #    is a local file target, not a domain.
+    file_like_match = re.search(
+        r"(?<![A-Za-z0-9])([\w\-. ]+\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf))\b",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if file_like_match:
+        return file_like_match.group(1).strip()
+
+    # 4) IP address
+    ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", stripped)
     if ip_match:
         return ip_match.group(1)
-    # Try to find domain
-    domain_match = re.search(r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)", user_input)
+    # 5) Domain
+    domain_match = re.search(r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)", stripped)
     if domain_match:
         return domain_match.group(1)
     return None

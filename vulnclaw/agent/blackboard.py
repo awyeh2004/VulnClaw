@@ -197,6 +197,23 @@ class Blackboard:
     def to_json(self) -> str:
         return json.dumps([n.to_dict() for n in self._nodes.values()], ensure_ascii=False, indent=2)
 
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> "Blackboard":
+        """Rebuild a Blackboard from a ``to_json`` snapshot (empty if invalid)."""
+        bb = cls()
+        try:
+            data = json.loads(raw)
+            for item in data:
+                bb._nodes[item["id"]] = BlackboardNode.from_dict(item)
+                if item["id"].startswith("n"):
+                    try:
+                        bb._next_id = max(bb._next_id, int(item["id"][1:]) + 1)
+                    except ValueError:
+                        pass
+        except Exception:
+            return bb
+        return bb
+
     # ── Mutation ───────────────────────────────────────────────────────
 
     def create_fact(

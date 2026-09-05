@@ -449,6 +449,13 @@ def apply_target_state_to_agent(
     )
     if restored_state:
         agent.context.state = restored_state
+        _restore_blackboard_from_target_state(
+            agent,
+            target,
+            snapshot_id=snapshot_id,
+            run_context=run_context,
+            target_model=target_model,
+        )
         preview = (
             get_target_state_preview(
                 target,
@@ -994,6 +1001,40 @@ def _top_recon_assets_for_summary(recon_meta: dict[str, Any]) -> list[str]:
     return [label for _, label in ranked[:8]]
 
 
+def _restore_blackboard_from_target_state(
+    agent: Any,
+    target: str,
+    *,
+    snapshot_id: Optional[str] = None,
+    run_context: RunContext | None = None,
+    target_model: Target | None = None,
+) -> None:
+    """Rehydrate the agent's blackboard from the persisted runtime_meta snapshot
+    (saved by ``_merge_runtime_meta``) so a resumed run keeps its reasoning graph."""
+    try:
+        raw = load_target_state(
+            target,
+            snapshot_id=snapshot_id,
+            run_context=run_context,
+            target_model=target_model,
+        )
+        if not raw:
+            return
+        bb_json = (raw.get("runtime_meta") or {}).get("blackboard_json") or ""
+        if not bb_json:
+            return
+        from vulnclaw.agent.blackboard import Blackboard
+
+        runtime = getattr(agent, "runtime", None)
+        if runtime is None:
+            return
+        restored = Blackboard.from_json(bb_json)
+        if restored.all_nodes():
+            runtime.blackboard = restored
+    except Exception:
+        return
+
+
 def _merge_runtime_meta(
     existing: dict[str, Any], session: SessionState, runtime: Any | None
 ) -> dict[str, Any]:
@@ -1011,6 +1052,17 @@ def _merge_runtime_meta(
         if step not in failed_steps:
             failed_steps.append(step)
 
+    # Persist the blackboard reasoning graph so a later run (even a fresh
+    # process) can restore facts/intents/dead-ends instead of starting over.
+    blackboard_json = ""
+    if runtime is not None:
+        try:
+            bb = getattr(runtime, "blackboard", None)
+            if bb is not None:
+                blackboard_json = bb.to_json()
+        except Exception:
+            blackboard_json = ""
+
     return {
         "blocked_targets": sorted(blocked_targets),
         "failed_targets": failed_targets,
@@ -1018,6 +1070,7 @@ def _merge_runtime_meta(
         "rounds_without_progress": int(getattr(runtime, "rounds_without_progress", 0) or 0),
         "current_attack_path": getattr(runtime, "current_attack_path", None),
         "same_path_fail_count": int(getattr(runtime, "same_path_fail_count", 0) or 0),
+        "blackboard_json": blackboard_json,
         "updated_at": datetime.now().isoformat(),
     }
 
