@@ -26,6 +26,7 @@
   "cli.config_reloaded": "Config reloaded",
   "cli.language_set_to": "Language set to",
   "cli.resuming_auto_pentest": "Resuming auto pentest",
+  "cli.resume_in_progress_prompt": "Continue the current solve progress (based on the existing blackboard/evidence; do not start over)",
   "cli.compressed_earlier_context": "[green]Compressed earlier context[/green], keeping recent messages; summary length {var_001} characters.",
   "cli.target_within_range_and_explicitly_authorized": "This target is in scope and explicitly authorized.",
   "report.rec.uncategorized": "Uncategorized",
