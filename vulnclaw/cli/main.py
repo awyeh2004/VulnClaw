@@ -3858,11 +3858,12 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
 
     # 2) Local absolute/relative paths (Windows drive, POSIX, home). Detect
     #    before the bare-file/domain rules so a path never becomes a fake host.
-    #    The POSIX branch only accepts a single leading slash (``/home/...``),
-    #    never the ``//`` of a scheme-less URI.
+    #    The POSIX branch only accepts a single leading slash followed by ASCII
+    #    path characters (``/home/...``), and never swallows the ``//`` of a
+    #    scheme-less URI nor a stray ``/`` in prose such as "黑板/证据".
     local_path_match = re.search(
         r"((?:[A-Za-z]:[\\/]|~[/\\]|\.\.?[/\\]|\.\\)[^\s，,；;、]+"
-        r"|(?<![A-Za-z0-9:])/(?!/)[^\s，,；;、]*)",
+        r"|(?<![A-Za-z0-9:])/[A-Za-z0-9._][A-Za-z0-9._~%+\\/-]*)",
         stripped,
         flags=re.IGNORECASE,
     )
