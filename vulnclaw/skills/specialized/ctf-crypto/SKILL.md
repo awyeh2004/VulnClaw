@@ -26,6 +26,7 @@ routing:
 |------|---------|---------|
 | RSA 攻击 | `rsa-attacks-cheatsheet.md` | 小e/共模/Wiener/Pollard/Fermat/Coppersmith |
 | AES/分组密码攻击 | `aes-and-block-cipher-attacks.md` | ECB翻转/Padding Oracle/GCM nonce重用 |
+| Web 加密 session cookie 伪造 | `encrypted-session-cookie-forgery.md` | ECB/CBC cut-and-paste 拼块伪造 admin，无需解 key |
 | ECC 攻击 | `ecc-attacks-cheatsheet.md` | 小子群/invalid curve/Smart/Pohlig-Hellman |
 | PRNG/流密码攻击 | `prng-and-stream-cipher-attacks.md` | MT19937/LCG/LFSR/RC4 |
 | 古典密码 | `classic-cipher-attacks.md` | Vigenere/XOR频率分析/OTP重用 |
@@ -44,4 +45,5 @@ routing:
 | 椭圆曲线参数 | ECC 攻击 | ecc-attacks-cheatsheet.md |
 | 给了随机数序列 | PRNG 预测 | prng-and-stream-cipher-attacks.md |
 | 给了密文和部分明文 | XOR/流密码 | classic-cipher-attacks.md |
+| Web session cookie 是 hex/base64 密文 + 可注册登录 | ECB cut-and-paste 伪造 admin | encrypted-session-cookie-forgery.md |
 | 矩阵/向量运算 | 格攻击 | lattice-and-lwe-attacks.md |
