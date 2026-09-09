@@ -914,6 +914,14 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         except Exception as e:
             return f"[!] blackboard 工具执行错误: {e}"
 
+    # ── Solve playbooks (reusable attack recipes) ──
+    if tool_name in ("lookup_playbook", "save_playbook"):
+        try:
+            from vulnclaw.agent.playbook import execute_playbook_tool
+            return await execute_playbook_tool(tool_name, args)
+        except Exception as e:
+            return f"[!] playbook 工具执行错误: {e}"
+
     # ── 后台任务（爆破等耗时操作不阻塞）───────────────────────────────────────
     if tool_name in _BG_TOOL_NAMES:
         if tool_name == "bg_launch":
@@ -1171,6 +1179,8 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "blackboard_start_intent",
     "blackboard_reject_intent",
     "blackboard_review",
+    "lookup_playbook",
+    "save_playbook",
     "web_map_add",
     "web_map_link",
     "web_map_render",
@@ -1560,6 +1570,71 @@ def build_openai_tools(
                     "type": "object",
                     "properties": {},
                     "required": [],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_playbook",
+                "description": (
+                    "Look up a reusable attack recipe (playbook) for a challenge you may have solved before. "
+                    "Give a page signature/fingerprint from your first-round probe (page title + distinguishing "
+                    "paths + form fields), and get back prior playbooks ranked by match score, with validated "
+                    "recipes first. If an old playbook matches the current target, REPLAY its steps against the "
+                    "new host instead of re-deriving the attack from scratch."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fingerprint": {
+                            "type": "string",
+                            "description": "Page signature from your first probe, e.g. title 'Encrypted Flask @n1book' plus paths '/world/N /login /register'.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max playbooks to return (default 3).",
+                        },
+                    },
+                    "required": ["fingerprint"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "save_playbook",
+                "description": (
+                    "Persist a reusable attack recipe once you have a confirmed attack path (even before flag "
+                    "extraction). status='validated' when you actually got the flag; 'draft' when the path is "
+                    "figured out but not yet proven. Reproduction steps should use a {HOST} placeholder so the "
+                    "recipe replays on any new instance of the same challenge."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Challenge family name, e.g. 'Encrypted Flask'.",
+                        },
+                        "fingerprint": {
+                            "type": "string",
+                            "description": "Page signature (title + paths + form fields) used to re-identify this challenge later.",
+                        },
+                        "steps": {
+                            "type": "string",
+                            "description": "Numbered reproduction steps using {HOST} placeholder, e.g. '1) register donor with username A*15+0x05+admin... 2) extract T16 token ...'.",
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "validated (flag obtained) or draft (path known, unproven). Default draft.",
+                        },
+                    },
+                    "required": ["name", "fingerprint", "steps"],
                 },
             },
         }
