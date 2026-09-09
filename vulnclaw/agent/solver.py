@@ -446,6 +446,15 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "Periodically run `blackboard_review` to challenge facts not backed by "
         "evidence and flag dead-end intents so stale information is cleaned up."
     )
+    playbook_instruction = (
+        "\n\n# Solve Playbooks\n"
+        "After your first probe of the target, call `lookup_playbook` with a page "
+        "signature (title + distinguishing paths + form fields). If a prior run already "
+        "solved this challenge, REPLAY its steps against the new host (replace the "
+        "{HOST} placeholder) instead of re-deriving the attack from scratch. When you "
+        "settle on a confirmed attack path, call `save_playbook` so future runs inherit "
+        "it: use status='validated' once you actually retrieve the flag, else 'draft'."
+    )
     fanout_guidance = prompt_guidance(agent)
     return (
         "You are VulnClaw's autonomous, model-led penetration-testing agent. "
@@ -498,6 +507,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"Goal: {state.goal}"
         f"{constraints}"
         f"{bb_instruction}"
+        f"{playbook_instruction}"
     )
 
 
