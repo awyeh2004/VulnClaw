@@ -304,7 +304,9 @@ async def test_bounded_tool_result_is_returned_inline_by_default():
     marker = "TAIL_MARKER_select-waf.php"
 
     async def executor(func_name, func_args):
-        return "A" * 5000 + marker
+        # Stay under DEFAULT_EVIDENCE_PREVIEW_CHARS (3500): results that size
+        # must return inline, not as a stored-raw + preview pair.
+        return "A" * 2000 + marker
 
     agent = _Agent(executor, _Safety(tool_parallel=True, tool_max_concurrent=5))
     message = _make_message([("c0", "fetch", '{"url":"https://example.com/"}')])
