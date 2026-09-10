@@ -47,6 +47,7 @@ from rich.text import Text
 from vulnclaw import __version__, headless
 from vulnclaw.agent.constraint_policy import validate_action_constraints
 from vulnclaw.agent.input_analysis import extract_task_constraints
+from vulnclaw.agent.solver import _looks_like_quiz
 
 # === Stream Output Renderer ===
 # 修改者: Nyaecho
@@ -465,6 +466,11 @@ def _run_repl() -> None:
                     # in-place (same origin/goal, blackboard + evidence preserved)
                     # instead of replaying the raw launch text from scratch.
                     user_input = _("cli.resume_in_progress_prompt")
+                    # The generic resume prompt carries no task signal, so quiz
+                    # detection (directive + gate exemption) would be lost on
+                    # resume; re-attach it from the original launch input.
+                    if last_auto_input and _looks_like_quiz(last_auto_input):
+                        user_input += "（任务类型：知识竞赛答题）"
                     console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}[/]")
                 elif last_auto_input:
                     user_input = last_auto_input
@@ -712,7 +718,7 @@ def _run_repl() -> None:
 
             # Detect target switch and reset context if the user mentions a new target
             new_target = _extract_target_from_input(user_input)
-            if new_target and current_target and new_target != current_target:
+            if _should_switch_target(user_input, new_target, current_target):
                 console.print(_("cli.target_switch", from_target=current_target, to_target=new_target))
                 current_target = new_target
                 current_phase = "Recon"
@@ -3710,6 +3716,8 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
         "find flag",
         "解题",
         "做题",
+        "答题",
+        "知识竞赛",
         "挑战",
         "challenge",
         "ctf",
@@ -3889,6 +3897,20 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
     if domain_match:
         return domain_match.group(1)
     return None
+
+
+def _should_switch_target(
+    user_input: str, new_target: Optional[str], current_target: Optional[str]
+) -> bool:
+    """Whether mentioning ``new_target`` should reset the session context.
+
+    A pasted knowledge-quiz question often cites IPs/domains (e.g.
+    "192.168.1.1 属于哪类地址"); those are quiz content, not a target switch —
+    never reset the session context on them.
+    """
+    if not new_target or not current_target or new_target == current_target:
+        return False
+    return not _looks_like_quiz(user_input)
 
 
 @app.callback(invoke_without_command=True)
