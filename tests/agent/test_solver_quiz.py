@@ -1,0 +1,100 @@
+"""Knowledge-quiz (竞赛理论题) support in the solve engine.
+
+Quiz answers come from model knowledge rather than from a captured flag, so
+the completion gate must not demand a flag or quoted evidence terms — that
+would loop forever on "答案: A". The gate only requires that the questions
+were fetched into evidence, and that any claimed flag is still grounded.
+"""
+
+from types import SimpleNamespace
+
+from vulnclaw.agent.agent_state import AgentState
+from vulnclaw.agent.solver import (
+    _completion_gate,
+    _looks_like_quiz,
+    _system_prompt,
+)
+
+QUIZ_GOAL = (
+    "CTF 比赛知识竞赛答题：1. 下列属于对称加密算法的是（ ）A. RSA B. AES "
+    "C. ECC D. DSA 2. （单选）《网络安全法》的施行时间"
+)
+
+
+def _make_state(goal: str, evidence_text=None) -> AgentState:
+    st = AgentState(goal=goal)
+    if evidence_text is not None:
+        st.evidence = [
+            type(
+                "Ev",
+                (),
+                {"content": evidence_text, "id": "e001", "evidence_id": "e001"},
+            )()
+        ]
+    return st
+
+
+class TestLooksLikeQuiz:
+    def test_chinese_keywords(self):
+        assert _looks_like_quiz("知识竞赛：以下说法正确的是")
+        assert _looks_like_quiz("（判断题）HTTPS 默认使用 443 端口")
+        assert _looks_like_quiz("第2题（多选）下列属于国密算法的")
+
+    def test_english_keywords(self):
+        assert _looks_like_quiz("Answer the security awareness quiz")
+        assert _looks_like_quiz("Multiple choice: which is a symmetric cipher?")
+
+    def test_option_markers_imply_choice_question(self):
+        assert _looks_like_quiz("1. A. RSA B. AES C. ECC")
+        assert not _looks_like_quiz("Annex B. references appendix A. notes")
+
+    def test_pentest_goal_is_not_quiz(self):
+        assert not _looks_like_quiz("对 http://target 进行渗透测试，找出flag")
+        assert not _looks_like_quiz("scan the target and exploit the sqli")
+
+
+class TestCompletionGateQuiz:
+    def test_quiz_without_evidence_rejected(self):
+        """Pure guessing without fetching the questions stays rejected."""
+        st = _make_state(QUIZ_GOAL, None)
+        ok, reason, _ = _completion_gate(st, "FINAL: 1.B 2.2017年6月1日")
+        assert not ok
+        assert "quiz" in reason
+
+    def test_quiz_answers_accepted_without_flag_or_citations(self):
+        """Goal mentions CTF (flag-wanting) but knowledge answers must pass."""
+        st = _make_state(QUIZ_GOAL, "第1题 下列属于对称加密算法的是… 第2题 网络安全法施行时间")
+        ok, reason, _ = _completion_gate(st, "FINAL: 1.B 2.2017年6月1日")
+        assert ok, reason
+
+    def test_quiz_claimed_flag_must_still_be_grounded(self):
+        st = _make_state(QUIZ_GOAL, "交卷成功，获得 flag{quiz_master}")
+        ok, _, _ = _completion_gate(st, "FINAL: 全部答对，获得 flag{quiz_master}")
+        assert ok
+
+        st2 = _make_state(QUIZ_GOAL, "交卷成功，无 flag 返回")
+        ok, reason, _ = _completion_gate(st2, "FINAL: 答对！flag{hallucinated}")
+        assert not ok
+        assert "not present in tool evidence" in reason
+
+
+class TestSystemPromptQuiz:
+    def test_quiz_goal_gets_quiz_instruction(self):
+        prompt = _system_prompt(SimpleNamespace(), AgentState(goal=QUIZ_GOAL))
+        assert "Knowledge Quiz Mode" in prompt
+
+    def test_quiz_instruction_carries_beyond_knowledge_flagging(self):
+        """Beyond-knowledge (current-events) questions must be flagged (red
+        marker + reference leads), held back from submission, and asked of the
+        user before the single final submission."""
+        prompt = _system_prompt(SimpleNamespace(), AgentState(goal=QUIZ_GOAL))
+        assert "do NOT guess" in prompt
+        assert "🔴 超纲题汇总" in prompt
+        assert "Do NOT submit while beyond-knowledge questions remain" in prompt
+        assert "ONE single final submission" in prompt
+
+    def test_pentest_goal_has_no_quiz_instruction(self):
+        prompt = _system_prompt(
+            SimpleNamespace(), AgentState(goal="渗透测试 http://target 并找出flag")
+        )
+        assert "Knowledge Quiz Mode" not in prompt
