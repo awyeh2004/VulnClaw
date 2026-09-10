@@ -29,6 +29,9 @@ routing:
 
 ## 赛前：易题优先排序 + 批量下载
 
+0. **知识竞赛/理论题环节最先做** — 它零环境依赖、不受靶机过载影响、答完即
+   锁定得分，是单位时间得分率最高的一类题。进场比赛若存在知识竞赛入口，
+   先按 knowledge-quiz 策略批量读题作答并提交，再回到攻防题。
 1. 拉题目列表（GCS `exercise_list` / CTF2 `challenge` 列表），**按 score 从高到低**（即简单题先做）排序。
    - 平台可达 → 直接取列表的 score/difficulty。
    - 平台不可达 → 退化为本地 `work/attachments` 目录里的文件清单。
@@ -60,5 +63,6 @@ routing:
 ## 参考
 
 - `references/competition-strategy.md` — 比赛抢分策略具体操作细节
+- `knowledge-quiz` — 知识竞赛/理论题批量作答策略，开局抢分首选
 - `ctf-web` / `ctf-crypto` / `ctf-misc` / `crypto-toolkit` — 具体题型的攻击知识
 - solve playbook（`lookup_playbook`/`save_playbook` 工具）— 同题新靶机复用已解路径，比赛换实例时尤其省时间

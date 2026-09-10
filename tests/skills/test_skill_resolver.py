@@ -127,6 +127,9 @@ POSITIVE_CASES = [
     ("cve triage", dict(task_types=["triage"], phase="vuln_discovery"), "cve-triage"),
     ("osint", dict(task_types=["osint"], phase="recon"), "osint-recon"),
     ("reporting", dict(task_types=["report"], phase="reporting"), "reporting"),
+    # Alias-driven: 知识竞赛/quiz text routes to the knowledge-quiz skill.
+    ("知识竞赛理论题", dict(), "knowledge-quiz"),
+    ("security quiz", dict(), "knowledge-quiz"),
 ]
 
 
