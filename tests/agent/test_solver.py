@@ -19,6 +19,9 @@ class _Agent:
         self.session_state = self.context.state
         self.config = SimpleNamespace()
         self._finding_parser = _Parser()
+        # solve() reads agent.runtime.blackboard each round; the mock carries no
+        # blackboard, which must degrade to an empty summary, not an error.
+        self.runtime = SimpleNamespace(blackboard=None)
 
 
 def test_extract_json_accepts_noisy_model_output():
