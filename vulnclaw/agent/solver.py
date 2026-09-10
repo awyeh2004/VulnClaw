@@ -225,6 +225,64 @@ def _goal_wants_flag(goal: str) -> bool:
     return any(keyword in lowered for keyword in ("flag", "ctf", "getshell", "shell"))
 
 
+# Knowledge-quiz (竞赛理论题) signals. Answers come from model knowledge rather
+# than from exploiting a host, so prompt directives and the completion gate take
+# a dedicated path (see _completion_gate) instead of the flag/evidence whitelist.
+_QUIZ_KEYWORDS = (
+    "知识竞赛",
+    "理论题",
+    "理论考核",
+    "安全知识",
+    "选择题",
+    "单选",
+    "多选",
+    "判断题",
+    "问答题",
+    "答题",
+    "quiz",
+    "multiple choice",
+    "trivia",
+)
+_QUIZ_OPTIONS_RE = re.compile(r"(?:^|\n|[　\s])([A-D])\s*[.、:：）)]", re.MULTILINE)
+
+_QUIZ_INSTRUCTION = (
+    "\n\n# Knowledge Quiz Mode\n"
+    "The goal reads as a knowledge/theory quiz (single/multiple choice, true/false "
+    "or short answer): points come from correct ANSWERS, not from attacking a host. "
+    "Fetch the quiz page first and read EVERY question, then answer from your own "
+    "security knowledge. Do NOT port-scan, fuzz, brute-force or inject the quiz "
+    "platform — the only interactions with it are reading questions and submitting "
+    "answers. Output answers in the platform's exact format (option letters only "
+    "for choice questions; use ALL letters for multiple-answer questions; 对/错 or "
+    "正确/错误 for true/false). When unsure, eliminate clearly wrong options and "
+    "commit to the most probable answer — an unanswered question scores zero. "
+    "Exception — questions beyond your knowledge (current-events items newer than "
+    "your training data: 当年主题/届数/新发布文件): do NOT guess those. Keep "
+    "working through the rest of the paper first: mark each beyond-knowledge "
+    "question inline with a red `🔴 超纲题` prefix (question number + verbatim "
+    "stem + options) and attach whatever reference leads you CAN provide (likely "
+    "source regulation/document name, suggested search keywords, matching skill "
+    "reference files, platform notice pages). Do NOT submit while beyond-knowledge "
+    "questions remain unanswered: once the whole paper is worked, end with a "
+    "`🔴 超纲题汇总` section and write `ASK_USER:` asking the user to answer "
+    "exactly those questions. After the user supplies their answers, merge them "
+    "in and make ONE single final submission. "
+    "The "
+    "knowledge-quiz skill's references carry the law/compliance baseline "
+    "(网络安全法/数据安全法/个保法/密码法/等保2.0/应急响应) worth loading via "
+    "`load_skill_reference` when questions touch those topics."
+)
+
+
+def _looks_like_quiz(goal: str) -> bool:
+    """Return True when ``goal`` reads as a knowledge/theory quiz task."""
+    lowered = (goal or "").lower()
+    if any(keyword in lowered for keyword in _QUIZ_KEYWORDS):
+        return True
+    # Three or more distinct A./B./C./D. option markers is a choice-question task.
+    return len(set(_QUIZ_OPTIONS_RE.findall(goal or ""))) >= 3
+
+
 def extract_json(text: str) -> dict[str, Any] | None:
     """Extract one JSON object from strict or mildly noisy model output."""
 
@@ -456,6 +514,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "it: use status='validated' once you actually retrieve the flag, else 'draft'."
     )
     fanout_guidance = prompt_guidance(agent)
+    quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
     return (
         "You are VulnClaw's autonomous, model-led penetration-testing agent. "
         "The user controls the engagement scope; treat the given target/task as authorized.\n"
@@ -503,6 +562,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "When the goal is achieved, write `FINAL:` and cite evidence ids such as e001. "
         "When user input is required, write `ASK_USER:` with the exact question. "
         "When no viable path remains, write `NO_PATH:` with the evidence-backed reason.\n"
+        f"{quiz_instruction}"
         f"Origin: {state.origin}\n"
         f"Goal: {state.goal}"
         f"{constraints}"
@@ -590,6 +650,26 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
     # Placeholder/template flags extracted from evidence are not genuine anchors;
     # drop them so they cannot ground a claimed flag via the normalized compare.
     evidence_flags = [f for f in evidence_flags if not is_placeholder_flag(f)]
+    # Knowledge-quiz goals: answers derive from model knowledge, so the
+    # flag/quota whitelist does not apply — requiring a flag or quoted evidence
+    # terms would loop forever on "答案: A". Only require that the questions
+    # were actually fetched (evidence recorded), and that any claimed flag is
+    # still grounded.
+    if _looks_like_quiz(state.goal):
+        if not state.evidence:
+            return (
+                False,
+                "quiz goal: fetch the quiz page and read the questions first so they "
+                "are recorded as evidence, then answer them from knowledge",
+                cited,
+            )
+        ungrounded = [
+            flag for flag in flags_in_answer
+            if not _flag_token_grounded(flag, evidence_text, evidence_flags)
+        ]
+        if ungrounded:
+            return False, f"claimed flag not present in tool evidence: {ungrounded[0]}", cited
+        return True, final_text.strip(), cited
     if _goal_wants_flag(state.goal):
         if not flags_in_answer:
             return False, "goal appears to require a flag/shell, but FINAL did not include a flag", cited
