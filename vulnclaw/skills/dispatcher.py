@@ -69,6 +69,10 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "bashjail|bash沙箱|restricted shell|rbash逃逸": ["ctf-misc"],
     "编码链|多层编码|杂项|misc|隐写|stego": ["ctf-misc"],
     "ctfd|夺旗平台|flag提交|题目下载": ["ctf-misc"],
+    # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
+    "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
+    "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],
+    "quiz|multiple choice|trivia|true or false": ["knowledge-quiz"],
     # ── OSINT specialized skill — refined routing ───────────────────
     # osint-recon: Full-dimension recon (OSINT + social engineering)
     # Triggered only when user explicitly mentions social engineering / OSINT / author tracking
