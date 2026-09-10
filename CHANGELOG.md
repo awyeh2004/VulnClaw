@@ -13,6 +13,18 @@
 </details>
 
 <details open>
+<summary><strong>Unreleased</strong> — 知识竞赛（理论题）支持</summary>
+
+- **新增知识竞赛/理论题直答能力** — solve 引擎新增知识题识别（知识竞赛/理论题/选择题/判断题等关键词 + A./B./C./D. 选项模式），命中后注入 Knowledge Quiz Mode 指令：先抓题入证据、按平台格式作答、不确定用排除法、禁止对答题平台做扫描/注入/爆破。完成闸门为知识题目标走专属分支：不再强制 FINAL 携带 flag 或引用证据词（原闸门会让"答案：A"类最终答复永久拒绝死循环），仅要求题目先抓入证据、声称的 flag 仍需证据落地。
+- **新增 `knowledge-quiz` 专项 Skill** — 识别信号、六步答题工作流、分题型对策 playbook（单选否定问法/多选策略/判断题绝对化表述/填空标准术语）与网络安全法律法规高频考点基线 `cn-cybersec-law-baseline.md`（四部核心法律时间线、网安法要点、等保 2.0、应急响应 PDCERF/事件四级、国密算法、刑法涉网罪名、常见端口）。dispatcher 路由新增知识竞赛/理论题/法规名/quiz 等中英文关键词。
+- **新增超纲题人工兜底策略** — 超出模型知识的题目（当年时事、比赛主题/届数、训练截止后新发布文件）不猜测：以 `🔴 超纲题` 红标标记题号/题干/选项并附资料线索（可能出处文件、检索关键词、skill reference、平台公告页），继续做完其余题目；超纲题未答时扣卷不交，全场做完后 `ASK_USER:` 请用户作答，拿到答案合并后再做唯一一次最终提交。
+- **知识题防误换靶与续跑保活（CLI）** — 新增 `_should_switch_target`：粘贴题目文本中引用的 IP/域名（如"192.168.1.1 属于哪类地址"）不再触发目标切换重置会话上下文；`_should_auto_pentest` 自动模式触发词补充"答题/知识竞赛"；Ctrl+C 中断后按回车续跑时恢复 prompt 附带任务类型标记，知识题指令与闸门豁免跨中断保留。
+- **更新比赛模式策略** — competition-mode 明确知识竞赛环节最先做：零环境依赖、不受靶机过载影响、答完即锁定得分，是单位时间得分率最高的题型。
+- **修复存量测试失败** — `test_solver.py` 的 `_Agent` mock 补齐 `runtime` 属性（solve playbook 机制引入的回归，修复后该文件测试时长从 ~113s 降至 ~2s）；`test_tool_parallel.py` 内联返回用例载荷从 5000 字符降至预览阈值（3500）以内，保留"小结果默认内联"的测试意图。
+
+</details>
+
+<details open>
 <summary><strong>v0.3.8</strong> — sub-agent fan-out + cold/hot memory + context budget</summary>
 
 - **新增模型驱动的并行子 Agent 扇出** — 默认 solve 引擎新增 `spawn_subagents` 工具，主模型可在一轮内提交多个独立、自包含的攻击方向并发探索；子循环继承目标约束与已有证据，禁用递归扇出并采用单次/并发/每次 solve 生命周期预算。子证据合并回父状态时统一重分配 `eNNN`，同步修正 claim、pin、progress signal 和 tool-call 引用；CLI 新增 fan-out 生命周期事件展示。
