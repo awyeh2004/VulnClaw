@@ -48,6 +48,7 @@
   "cli.config_reloaded": "配置重新加载",
   "cli.language_set_to": "语言已设置为",
   "cli.resuming_auto_pentest": "恢复自动渗透测试",
+  "cli.resume_quiz_suffix": "（任务类型：知识竞赛答题）",
   "cli.resume_in_progress_prompt": "继续当前解题进度（基于已有黑板/证据，不要从头开始）",
   "cli.compressed_earlier_context": "[green]已压缩较早上下文[/green]，保留最近消息；摘要长度 {var_001} 字符。",
   "cli.host_no_set": "[!] 请先使用 [bold]target <主机>[/] 设定目标，或运行 [bold]persistent <主机>[/]。",

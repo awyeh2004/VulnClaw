@@ -12,6 +12,7 @@ from vulnclaw.agent.agent_state import AgentState
 from vulnclaw.agent.solver import (
     _completion_gate,
     _looks_like_quiz,
+    _quiz_questions_inline,
     _system_prompt,
 )
 
@@ -19,6 +20,10 @@ QUIZ_GOAL = (
     "CTF 比赛知识竞赛答题：1. 下列属于对称加密算法的是（ ）A. RSA B. AES "
     "C. ECC D. DSA 2. （单选）《网络安全法》的施行时间"
 )
+INLINE_PAPER_GOAL = (
+    "知识竞赛，题目如下：1. 下列属于哈希算法的是（ ）A. AES B. MD5 C. RSA D. SM4"
+)
+FLAG_QUIZ_GOAL = "CTF 比赛知识竞赛答题并拿flag：1. 对称加密算法 A. RSA B. AES C. SM4 D. DES"
 
 
 def _make_state(goal: str, evidence_text=None) -> AgentState:
@@ -55,16 +60,39 @@ class TestLooksLikeQuiz:
 
 class TestCompletionGateQuiz:
     def test_quiz_without_evidence_rejected(self):
-        """Pure guessing without fetching the questions stays rejected."""
-        st = _make_state(QUIZ_GOAL, None)
+        """Pure guessing without fetching the questions stays rejected — this
+        goal has NO inline questions (URL-based), so evidence is required."""
+        url_quiz_goal = "知识竞赛入口在 http://127.0.0.1:8000/quiz，答题拿分"
+        st = _make_state(url_quiz_goal, None)
         ok, reason, _ = _completion_gate(st, "FINAL: 1.B 2.2017年6月1日")
         assert not ok
         assert "quiz" in reason
+
+    def test_inline_pasted_paper_completes_without_evidence(self):
+        """R2: questions pasted in the goal need no fetched evidence."""
+        assert _quiz_questions_inline(INLINE_PAPER_GOAL) is True
+        assert _quiz_questions_inline(QUIZ_GOAL) is True
+        # A bare type keyword must NOT count as inline (would skip reading).
+        assert _quiz_questions_inline("入口在 http://x/quiz，20道单选题") is False
+        st = _make_state(INLINE_PAPER_GOAL, None)
+        ok, reason, _ = _completion_gate(st, "FINAL: 1.B（MD5 是哈希）")
+        assert ok, reason
 
     def test_quiz_answers_accepted_without_flag_or_citations(self):
         """Goal mentions CTF (flag-wanting) but knowledge answers must pass."""
         st = _make_state(QUIZ_GOAL, "第1题 下列属于对称加密算法的是… 第2题 网络安全法施行时间")
         ok, reason, _ = _completion_gate(st, "FINAL: 1.B 2.2017年6月1日")
+        assert ok, reason
+
+    def test_flag_demanding_quiz_still_requires_grounded_flag(self):
+        """R1: '答题拿flag' must not ride the quiz shortcut to a flagless FINAL."""
+        assert _looks_like_quiz(FLAG_QUIZ_GOAL) is True
+        st = _make_state(FLAG_QUIZ_GOAL, "答题页已读，全部答对")
+        ok, reason, _ = _completion_gate(st, "FINAL: 1.B 2.A 答题完成")
+        assert not ok  # no flag in FINAL → premature
+
+        st2 = _make_state(FLAG_QUIZ_GOAL, "答对全部题目，发放 flag{quiz_prize}")
+        ok, reason, _ = _completion_gate(st2, "FINAL: 完成，flag{quiz_prize}")
         assert ok, reason
 
     def test_quiz_claimed_flag_must_still_be_grounded(self):

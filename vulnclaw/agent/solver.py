@@ -256,6 +256,9 @@ _QUIZ_INSTRUCTION = (
     "for choice questions; use ALL letters for multiple-answer questions; 对/错 or "
     "正确/错误 for true/false). When unsure, eliminate clearly wrong options and "
     "commit to the most probable answer — an unanswered question scores zero. "
+    "If the questions are already pasted in the task text itself, answer directly "
+    "from that text — do not fetch anything. If the goal explicitly asks for a "
+    "flag (平台通过答题发放 flag), completion still requires the grounded flag. "
     "Exception — questions beyond your knowledge (current-events items newer than "
     "your training data: 当年主题/届数/新发布文件): do NOT guess those. Keep "
     "working through the rest of the paper first: mark each beyond-knowledge "
@@ -281,6 +284,19 @@ def _looks_like_quiz(goal: str) -> bool:
         return True
     # Three or more distinct A./B./C./D. option markers is a choice-question task.
     return len(set(_QUIZ_OPTIONS_RE.findall(goal or ""))) >= 3
+
+
+def _quiz_questions_inline(goal: str) -> bool:
+    """Return True when the quiz questions are pasted directly in ``goal``.
+
+    Only structural question signals count (option markers / fill-in blanks) —
+    bare type keywords like "单选" would wrongly mark URL-based prompts
+    ("入口在 http://x，20道单选") as inline and let the model skip reading.
+    """
+    text = goal or ""
+    if len(set(_QUIZ_OPTIONS_RE.findall(text))) >= 3:
+        return True
+    return "（ ）" in text or "( )" in text
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
@@ -653,10 +669,15 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
     # Knowledge-quiz goals: answers derive from model knowledge, so the
     # flag/quota whitelist does not apply — requiring a flag or quoted evidence
     # terms would loop forever on "答案: A". Only require that the questions
-    # were actually fetched (evidence recorded), and that any claimed flag is
-    # still grounded.
-    if _looks_like_quiz(state.goal):
-        if not state.evidence:
+    # were actually fetched (evidence recorded; inline-pasted papers excepted),
+    # and that any claimed flag is still grounded. Goals that explicitly demand
+    # a flag (答题拿flag) fall through to the flag checks below — the platform
+    # issues the flag through answering, so a flagless FINAL is premature.
+    goal_text = state.goal or ""
+    if _looks_like_quiz(goal_text) and not re.search(
+        r"flag|getshell|shell", goal_text, re.IGNORECASE
+    ):
+        if not state.evidence and not _quiz_questions_inline(goal_text):
             return (
                 False,
                 "quiz goal: fetch the quiz page and read the questions first so they "

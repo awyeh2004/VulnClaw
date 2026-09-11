@@ -21,6 +21,7 @@
 - **知识题防误换靶与续跑保活（CLI）** — 新增 `_should_switch_target`：粘贴题目文本中引用的 IP/域名（如"192.168.1.1 属于哪类地址"）不再触发目标切换重置会话上下文；`_should_auto_pentest` 自动模式触发词补充"答题/知识竞赛"；Ctrl+C 中断后按回车续跑时恢复 prompt 附带任务类型标记，知识题指令与闸门豁免跨中断保留。
 - **更新比赛模式策略** — competition-mode 明确知识竞赛环节最先做：零环境依赖、不受靶机过载影响、答完即锁定得分，是单位时间得分率最高的题型。
 - **修复存量测试失败** — `test_solver.py` 的 `_Agent` mock 补齐 `runtime` 属性（solve playbook 机制引入的回归，修复后该文件测试时长从 ~113s 降至 ~2s）；`test_tool_parallel.py` 内联返回用例载荷从 5000 字符降至预览阈值（3500）以内，保留"小结果默认内联"的测试意图。
+- **知识题门禁与护栏审计修复** — 完成闸门的 quiz 短路仅在 goal 未显式要求 flag/shell 时生效（"答题拿flag"类混合目标回落到 flag 落地校验，杜绝无 flag 提前判完成）；新增 `_quiz_questions_inline` 内联题目判定（≥3 个选项标记或"（ ）"填空），题目直接粘贴在任务文本时不再要求先抓取证据（原逻辑会指向不可能执行的动作并烧尽 max_steps）；`_should_switch_target` 按目标形态切分——quiz 文本中出现的完整 URL 视为真实换靶（"改打 http://x"），裸 IP/域名诱饵维持豁免；续跑任务类型后缀改走 i18n（`cli.resume_quiz_suffix`）。
 
 </details>
 
