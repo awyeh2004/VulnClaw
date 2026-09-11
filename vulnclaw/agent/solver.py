@@ -289,14 +289,19 @@ def _looks_like_quiz(goal: str) -> bool:
 def _quiz_questions_inline(goal: str) -> bool:
     """Return True when the quiz questions are pasted directly in ``goal``.
 
-    Only structural question signals count (option markers / fill-in blanks) —
-    bare type keywords like "单选" would wrongly mark URL-based prompts
-    ("入口在 http://x，20道单选") as inline and let the model skip reading.
+    Only structural question signals count for the positive branch (option
+    markers / fill-in blanks / 对-错 stems) — bare type keywords like "单选"
+    would wrongly mark URL-based prompts ("入口在 http://x，20道单选") as
+    inline and let the model skip reading. Fallback: a quiz goal with no URL
+    anywhere has nowhere else to carry the questions but the task text.
     """
     text = goal or ""
     if len(set(_QUIZ_OPTIONS_RE.findall(text))) >= 3:
         return True
-    return "（ ）" in text or "( )" in text
+    if "（ ）" in text or "( )" in text or "对/错" in text or "正确/错误" in text:
+        return True
+    lowered = text.lower()
+    return "http://" not in lowered and "https://" not in lowered
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
@@ -467,6 +472,13 @@ def _no_path_rejection_reason(state: AgentState, no_path_text: str) -> str:
 
 def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     """Reject premature user questions when evidence says the agent should continue."""
+
+    # Quiz goals intentionally hand beyond-knowledge questions to the user (see
+    # _QUIZ_INSTRUCTION). Quiz page evidence (forms/inputs) always trips the
+    # near-miss heuristic, so without this exemption the designed hand-off would
+    # be permanently blocked whenever the question text mentions 资料/搜索.
+    if _looks_like_quiz(state.goal or ""):
+        return ""
 
     lower = (question or "").lower()
     asks_for_external_help = any(marker in lower for marker in _ASK_EXTERNAL_HELP_MARKERS)
@@ -740,7 +752,12 @@ def _implicit_flag_completion(state: AgentState, text: str) -> tuple[bool, str, 
     """Allow natural model-led completion when a real flag appears in evidence."""
 
     flags = extract_flags(text or "")
-    if not flags or not _goal_wants_flag(state.goal):
+    # Explicit flag demand only — not bare `_goal_wants_flag`, whose "ctf"
+    # keyword would let a quiz goal be completed mid-paper by repeating any
+    # flag-shaped string from the page evidence without ever submitting.
+    if not flags or not re.search(
+        r"flag|getshell|shell", (state.goal or ""), re.IGNORECASE
+    ):
         return False, "", []
     evidence_text = state.evidence_text()
     grounded = [flag for flag in flags if flag in evidence_text]
