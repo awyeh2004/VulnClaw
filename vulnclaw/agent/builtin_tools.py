@@ -41,6 +41,7 @@ from vulnclaw.agent.network_scan import (
     without_privileged_nmap_args,
 )
 from vulnclaw.agent.roles import role_tool_violation, tool_allowed_for_role
+from vulnclaw.agent.solver import _looks_like_quiz
 from vulnclaw.agent.tool_result_overrides import set_raw_tool_output_override
 from vulnclaw.agent.tool_schemas import append_builtin_tool_schemas
 from vulnclaw.config.source_render import (
@@ -1269,16 +1270,13 @@ def _infer_allowed_tools(user_input: str) -> set[str] | None:
     # page. Technical stems (RSA/AES/端口…) must not prune `fetch` via the
     # crypto/network bundles below — the quiz directive and the completion gate
     # both direct the model to fetch, so the tool must exist in the schema.
-    try:
-        from vulnclaw.agent.solver import _looks_like_quiz
-
-        if _looks_like_quiz(user_input):
-            bundle = set(_ALWAYS_KEEP_TOOLS)
-            bundle |= _TASK_TOOL_BUNDLES["web"]
-            bundle |= {"crypto_decode"}
-            return bundle
-    except Exception:
-        pass
+    # Module-level import is safe: solver's dependency tree never imports this
+    # module, so a regression surfaces loudly at import time, not silently here.
+    if _looks_like_quiz(user_input):
+        bundle = set(_ALWAYS_KEEP_TOOLS)
+        bundle |= _TASK_TOOL_BUNDLES["web"]
+        bundle |= {"crypto_decode"}
+        return bundle
 
     # An explicit bare flag/encoded string is a crypto/misc task even without
     # an obvious keyword.

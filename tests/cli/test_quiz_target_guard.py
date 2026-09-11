@@ -42,12 +42,19 @@ class TestQuizTargetSwitchGuard:
         ) is True
 
     def test_quiz_prose_with_full_url_switches(self):
-        """R3: a full URL inside quiz-flavored prose is real retargeting."""
+        """R3: a full URL with explicit retarget phrasing is a real switch."""
         new_target = _extract_target_from_input(QUIZ_PROSE_RETARGET_URL)
         assert new_target == "http://real-target.example.com"
         assert _should_switch_target(
             QUIZ_PROSE_RETARGET_URL, new_target, CURRENT_TARGET
         ) is True
+
+    def test_quiz_prose_citing_url_without_retarget_verb_stays_exempt(self):
+        """A URL cited inside a question stem is quiz content, not retargeting."""
+        citation = "（判断题）https://www.12377.cn 是非法举报网站。（对/错）"
+        new_target = _extract_target_from_input(citation)
+        assert new_target == "https://www.12377.cn"
+        assert _should_switch_target(citation, new_target, CURRENT_TARGET) is False
 
     def test_quiz_prose_bare_ip_decoy_still_exempt(self):
         """R3: bare-form decoys in quiz prose stay exempt (no switch)."""

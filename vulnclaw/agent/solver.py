@@ -228,6 +228,10 @@ def _goal_wants_flag(goal: str) -> bool:
 # Knowledge-quiz (竞赛理论题) signals. Answers come from model knowledge rather
 # than from exploiting a host, so prompt directives and the completion gate take
 # a dedicated path (see _completion_gate) instead of the flag/evidence whitelist.
+# Deliberately narrow: no bare "答题" — "对 XX 答题系统做渗透测试" is an attack
+# task, and quiz detection flips three behaviors at once (gate exemption,
+# ASK_USER exemption, no-attack directive). "知识竞赛/理论题/题型词" are the
+# reliable signals; `_should_auto_pentest` keeps "答题" for mode entry only.
 _QUIZ_KEYWORDS = (
     "知识竞赛",
     "理论题",
@@ -238,7 +242,6 @@ _QUIZ_KEYWORDS = (
     "多选",
     "判断题",
     "问答题",
-    "答题",
     "quiz",
     "multiple choice",
     "trivia",
@@ -289,11 +292,11 @@ def _looks_like_quiz(goal: str) -> bool:
 def _quiz_questions_inline(goal: str) -> bool:
     """Return True when the quiz questions are pasted directly in ``goal``.
 
-    Only structural question signals count for the positive branch (option
-    markers / fill-in blanks / 对-错 stems) — bare type keywords like "单选"
-    would wrongly mark URL-based prompts ("入口在 http://x，20道单选") as
-    inline and let the model skip reading. Fallback: a quiz goal with no URL
-    anywhere has nowhere else to carry the questions but the task text.
+    Positive signals are structural question content: option markers, fill-in
+    blanks, 对-错 stems, or a question mark — bare type keywords like "单选"
+    and bare instructions like "开始答题" never count, otherwise a
+    target-command-driven quiz ("开始答题" + URL given earlier) would skip
+    reading entirely and pass a hallucinated FINAL through the gate.
     """
     text = goal or ""
     if len(set(_QUIZ_OPTIONS_RE.findall(text))) >= 3:
@@ -301,7 +304,12 @@ def _quiz_questions_inline(goal: str) -> bool:
     if "（ ）" in text or "( )" in text or "对/错" in text or "正确/错误" in text:
         return True
     lowered = text.lower()
-    return "http://" not in lowered and "https://" not in lowered
+    if "http://" in lowered or "https://" in lowered:
+        # A URL means the questions live on a page — go read them.
+        return False
+    # No URL anywhere: the questions can only be in the task text, but require
+    # actual question content (a question mark), not just an instruction.
+    return bool(re.search(r"[？？?]", text))
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
