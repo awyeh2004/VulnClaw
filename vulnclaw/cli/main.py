@@ -3905,17 +3905,24 @@ def _should_switch_target(
     """Whether mentioning ``new_target`` should reset the session context.
 
     A pasted knowledge-quiz question often cites bare IPs/domains (e.g.
-    "192.168.1.1 属于哪类地址"); those are quiz content, not a target switch —
-    never reset the session context on them. A full URL, however, is how real
-    retargeting is phrased ("改打 http://x"), so it switches even in quiz-like
-    prose; bare-form decoys stay exempt. Genuine mid-quiz retargeting to a bare
-    IP can still use the explicit ``target`` command.
+    "192.168.1.1 属于哪类地址") or full URLs in its stem ("判断题：
+    https://www.12377.cn 是…"); those are quiz content, not a target switch —
+    never reset the session context on them. A URL combined with explicit
+    retarget phrasing ("改打 http://x" / "切换到 http://x") IS a real switch.
+    Genuine mid-quiz retargeting to a bare IP can still use the ``target``
+    command.
     """
     if not new_target or not current_target or new_target == current_target:
         return False
-    if new_target.startswith(("http://", "https://")):
+    if not _looks_like_quiz(user_input):
         return True
-    return not _looks_like_quiz(user_input)
+    if new_target.startswith(("http://", "https://")):
+        import re
+
+        return bool(
+            re.search(r"改打|切换到|切换目标|换成|目标改为|换个目标|转打", user_input)
+        )
+    return False
 
 
 @app.callback(invoke_without_command=True)

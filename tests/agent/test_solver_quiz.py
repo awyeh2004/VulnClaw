@@ -101,10 +101,18 @@ class TestCompletionGateQuiz:
         """N2 residual: marker-less judge stems still count as inline."""
         goal = "（判断题）HTTPS 默认使用 443 端口。（对/错）"
         assert _quiz_questions_inline(goal) is True
-        # No URL anywhere → questions can only be in the task text.
+        # No URL anywhere → questions can only be in the task text…
         assert _quiz_questions_inline("知识竞赛答题：网安法何时施行？") is True
+        # …but a bare instruction without question content is NOT inline, so a
+        # target-command-driven quiz still fetches before answering.
+        assert _quiz_questions_inline("开始答题") is False
         # URL-based prompt keeps the read-first requirement.
         assert _quiz_questions_inline("入口在 http://x/quiz，20道单选题") is False
+
+    def test_answer_system_pentest_goal_is_not_quiz(self):
+        """'答题' alone must not flip a pentest task into quiz semantics."""
+        goal = "对 http://target 答题系统做渗透测试"
+        assert _looks_like_quiz(goal) is False
 
     def test_ask_user_guard_does_not_block_quiz_handoff(self):
         """N3: the premature-ASK_USER guard must not block the designed
