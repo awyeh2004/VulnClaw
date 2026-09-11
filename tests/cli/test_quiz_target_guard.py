@@ -16,6 +16,7 @@ QUIZ_WITH_IP = (
 )
 QUIZ_WITH_DOMAIN = "（判断题）www.example.com 是政府域名。"
 REAL_PENTEST_ASK = "接着对 http://real-target.example.com 进行渗透测试"
+QUIZ_PROSE_RETARGET_URL = "放弃当前答题平台，改打 http://real-target.example.com 进行渗透测试"
 
 
 class TestQuizTargetSwitchGuard:
@@ -39,6 +40,20 @@ class TestQuizTargetSwitchGuard:
             _extract_target_from_input(REAL_PENTEST_ASK),
             CURRENT_TARGET,
         ) is True
+
+    def test_quiz_prose_with_full_url_switches(self):
+        """R3: a full URL inside quiz-flavored prose is real retargeting."""
+        new_target = _extract_target_from_input(QUIZ_PROSE_RETARGET_URL)
+        assert new_target == "http://real-target.example.com"
+        assert _should_switch_target(
+            QUIZ_PROSE_RETARGET_URL, new_target, CURRENT_TARGET
+        ) is True
+
+    def test_quiz_prose_bare_ip_decoy_still_exempt(self):
+        """R3: bare-form decoys in quiz prose stay exempt (no switch)."""
+        assert _should_switch_target(
+            QUIZ_WITH_IP, _extract_target_from_input(QUIZ_WITH_IP), CURRENT_TARGET
+        ) is False
 
     def test_guard_is_narrow(self):
         assert _looks_like_quiz(REAL_PENTEST_ASK) is False

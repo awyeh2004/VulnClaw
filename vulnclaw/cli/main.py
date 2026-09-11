@@ -470,7 +470,7 @@ def _run_repl() -> None:
                     # detection (directive + gate exemption) would be lost on
                     # resume; re-attach it from the original launch input.
                     if last_auto_input and _looks_like_quiz(last_auto_input):
-                        user_input += "（任务类型：知识竞赛答题）"
+                        user_input += _("cli.resume_quiz_suffix")
                     console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}[/]")
                 elif last_auto_input:
                     user_input = last_auto_input
@@ -3904,12 +3904,17 @@ def _should_switch_target(
 ) -> bool:
     """Whether mentioning ``new_target`` should reset the session context.
 
-    A pasted knowledge-quiz question often cites IPs/domains (e.g.
+    A pasted knowledge-quiz question often cites bare IPs/domains (e.g.
     "192.168.1.1 属于哪类地址"); those are quiz content, not a target switch —
-    never reset the session context on them.
+    never reset the session context on them. A full URL, however, is how real
+    retargeting is phrased ("改打 http://x"), so it switches even in quiz-like
+    prose; bare-form decoys stay exempt. Genuine mid-quiz retargeting to a bare
+    IP can still use the explicit ``target`` command.
     """
     if not new_target or not current_target or new_target == current_target:
         return False
+    if new_target.startswith(("http://", "https://")):
+        return True
     return not _looks_like_quiz(user_input)
 
 
