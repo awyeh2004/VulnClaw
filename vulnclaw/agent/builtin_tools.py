@@ -1265,6 +1265,21 @@ def _infer_allowed_tools(user_input: str) -> set[str] | None:
         return None
     text = user_input.lower()
 
+    # Knowledge-quiz goals (see solver._looks_like_quiz) read and submit a quiz
+    # page. Technical stems (RSA/AES/端口…) must not prune `fetch` via the
+    # crypto/network bundles below — the quiz directive and the completion gate
+    # both direct the model to fetch, so the tool must exist in the schema.
+    try:
+        from vulnclaw.agent.solver import _looks_like_quiz
+
+        if _looks_like_quiz(user_input):
+            bundle = set(_ALWAYS_KEEP_TOOLS)
+            bundle |= _TASK_TOOL_BUNDLES["web"]
+            bundle |= {"crypto_decode"}
+            return bundle
+    except Exception:
+        pass
+
     # An explicit bare flag/encoded string is a crypto/misc task even without
     # an obvious keyword.
     if re.search(r"\{\w{8,}\}", text) or re.search(r"(flag|synt|ctf)\{", text):

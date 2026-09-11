@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 from vulnclaw.agent.agent_state import AgentState
 from vulnclaw.agent.solver import (
+    _ask_user_rejection_reason,
     _completion_gate,
+    _implicit_flag_completion,
     _looks_like_quiz,
     _quiz_questions_inline,
     _system_prompt,
@@ -93,6 +95,42 @@ class TestCompletionGateQuiz:
 
         st2 = _make_state(FLAG_QUIZ_GOAL, "答对全部题目，发放 flag{quiz_prize}")
         ok, reason, _ = _completion_gate(st2, "FINAL: 完成，flag{quiz_prize}")
+        assert ok, reason
+
+    def test_judge_style_paper_is_inline_even_without_option_markers(self):
+        """N2 residual: marker-less judge stems still count as inline."""
+        goal = "（判断题）HTTPS 默认使用 443 端口。（对/错）"
+        assert _quiz_questions_inline(goal) is True
+        # No URL anywhere → questions can only be in the task text.
+        assert _quiz_questions_inline("知识竞赛答题：网安法何时施行？") is True
+        # URL-based prompt keeps the read-first requirement.
+        assert _quiz_questions_inline("入口在 http://x/quiz，20道单选题") is False
+
+    def test_ask_user_guard_does_not_block_quiz_handoff(self):
+        """N3: the premature-ASK_USER guard must not block the designed
+        beyond-knowledge hand-off — quiz page evidence always trips near-miss."""
+        goal = "知识竞赛入口在 http://127.0.0.1:8000/quiz，答题拿分"
+        st = _make_state(
+            goal,
+            "<form method=\"POST\" action=\"/submit\"><input type=\"radio\" name=\"q1\">",
+        )
+        question = (
+            "ASK_USER: 🔴 超纲题汇总，请作答（附资料线索，可自行搜索资料）："
+            "5. 本届比赛主题是（ ）A... B..."
+        )
+        assert _ask_user_rejection_reason(st, question) == ""
+
+    def test_implicit_completion_ignored_for_quiz_goal_without_flag_demand(self):
+        """N4: a flag-shaped string in page evidence must not complete a quiz
+        goal that never asked for a flag."""
+        st = _make_state(QUIZ_GOAL, "页面公告: 示例 flag{deadbeefdeadbeef} 仅为装饰")
+        ok, _, _ = _implicit_flag_completion(st, "题目里提到 flag{deadbeefdeadbeef}")
+        assert not ok
+
+    def test_implicit_completion_still_works_for_flag_demanding_goal(self):
+        goal = "知识竞赛答题拿flag：1.（ ）A. x B. y C. z"
+        st = _make_state(goal, "交卷成功，发放 flag{realprize01}")
+        ok, reason, _ = _implicit_flag_completion(st, "拿到 flag{realprize01}")
         assert ok, reason
 
     def test_quiz_claimed_flag_must_still_be_grounded(self):

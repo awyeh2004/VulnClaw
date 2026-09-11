@@ -22,6 +22,7 @@
 - **更新比赛模式策略** — competition-mode 明确知识竞赛环节最先做：零环境依赖、不受靶机过载影响、答完即锁定得分，是单位时间得分率最高的题型。
 - **修复存量测试失败** — `test_solver.py` 的 `_Agent` mock 补齐 `runtime` 属性（solve playbook 机制引入的回归，修复后该文件测试时长从 ~113s 降至 ~2s）；`test_tool_parallel.py` 内联返回用例载荷从 5000 字符降至预览阈值（3500）以内，保留"小结果默认内联"的测试意图。
 - **知识题门禁与护栏审计修复** — 完成闸门的 quiz 短路仅在 goal 未显式要求 flag/shell 时生效（"答题拿flag"类混合目标回落到 flag 落地校验，杜绝无 flag 提前判完成）；新增 `_quiz_questions_inline` 内联题目判定（≥3 个选项标记或"（ ）"填空），题目直接粘贴在任务文本时不再要求先抓取证据（原逻辑会指向不可能执行的动作并烧尽 max_steps）；`_should_switch_target` 按目标形态切分——quiz 文本中出现的完整 URL 视为真实换靶（"改打 http://x"），裸 IP/域名诱饵维持豁免；续跑任务类型后缀改走 i18n（`cli.resume_quiz_suffix`）。
+- **工具裁剪与完成路径全量审计修复** — `_infer_allowed_tools` 为知识题目标保底 web 工具束：技术型题面（含 RSA/AES/端口等词）不再把 `fetch` 从工具 schema 裁掉（原 crypto bundle 首位命中会导致 quiz 指令要求的工具不存在）；`_implicit_flag_completion` 改为仅在 goal 显式要求 flag/shell 时触发，纯答题 goal 不再被页面证据中的 flag 形态字符串隐式判完成；premature-ASK_USER 守卫对 quiz 目标豁免——quiz 页面证据（表单/输入框）必触发 near-miss 启发，原守卫会把"超纲题转交用户"的既定流程随"资料/搜索"措辞永久拦截；`_quiz_questions_inline` 补判断题格式（对/错、正确/错误）与"无 URL 即内联"兜底。
 
 </details>
 

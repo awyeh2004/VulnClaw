@@ -777,3 +777,32 @@ class TestBuiltinMcpExecution:
         assert "constraint_violation" in result
         assert "80" in result
         assert "443" in result
+
+
+class TestInferAllowedToolsQuiz:
+    """N1: quiz goals must keep fetch in the pruned tool schema — technical
+    stems (RSA/AES/端口) otherwise route to the crypto/network bundle and
+    remove the exact tool the quiz directive and completion gate demand."""
+
+    def test_judge_stem_quiz_keeps_fetch(self):
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        tools = _infer_allowed_tools("（判断题）HTTPS 默认使用 443 端口。（对/错）")
+        assert tools is not None
+        assert "fetch" in tools
+        assert "http_probe_batch" in tools
+        assert "python_execute" in tools
+
+    def test_technical_stem_quiz_keeps_fetch(self):
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        tools = _infer_allowed_tools("知识竞赛：对称加密算法 RSA AES 哈希有哪些")
+        assert tools is not None
+        assert "fetch" in tools
+
+    def test_non_quiz_crypto_goal_still_prunes_fetch(self):
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        tools = _infer_allowed_tools("解密这段 base64 密文")
+        assert tools is not None
+        assert "fetch" not in tools
