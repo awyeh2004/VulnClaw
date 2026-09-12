@@ -326,10 +326,22 @@ fn render_composer_input(frame: &mut Frame, app: &App, composer_area: Rect) {
         let cursor_x = composer_area
             .x
             .saturating_add(3)
-            .saturating_add(app.input[..app.input_cursor].chars().count() as u16)
+            .saturating_add(input_cursor_offset(&app.input, app.input_cursor))
             .min(composer_area.right().saturating_sub(1));
         frame.set_cursor_position((cursor_x, composer_area.y));
     }
+}
+
+/// Distance in display cells from the start of the prompt text to the cursor.
+///
+/// Measured in cells rather than characters: a CJK glyph occupies two columns,
+/// so counting characters leaves the caret trailing behind the text it follows.
+fn input_cursor_offset(input: &str, cursor: usize) -> u16 {
+    let cells = input
+        .get(..cursor)
+        .map(|prefix| Line::from(prefix).width())
+        .unwrap_or_default();
+    u16::try_from(cells).unwrap_or(u16::MAX)
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
