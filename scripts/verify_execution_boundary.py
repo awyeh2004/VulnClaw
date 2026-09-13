@@ -96,10 +96,16 @@ ALLOWED_SPAWN_SITES: dict[str, str] = {
     "vulnclaw/cli/tui.py:499:subprocess.call": (
         "operator control plane: native TUI binary launcher"
     ),
-    "vulnclaw/cli/tui.py:1734:subprocess.run": (
+    "vulnclaw/cli/tui.py:1747:subprocess.run": (
         "operator control plane: fixed version diagnostic"
     ),
-    "vulnclaw/cli/main.py:2581:subprocess.run": (
+    "vulnclaw/cli/tui.py:2623:subprocess.run": (
+        "operator control plane: Windows Get-Clipboard via powershell for /config paste"
+    ),
+    "vulnclaw/cli/tui.py:2662:subprocess.run": (
+        "operator control plane: Unix pbpaste/wl-paste/xclip/xsel for /config paste"
+    ),
+    "vulnclaw/cli/main.py:3486:subprocess.run": (
         "operator control plane: fixed Node.js version diagnostic"
     ),
     # First-run setup wizard (merged from dev): operator-driven fixed argv

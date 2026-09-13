@@ -244,6 +244,7 @@ def test_learn_command_distills_an_existing_run_into_pending_lessons(tmp_path: P
 
     import vulnclaw.agent.distiller as distiller_module
     import vulnclaw.cli.main as cli_main
+    import vulnclaw.config.token_provider as token_provider_module
     import vulnclaw.kb.experience as experience_module
     from vulnclaw.agent.context import SessionState
     from vulnclaw.run_context import create_run_context
@@ -283,7 +284,7 @@ def test_learn_command_distills_an_existing_run_into_pending_lessons(tmp_path: P
             ]
         }
 
-    monkeypatch.setattr(cli_main, "has_llm_credentials", lambda _config: True)
+    monkeypatch.setattr(token_provider_module, "has_llm_credentials", lambda _config: True)
     monkeypatch.setattr(distiller_module, "configured_distiller", lambda _config: _llm)
     monkeypatch.setattr(experience_module, "ExperienceStore", lambda *args, **kwargs: store)
 

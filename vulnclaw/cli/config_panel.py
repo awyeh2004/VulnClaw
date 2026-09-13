@@ -313,6 +313,7 @@ class ConfigPanelModel:
         self.row_error = ""
         self._dropdown: dict[str, Any] | None = None
         self.dropdown_index = 0
+        self._dropdown_scroll = 0
         self.generation = 0
         self.models: list[str] = []
         self.fetch_state = "idle"
@@ -458,10 +459,16 @@ class ConfigPanelModel:
             self._scroll_offset = 0
             return
         self.viewport_height = height
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
-    def _ensure_focus_in_view(self) -> None:
-        height = self.viewport_height
+    def _panel_viewport_rows(self) -> int | None:
+        if self.viewport_height is None:
+            return None
+        panel_rows, _ = self._table_row_budget()
+        return panel_rows
+
+    def _ensure_focus_in_view(self, height: int | None = None) -> None:
+        height = height if height is not None else self.viewport_height
         if height is None:
             return
         rows = self.rows()
@@ -477,24 +484,44 @@ class ConfigPanelModel:
         max_offset = max(0, n - height)
         self._scroll_offset = max(0, min(self._scroll_offset, max_offset))
 
+    def _table_row_budget(self) -> tuple[int, int]:
+        """Split ``viewport_height`` between panel rows and inline dropdown options.
+
+        Dropdown options render as extra table rows, so their height must be
+        reserved from the same budget as ``visible_rows()``.
+        """
+        height = self.viewport_height
+        options = self.dropdown_options
+        if height is None:
+            return (999999, len(options) if self.dropdown_open else 0)
+        if not self.dropdown_open or not options:
+            return (height, 0)
+        prefer_dropdown = min(len(options), max(3, height // 3))
+        panel_rows = height - prefer_dropdown
+        if panel_rows < 1:
+            panel_rows = 1
+            prefer_dropdown = min(len(options), height - 1)
+        return (panel_rows, max(1, prefer_dropdown))
+
     def visible_rows(self) -> list[Row]:
         """Rows to paint for the current viewport (full list when unbounded)."""
         rows = self.rows()
-        self._ensure_focus_in_view()
         height = self.viewport_height
         if height is None:
             return rows
-        return rows[self._scroll_offset : self._scroll_offset + height]
+        panel_rows, _ = self._table_row_budget()
+        self._ensure_focus_in_view(panel_rows)
+        return rows[self._scroll_offset : self._scroll_offset + panel_rows]
 
     def focus_next(self) -> None:
         rows = self.rows()
         self._focus_key = rows[min(self._focus_index() + 1, len(rows) - 1)].key
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
     def focus_prev(self) -> None:
         rows = self.rows()
         self._focus_key = rows[max(self._focus_index() - 1, 0)].key
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
     # -- expansion --------------------------------------------------------
 
@@ -506,25 +533,25 @@ class ConfigPanelModel:
             self._expanded.discard(row.key)
         else:
             self._expanded.add(row.key)
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
     def expand(self) -> None:
         row = self.focused
         if row.kind == "group":
             self._expanded.add(row.key)
-            self._ensure_focus_in_view()
+            self._ensure_focus_in_view(self._panel_viewport_rows())
 
     def collapse(self) -> None:
         row = self.focused
         if row.kind == "group":
             self._expanded.discard(row.key)
-            self._ensure_focus_in_view()
+            self._ensure_focus_in_view(self._panel_viewport_rows())
             return
         parent = self._parent_key(row)
         if parent is not None:
             self._expanded.discard(parent)
             self._focus_key = parent
-            self._ensure_focus_in_view()
+            self._ensure_focus_in_view(self._panel_viewport_rows())
 
     def _parent_key(self, row: Row) -> str | None:
         if row.key == "action.fetch_models":
@@ -611,6 +638,35 @@ class ConfigPanelModel:
         if self._edit is not None:
             self._edit["text"] = text
 
+    def paste_text(self, text: str) -> None:
+        """Append pasted text into the active editor.
+
+        Single-line fields drop CR/LF. List and env fields treat newlines as item
+        separators, matching ``split_csv_items`` / ``parse_env_items`` on commit.
+        No-op when not editing so accidental paste outside an editor is ignored.
+        """
+        if self._edit is None:
+            return
+        row = self._editing_row()
+        if row is not None and row.value_kind in (SECRET_LIST, LIST, ENV):
+            cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", ",")
+        else:
+            cleaned = "".join(ch for ch in text if ch not in "\r\n")
+        self._edit["text"] += cleaned
+        self.row_error = ""
+
+    def apply_clipboard(self, clipboard: str | None) -> None:
+        """Route a clipboard read into the editor (testable without a real clipboard)."""
+        if self._edit is None:
+            return
+        if clipboard is None:
+            self.row_error = "Paste failed: clipboard unavailable"
+            return
+        if clipboard == "":
+            self.row_error = "Nothing to paste: clipboard is empty"
+            return
+        self.paste_text(clipboard)
+
     def cancel_edit(self) -> None:
         self._edit = None
         self.row_error = ""
@@ -634,6 +690,8 @@ class ConfigPanelModel:
             self._dropdown = {"options": options}
             current = self.raw_value(row)
             self.dropdown_index = options.index(current) if current in options else 0
+            self._dropdown_scroll = 0
+            self._sync_dropdown_scroll()
             return
         self._edit = {"key": row.key, "text": self._edit_seed(row)}
 
@@ -711,15 +769,51 @@ class ConfigPanelModel:
     def dropdown_options(self) -> list[str]:
         return self._dropdown["options"] if self._dropdown else []
 
+    def _dropdown_window_height(self) -> int:
+        """How many option rows to paint. Unbounded when no panel viewport is set."""
+        options = self.dropdown_options
+        if not options:
+            return 0
+        if self.viewport_height is None:
+            return len(options)
+        _, dropdown_rows = self._table_row_budget()
+        return min(len(options), dropdown_rows)
+
+    def _sync_dropdown_scroll(self) -> None:
+        options = self.dropdown_options
+        if not options:
+            self._dropdown_scroll = 0
+            return
+        height = self._dropdown_window_height()
+        max_offset = max(0, len(options) - height)
+        if self.dropdown_index < self._dropdown_scroll:
+            self._dropdown_scroll = self.dropdown_index
+        elif self.dropdown_index >= self._dropdown_scroll + height:
+            self._dropdown_scroll = self.dropdown_index - height + 1
+        self._dropdown_scroll = max(0, min(self._dropdown_scroll, max_offset))
+
+    def visible_dropdown_options(self) -> list[tuple[int, str]]:
+        """Windowed (absolute_index, option) pairs so long model lists can scroll."""
+        options = self.dropdown_options
+        if not options:
+            return []
+        self._sync_dropdown_scroll()
+        height = self._dropdown_window_height()
+        start = self._dropdown_scroll
+        end = min(len(options), start + height)
+        return [(index, options[index]) for index in range(start, end)]
+
     def select_option(self, delta: int) -> None:
         if self._dropdown is None:
             return
         limit = len(self._dropdown["options"]) - 1
         self.dropdown_index = max(0, min(self.dropdown_index + delta, limit))
+        self._sync_dropdown_scroll()
 
     def cancel_option(self) -> None:
         self._dropdown = None
         self.dropdown_index = 0
+        self._dropdown_scroll = 0
 
     def commit_option(self) -> None:
         if self._dropdown is None:
@@ -728,6 +822,7 @@ class ConfigPanelModel:
         choice = self._dropdown["options"][self.dropdown_index]
         self._dropdown = None
         self.dropdown_index = 0
+        self._dropdown_scroll = 0
         if row.path == "llm.provider":
             if choice != self.draft.llm.provider:
                 self.draft = apply_provider_preset(self.draft, choice)
@@ -805,7 +900,7 @@ class ConfigPanelModel:
         self.row_error = ""
         self._expanded.update({"mcp", f"mcp.{name}"})
         self._focus_key = f"mcp.{name}"
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
     def delete_server(self) -> None:
         row = self.focused
@@ -820,7 +915,7 @@ class ConfigPanelModel:
         self._expanded.discard(f"mcp.{name}")
         self._focus_key = "mcp"
         self.row_error = ""
-        self._ensure_focus_in_view()
+        self._ensure_focus_in_view(self._panel_viewport_rows())
 
     # -- validation / save / summary --------------------------------------
 
