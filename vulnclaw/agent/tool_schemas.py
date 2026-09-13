@@ -402,6 +402,14 @@ def append_builtin_tool_schemas(
                             "type": "string",
                             "description": "要执行的 Python 代码。支持多行,可 import 标准库和 requests/bs4 等。",
                         },
+                        "timeout": {
+                            "type": "number",
+                            "description": (
+                                "执行超时秒数, 默认 30, 上限 300。端口扫描/批量 payload/"
+                                "慢响应服务等长任务显式传更大的值(如 120/300), "
+                                "避免 30s 被杀后重发同样代码浪费整轮。"
+                            ),
+                        },
                         "purpose": {
                             "type": "string",
                             "description": "简要说明执行目的(用于审计日志),如'构造HTTP请求测试弱比较绕过'",

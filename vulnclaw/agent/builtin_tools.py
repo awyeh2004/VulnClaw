@@ -2583,6 +2583,12 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
     code = args.get("code", "")
     purpose = args.get("purpose", "")
     workdir_arg = args.get("workdir", "")
+    try:
+        # 模型可控超时(默认 30s, 上限 300s): 端口扫描/批量 payload/长循环等
+        # 场景 30s 不够, 固定超时会导致"到点被杀→重发同样代码"的整轮浪费。
+        timeout_seconds = min(max(float(args.get("timeout", 30)), 1.0), 300.0)
+    except (TypeError, ValueError):
+        timeout_seconds = 30.0
     if not code.strip():
         return "[!] Code is empty; nothing executed"
 
@@ -2623,9 +2629,6 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
             "Review the code carefully before execution.\n"
             "---\n"
         )
-
-    recon_keywords = ["recon", "crawl", "spider", "scan", "enum", "probe"]
-    timeout_seconds = 60 if any(kw in purpose.lower() for kw in recon_keywords) else 30
 
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
