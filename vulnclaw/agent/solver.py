@@ -309,9 +309,10 @@ def _quiz_questions_inline(goal: str) -> bool:
     # No URL and no structural markers: numbered question stems count as pasted
     # content ONLY when a question mark co-occurs — bare numbered lists are
     # rules/instructions ("规则：1. 不得扫描靶机"), not questions (audit F1).
+    # Numbering may appear mid-line (single-line pasted papers, audit round-5 #5).
     if "http://" in lowered or "https://" in lowered:
         return False
-    numbered = bool(re.search(r"(?:^|\n)\s*(?:\d{1,3}[.、）\)]|第\s*\d{1,3}\s*题|问\s*[：:])", text))
+    numbered = bool(re.search(r"(?:^|\n|\s|：)\s*(?:\d{1,3}[.、）\)]|第\s*\d{1,3}\s*题|问\s*[：:])", text))
     question_mark = bool(re.search(r"[？？?]", text))
     return numbered and question_mark
 
@@ -705,7 +706,7 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
             hint = (
                 "quiz goal: no questions found in the task text and no URL to fetch — "
                 "ask the user for the quiz page URL or the pasted questions"
-                if "http" not in goal_text.lower()
+                if "http://" not in goal_text.lower() and "https://" not in goal_text.lower()
                 else "quiz goal: fetch the quiz page and read the questions first so they "
                 "are recorded as evidence, then answer them from knowledge"
             )

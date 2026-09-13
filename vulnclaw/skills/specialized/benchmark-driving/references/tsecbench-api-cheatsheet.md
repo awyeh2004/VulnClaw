@@ -7,12 +7,12 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/openapi/v1/challenges` | 列题：unique_code / difficulty / is_completed / container_addr / total_score |
-| POST | `/openapi/v1/challenges/start?unique_code=<code>` | 开容器 → `container_addr`（**实测是 list**，如 `['10.0.172.248:80']`） |
+| POST | `/openapi/v1/challenges/start?unique_code=<code>` | 开容器 → `container_addr`（**实测是 list**，如 `[<容器IP:端口>]`） |
 | GET | `/openapi/v1/challenges/hint?unique_code=<code>` | 提示（按比例扣分，不建议取） |
 | POST | `/openapi/v1/challenges/submit` | body `{"unique_code","flag"}`，长度 1-4096 |
 | POST | `/openapi/v1/challenges/close?unique_code=<code>` | 释放容器 |
 
-认证：请求头 `BENCHMARK_TOKEN`（UUID）。VPN 预检：`GET http://10.0.100.58`，响应 `status=="ok"`。
+认证：请求头 `BENCHMARK_TOKEN`（UUID）。VPN 预检：`GET <VPN预检地址(内网)>`，响应 `status=="ok"`。
 
 ## SDK（tsec-benchmark 0.1.2 实测签名）
 
