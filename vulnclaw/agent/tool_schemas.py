@@ -288,6 +288,23 @@ def append_builtin_tool_schemas(
                                 "may still be represented by a high-signal preview."
                             ),
                         },
+                        "risk_self_assessment": {
+                            "type": "string",
+                            "enum": ["safe", "review"],
+                            "description": (
+                                "Your own risk judgement for this command. 'review' requests "
+                                "explicit operator approval before it runs (recommended for "
+                                "anything touching credentials, host config, or destructive "
+                                "operations); 'safe' or omitted leaves the decision to the "
+                                "local whitelist. Self-assessment can only escalate to a human — "
+                                "it can never make a blocked command run."
+                            ),
+                        },
+                        "assessment_reason": {
+                            "type": "string",
+                            "maxLength": 300,
+                            "description": "Shown to the approver alongside the command.",
+                        },
                     },
                     "required": ["command"],
                 },
@@ -417,6 +434,21 @@ def append_builtin_tool_schemas(
                         "workdir": {
                             "type": "string",
                             "description": "执行工作目录。默认与 shell_command 一致（进程 cwd）。代码里读写文件时建议用绝对路径。",
+                        },
+                        "risk_self_assessment": {
+                            "type": "string",
+                            "enum": ["safe", "review"],
+                            "description": (
+                                "你对该段代码风险的自我判断。'review' 会请求操作者人工批准后"
+                                "才执行(推荐用于触碰凭据、宿主配置或具破坏性的代码);"
+                                "'safe'/省略不改变本工具始终需要审批的默认行为。"
+                                "自评只能升级为人工审核,不能使被拦命令放行。"
+                            ),
+                        },
+                        "assessment_reason": {
+                            "type": "string",
+                            "maxLength": 300,
+                            "description": "展示给审批者的自评理由。",
                         },
                     },
                     "required": ["code"],
