@@ -26,6 +26,7 @@
   "cli.config_reloaded": "Config reloaded",
   "cli.language_set_to": "Language set to",
   "cli.resuming_auto_pentest": "Resuming auto pentest",
+  "cli.host_no_set": "[!] Set a target first with [bold]target <host>[/] or run [bold]persistent <host>[/].",
   "cli.resume_quiz_suffix": " (task type: knowledge quiz)",
   "cli.resume_in_progress_prompt": "Continue the current solve progress (based on the existing blackboard/evidence; do not start over)",
   "cli.compressed_earlier_context": "[green]Compressed earlier context[/green], keeping recent messages; summary length {var_001} characters.",
