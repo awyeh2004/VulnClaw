@@ -8,7 +8,11 @@ routing:
     - 跑分
     - benchmark
     - tsecbench
-    - 性能测试
+    - 批量解题
+  exclude_signals:
+    - 网站性能
+    - 页面性能
+    - 压力测试
 ---
 
 # 跑分基准驱动 Skill
@@ -104,6 +108,26 @@ deepseek-v4-flash 实测分布（3 并行）：
    由 c-03 沉淀）。
 6. **单题内部时限**（45 分钟）与**停滞检测**（40 分钟无 checkpoint）双闸：
    前者防长尾烧槽，后者防"永远在思考"。
+7. **附件管理（DataCon 实战）**：所有附件 zip 统一下载到工作目录的
+   `attachments/` 子目录（如 `<work>/attachments/`，按平台原始 hash 名命名）
+   并当场解压成 `<hash>_extract/` 目录——solve 的 prompt 里直接引用该绝对
+   路径，省去模型自己找附件的时间；重开任务时附件还在，不需要重新下载。
+8. **跨题 flag 污染**：解题脚本/工作目录里的旧 flag 会被后续题的 grep 捡到
+   （`flag_result.txt` 污染事故）。对策：提交前核对 flag 出现的上下文来源；
+   解题工作目录统一 gitignore（`work_*/`）。
+9. **双 agent 同题竞争**：派题前先 `Get-CimInstance` 查活进程里是否已有
+   同目标的 solve。两个 agent 交错操作同一靶机会互相污染状态（堆整形序列
+   被对方的 add/remove 打乱），且重复烧 LLM 配额。
+10. **限流联动**：同一 key 同时被 agent 与交互会话（如 ZCode）使用时，
+    交互会话的推理请求会吃掉跑分配额。429 时先用 curl 单发验证是限流
+    还是断网（两者症状都是 solve 无产出静默）。
+11. **关键词过滤绕过套路**（46635 实战）：输入剥除非字母数字字符 + 敏感词
+    替换（flag→空）时，`tac ????.php #` 三连——glob 通配符避开敏感词、
+    tac 反向读、`#` 注释截断——比 php://filter 流包装器更稳（包装器名
+    也会被剥字符）。
+12. **重试 = 重新解题，不是重交旧 flag**：flag 按容器实例轮换的平台，
+    历史 flag 必然失效；solve prompt 必须显式写明"历史 flag 已失效"，
+    否则模型会从 playbook/writeup 里捡旧 flag 直接提交。
 
 ## 六、参照实现
 

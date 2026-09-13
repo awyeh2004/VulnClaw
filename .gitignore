@@ -125,3 +125,15 @@ ih.db
 quiz_drill/
 quiz.html
 .zcode/
+work_puzzle/
+work_*/
+
+# DataCon/CTF 解题一次性产物 (审计 round-6 #7: 含 .exe 与硬编码靶机 IP)
+brute*.c
+brute*.exe
+test_sha.*
+brute_flag.py
+poll*.py
+scan_full.py
+disasm*.txt
+out*.txt

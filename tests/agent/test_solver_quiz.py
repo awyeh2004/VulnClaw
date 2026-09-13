@@ -101,7 +101,9 @@ class TestCompletionGateQuiz:
         """N2 residual: marker-less judge stems still count as inline."""
         goal = "（判断题）HTTPS 默认使用 443 端口。（对/错）"
         assert _quiz_questions_inline(goal) is True
-        # Numbered stems + question marks count as pasted question content…
+        # Numbered stems + question marks count as pasted question content,
+        # including single-line pasted papers (audit round-5 #5 regression)…
+        assert _quiz_questions_inline("知识竞赛答题：1. 网安法何时施行？ 2. 等保核心是什么") is True
         assert _quiz_questions_inline("知识竞赛答题：\n1. 网安法何时施行？\n2. 等保核心是什么") is True
         # …but a question mark on an INSTRUCTION does not (audit A1)…
         assert _quiz_questions_inline("知识竞赛？开始答题") is False
