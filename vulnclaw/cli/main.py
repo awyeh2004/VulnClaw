@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 import time
@@ -49,6 +48,7 @@ from vulnclaw import __version__, headless
 from vulnclaw.agent.constraint_policy import validate_action_constraints
 from vulnclaw.agent.input_analysis import extract_task_constraints
 from vulnclaw.agent.solver import _looks_like_quiz
+from vulnclaw.cli import experience_ops
 
 # === Stream Output Renderer ===
 # 修改者: Nyaecho
@@ -66,6 +66,7 @@ from vulnclaw.cli._helpers import (
     _run_cli_orchestrated_task,
     console,
     err_console,
+    format_llm_user_error,
 )
 from vulnclaw.cli.manual import available_topics, render_manual
 from vulnclaw.config.schema import ENGINE_CHOICES
@@ -439,7 +440,149 @@ def _run_repl_command(
             return result.config
         return load_config()
 
+    if name == "experience":
+        _repl_experience(args)
+        return config
+
+    if name == "learn":
+        _repl_learn(args, config)
+        return config
+
+    if name == "feedback":
+        _repl_feedback(args, config)
+        return config
+
     return config
+
+
+def _print_op_result(result: "experience_ops.OpResult") -> None:
+    """Print a shared-op result in the REPL without unwinding the loop."""
+    if result.ok:
+        console.print(result.renderable)
+    else:
+        err_console.print(result.renderable)
+
+
+def _repl_experience(args: str) -> None:
+    """Handle ``/experience [list|show|approve|reject|edit] ...`` in the REPL."""
+    import shlex
+
+    body = args.strip()
+    if not body:
+        _print_op_result(experience_ops.render_pending_lessons())
+        return
+
+    parts = body.split(maxsplit=1)
+    sub = parts[0].lower()
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("list", "review"):
+        _print_op_result(experience_ops.render_pending_lessons())
+        return
+    if sub == "show":
+        if not rest:
+            err_console.print("[!] Usage: /experience show <lesson-id>")
+            return
+        _print_op_result(experience_ops.render_lesson(rest.split()[0]))
+        return
+    if sub in ("approve", "reject"):
+        if not rest:
+            err_console.print(f"[!] Usage: /experience {sub} <lesson-id>")
+            return
+        status = "approved" if sub == "approve" else "rejected"
+        _print_op_result(experience_ops.set_lesson_status(rest.split()[0], status))
+        return
+    if sub == "edit":
+        try:
+            tokens = shlex.split(rest)
+        except ValueError as exc:
+            err_console.print(f"[!] Could not parse arguments: {exc}")
+            return
+        if not tokens:
+            err_console.print(
+                "[!] Usage: /experience edit <lesson-id> "
+                "[--context <text>] [--lesson <text>]"
+            )
+            return
+        lesson_id = tokens[0]
+        context_val, lesson_val, flag_error = _parse_edit_flags(tokens[1:])
+        if flag_error:
+            err_console.print(f"[!] {flag_error}")
+            return
+        if context_val is None and lesson_val is None:
+            err_console.print(
+                "[!] Provide --context and/or --lesson, "
+                'e.g. /experience edit L1 --lesson "prefer double-write bypass"'
+            )
+            return
+        _print_op_result(
+            experience_ops.edit_lesson(lesson_id, context=context_val, lesson=lesson_val)
+        )
+        return
+
+    err_console.print(
+        "[!] Unknown /experience action. "
+        "Use list | show <id> | approve <id> | reject <id> | edit <id> ..."
+    )
+
+
+_EDIT_FLAGS = ("--context", "--lesson")
+
+
+def _parse_edit_flags(
+    tokens: list[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract ``--context`` / ``--lesson`` values from tokenized edit args.
+
+    Returns ``(context, lesson, error)``. A flag whose value is missing or is
+    itself another flag is an error rather than a silently swallowed typo:
+    ``edit L1 --lesson --context foo`` must not persist the literal lesson
+    text ``--context``, since an approved lesson is injected into later runs.
+    """
+    context_val: Optional[str] = None
+    lesson_val: Optional[str] = None
+    i = 0
+    while i < len(tokens):
+        flag = tokens[i]
+        if flag not in _EDIT_FLAGS:
+            return None, None, (
+                f"Unexpected argument: {flag} "
+                '(quote multi-word values, e.g. --lesson "two words")'
+            )
+        if i + 1 >= len(tokens) or tokens[i + 1] in _EDIT_FLAGS:
+            return None, None, f"{flag} needs a value."
+        if flag == "--context":
+            context_val = tokens[i + 1]
+        else:
+            lesson_val = tokens[i + 1]
+        i += 2
+    return context_val, lesson_val, None
+
+
+def _repl_learn(args: str, config: Any) -> None:
+    """Handle ``/learn <run-name>`` in the REPL."""
+    run_name = args.strip().split()[0] if args.strip() else ""
+    if not run_name:
+        err_console.print("[!] Usage: /learn <run-name>")
+        return
+    _print_op_result(experience_ops.distill_run(run_name, config=config))
+
+
+def _repl_feedback(args: str, config: Any) -> None:
+    """Handle ``/feedback <run-name> <rating 1-5> <notes...>`` in the REPL."""
+    parts = args.strip().split(maxsplit=2)
+    if len(parts) < 3:
+        err_console.print("[!] Usage: /feedback <run-name> <rating 1-5> <notes>")
+        return
+    run_name, rating_raw, notes = parts[0], parts[1], parts[2]
+    try:
+        rating = int(rating_raw)
+    except ValueError:
+        err_console.print(f"[!] Rating must be an integer 1-5, got: {rating_raw}")
+        return
+    _print_op_result(
+        experience_ops.save_run_feedback(run_name, rating=rating, notes=notes, config=config)
+    )
 
 
 def _repl_switch_language(args: str, agent: Any, config: Any) -> Any:
@@ -960,7 +1103,7 @@ def _run_repl() -> None:
                 # Escape Rich markup chars in exception message to prevent MarkupError
                 from rich.markup import escape as rich_escape
 
-                console.print(_("cli.error", msg=rich_escape(str(e))))
+                console.print(_("cli.error", msg=rich_escape(format_llm_user_error(e))))
 
         except KeyboardInterrupt:
             now = time.monotonic()
@@ -1007,6 +1150,12 @@ def _print_help() -> None:
   {_("help.persistent_mode_desc")}
   {_("help.persistent_cli")}
   {_("help.persistent_repl")}
+
+ [bold]{_("help.learning")}[/]:
+  {_("help.learning_desc")}
+  {_("help.learning_experience")}
+  {_("help.learning_learn")}
+  {_("help.learning_feedback")}
 
  [bold]{_("help.examples")}[/]:
   {_("help.example_pentest")}
@@ -3664,50 +3813,9 @@ def learn(
 ) -> None:
     """Distill an existing run on demand (for reruns and backfill)."""
 
-    from vulnclaw.agent.context import SessionState
-    from vulnclaw.agent.distiller import (
-        RunArtifacts,
-        configured_distiller,
-        persist_distilled_lessons,
+    _emit_op_result(
+        experience_ops.distill_run(run_name, config=load_config(), runs_dir=runs_dir)
     )
-    from vulnclaw.feedback import feedback_for_distillation
-    from vulnclaw.kb.experience import ExperienceStore
-    from vulnclaw.run_context import RunContextError, load_run_context
-
-    config = load_config()
-    if not has_llm_credentials(config.llm):
-        err_console.print("[!] Configure LLM credentials first (api_key or auth_mode).")
-        raise typer.Exit(1)
-    try:
-        run_context = load_run_context(run_name, runs_dir=runs_dir, config=config)
-        state_data = json.loads(run_context.state_path().read_text(encoding="utf-8"))
-        session = SessionState.model_validate(state_data)
-        target = run_context.target_manifest()
-        artifacts = RunArtifacts.from_session(
-            run_context.run_name,
-            session,
-            target_key=str(target.get("target_id") or ""),
-            feedback=feedback_for_distillation(run_context.run_dir),
-        )
-        lessons = persist_distilled_lessons(
-            artifacts,
-            configured_distiller(config),
-            ExperienceStore(),
-        )
-        run_context.append_event("distillation_completed", {"lessons": len(lessons), "manual": True})
-    except (OSError, ValueError, json.JSONDecodeError, RunContextError) as exc:
-        err_console.print(f"[!] Could not distill run {run_name}: {exc}")
-        raise typer.Exit(1) from exc
-    except Exception as exc:
-        # Explicit backfill exposes a concise error, while preserving a run-local audit event.
-        try:
-            run_context.append_event("distillation_failed", {"error": type(exc).__name__, "manual": True})
-        except Exception:
-            pass
-        err_console.print(f"[!] Distillation failed: {type(exc).__name__}")
-        raise typer.Exit(1) from exc
-
-    console.print(f"[+] Distilled {len(lessons)} pending lesson(s) from run {run_context.run_name}.")
 
 
 @app.command("feedback")
@@ -3721,32 +3829,11 @@ def feedback(
 ) -> None:
     """Attach or update an operator assessment for a completed run."""
 
-    from vulnclaw.feedback import FeedbackError, save_feedback
-    from vulnclaw.run_context import RunContextError, load_run_context
-
-    try:
-        run_context = load_run_context(run, runs_dir=runs_dir, config=load_config())
-    except (RunContextError, ValueError) as exc:
-        err_console.print(f"[!] Unable to load run '{run}': {exc}")
-        raise typer.Exit(1) from exc
-
-    status = str(run_context.manifest.get("status") or "")
-    if status not in {"completed", "interrupted", "failed"}:
-        err_console.print(f"[!] Run '{run}' is not finished (status: {status or 'unknown'}).")
-        raise typer.Exit(1)
-    if not notes.strip():
-        err_console.print("[!] Feedback notes must not be empty.")
-        raise typer.Exit(1)
-
-    try:
-        saved = save_feedback(run_context.run_dir, rating=rating, notes=notes)
-        # Notes can contain sensitive operational detail; only record the rating.
-        run_context.append_event("feedback_updated", {"rating": saved.rating})
-    except FeedbackError as exc:
-        err_console.print(f"[!] Invalid feedback: {exc}")
-        raise typer.Exit(1) from exc
-
-    console.print(f"[+] Feedback saved for {run}: rating={saved.rating}/5")
+    _emit_op_result(
+        experience_ops.save_run_feedback(
+            run, rating=rating, notes=notes, config=load_config(), runs_dir=runs_dir
+        )
+    )
 
 
 def _print_cli_manual(topic: Optional[str], output_format: str) -> None:
@@ -3761,16 +3848,12 @@ def _print_cli_manual(topic: Optional[str], output_format: str) -> None:
 
 
 
-def _experience_store():
-    """Create the human-gated lesson store only for an experience command."""
-    from vulnclaw.kb.experience import ExperienceStore
-
-    return ExperienceStore()
-
-
-def _experience_not_found(lesson_id: str) -> None:
-    """Emit a safe, consistent failure for unknown or invalid lesson IDs."""
-    err_console.print(Text(f"[!] Lesson not found: {lesson_id}"))
+def _emit_op_result(result: "experience_ops.OpResult") -> None:
+    """Print a shared-op result, routing failures to typer.Exit(1)."""
+    if result.ok:
+        console.print(result.renderable)
+        return
+    err_console.print(result.renderable)
     raise typer.Exit(1)
 
 
@@ -3778,101 +3861,25 @@ def _experience_not_found(lesson_id: str) -> None:
 @experience_app.command("review")
 def experience_list() -> None:
     """List lessons awaiting human review."""
-    from rich.table import Table
-
-    from vulnclaw.kb.experience import LessonStatus
-
-    lessons = _experience_store().list_by_status(LessonStatus.PENDING)
-    if not lessons:
-        console.print("No pending experience lessons.")
-        return
-
-    table = Table(title="Pending Experience Lessons", show_lines=False)
-    table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Scope")
-    table.add_column("Signal")
-    table.add_column("Confidence", justify="right")
-    table.add_column("Context")
-    for item in lessons:
-        table.add_row(
-            Text(item.id),
-            Text(item.scope.value),
-            Text(item.signal.value),
-            f"{item.confidence:.2f}",
-            Text(item.context),
-        )
-    console.print(table)
+    _emit_op_result(experience_ops.render_pending_lessons())
 
 
 @experience_app.command("show")
 def experience_show(lesson_id: str = typer.Argument(..., help="Lesson id")) -> None:
     """Show full lesson text and evidence provenance."""
-    item = _experience_store().get(lesson_id)
-    if item is None:
-        _experience_not_found(lesson_id)
-
-    evidence = item.evidence_refs
-    tags = item.tags
-    source_runs = ", ".join(item.source_runs) or "-"
-    details = Text()
-
-    def add_line(label: str, value: str) -> None:
-        details.append(f"{label}: ", style="bold")
-        details.append(value)
-        details.append("\n")
-
-    add_line("ID", item.id)
-    add_line("Status", item.status.value)
-    add_line("Scope", item.scope.value)
-    add_line("Signal", item.signal.value)
-    add_line("Confidence", f"{item.confidence:.2f}")
-    add_line(
-        "Tags",
-        f"tech={', '.join(tags.tech) or '-'}, vuln_type={tags.vuln_type or '-'}, "
-        f"waf={tags.waf or '-'}, service={tags.service or '-'}",
-    )
-    add_line("Target key", item.target_key or "-")
-    add_line("Context", item.context)
-    add_line("Lesson", item.lesson)
-    add_line(
-        "Evidence",
-        f"run_id={evidence.run_id}, finding_id={evidence.finding_id or '-'}, "
-        f"path={evidence.path or '-'}",
-    )
-    add_line("Source runs", source_runs)
-    details.append("Created: ", style="bold")
-    details.append(item.created_at.isoformat())
-    console.print(
-        Panel(
-            details,
-            title="Experience Lesson",
-            border_style="cyan",
-        )
-    )
-
-
-def _experience_set_status(lesson_id: str, status: str) -> None:
-    """Apply one human review decision and report its durable result."""
-    store = _experience_store()
-    try:
-        item = store.approve(lesson_id) if status == "approved" else store.reject(lesson_id)
-    except ValueError:
-        _experience_not_found(lesson_id)
-    if item is None:
-        _experience_not_found(lesson_id)
-    console.print(f"[+] Lesson {item.id} marked {item.status.value}.")
+    _emit_op_result(experience_ops.render_lesson(lesson_id))
 
 
 @experience_app.command("approve")
 def experience_approve(lesson_id: str = typer.Argument(..., help="Lesson id")) -> None:
     """Approve a lesson so future matching runs may retrieve it."""
-    _experience_set_status(lesson_id, "approved")
+    _emit_op_result(experience_ops.set_lesson_status(lesson_id, "approved"))
 
 
 @experience_app.command("reject")
 def experience_reject(lesson_id: str = typer.Argument(..., help="Lesson id")) -> None:
     """Reject a lesson so it cannot influence future runs."""
-    _experience_set_status(lesson_id, "rejected")
+    _emit_op_result(experience_ops.set_lesson_status(lesson_id, "rejected"))
 
 
 @experience_app.command("edit")
@@ -3884,16 +3891,9 @@ def experience_edit(
     ),
 ) -> None:
     """Amend context and/or lesson text without changing provenance or status."""
-    if context is None and lesson_text is None:
-        raise typer.BadParameter("provide --context and/or --lesson")
-    try:
-        item = _experience_store().update(lesson_id, context=context, lesson=lesson_text)
-    except ValueError as exc:
-        err_console.print(Text(f"[!] Invalid lesson update: {exc}"))
-        raise typer.Exit(1) from None
-    if item is None:
-        _experience_not_found(lesson_id)
-    console.print(f"[+] Lesson {item.id} updated.")
+    _emit_op_result(
+        experience_ops.edit_lesson(lesson_id, context=context, lesson=lesson_text)
+    )
 
 
 @target_state_app.command("list")

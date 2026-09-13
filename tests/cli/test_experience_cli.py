@@ -124,3 +124,39 @@ def test_experience_unknown_id_fails_cleanly(runner, experience_store, command):
 
     assert result.exit_code == 1
     assert "Lesson not found: missing-id" in result.output
+
+
+def test_repl_experience_approve_marks_lesson_approved(experience_store, capsys):
+    """The REPL /experience handler drives the same store as the CLI."""
+    import vulnclaw.cli.main as main_mod
+
+    experience_store.add(_lesson("repl-approve"))
+
+    main_mod._repl_experience("approve repl-approve")
+
+    assert experience_store.get("repl-approve").status is LessonStatus.APPROVED
+    assert "marked approved" in capsys.readouterr().out
+
+
+def test_repl_experience_unknown_id_does_not_raise(experience_store, capsys):
+    import vulnclaw.cli.main as main_mod
+
+    # Must not raise typer.Exit — the REPL loop has to keep running.
+    main_mod._repl_experience("show missing-id")
+
+    assert "Lesson not found: missing-id" in capsys.readouterr().err
+
+
+def test_repl_experience_edit_updates_context_and_lesson(experience_store):
+    import vulnclaw.cli.main as main_mod
+
+    experience_store.add(_lesson("repl-edit"))
+
+    main_mod._repl_experience(
+        'edit repl-edit --context "new ctx" --lesson "new operator guidance"'
+    )
+
+    edited = experience_store.get("repl-edit")
+    assert edited.context == "new ctx"
+    assert edited.lesson == "new operator guidance"
+    assert edited.status is LessonStatus.PENDING

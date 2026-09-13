@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from vulnclaw.cli.config_panel import ConfigPanelModel, Row
-from vulnclaw.cli.tui import C_BORDER, C_ERROR, C_MUTED, C_PRIMARY, C_TEXT
+from vulnclaw.cli.tui import C_BORDER, C_ERROR, C_MUTED, C_PRIMARY, C_TEXT, C_WARNING
 from vulnclaw.i18n import _
 
 
@@ -47,13 +47,18 @@ def render_panel(model: ConfigPanelModel) -> Group:
             label.stylize(f"bold {C_PRIMARY}")
         table.add_row(mark, label, _row_value(model, row, focused))
         if focused and model.dropdown_open:
-            for index, option in enumerate(model.dropdown_options):
-                opt_mark = "›" if index == model.dropdown_index else " "
-                table.add_row(
-                    " ",
-                    Text(f"{indent}  {opt_mark} {option}", style=C_MUTED),
-                    "",
+            for index, option in model.visible_dropdown_options():
+                selected = index == model.dropdown_index
+                # Selected cursor uses C_WARNING (orange); unselected stays blank.
+                # Option text stays muted unless selected so the cursor stands out.
+                opt_mark: str | Text = (
+                    Text("›", style=f"bold {C_WARNING}") if selected else " "
                 )
+                opt_label = Text(
+                    f"{indent}  {option}",
+                    style=C_TEXT if selected else C_MUTED,
+                )
+                table.add_row(opt_mark, opt_label, "")
 
     body: list[object] = [table]
     llm_open = any(row.key == "action.fetch_models" for row in model.rows())

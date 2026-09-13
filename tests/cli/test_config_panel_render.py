@@ -62,6 +62,32 @@ def test_open_dropdown_lists_its_options():
     assert "html" in output
 
 
+def test_selected_dropdown_option_cursor_uses_orange_warning_color():
+    from vulnclaw.cli.tui import C_WARNING
+
+    model = ConfigPanelModel(VulnClawConfig())
+    model._expanded.add("session")
+    model._focus_key = "session.report_format"
+    model.activate()
+    model.select_option(1)
+
+    console = Console(
+        file=io.StringIO(),
+        record=True,
+        width=120,
+        height=40,
+        force_terminal=True,
+        color_system="truecolor",
+    )
+    from vulnclaw.i18n import init_i18n
+
+    init_i18n("en")
+    console.print(render_panel(model))
+    html = console.export_html(inline_styles=True)
+
+    assert C_WARNING.lstrip("#").lower() in html.lower()
+
+
 def test_expanded_llm_section_shows_the_idle_fetch_hint():
     model = ConfigPanelModel(VulnClawConfig())
     model.toggle_expand()  # focus starts on the llm group

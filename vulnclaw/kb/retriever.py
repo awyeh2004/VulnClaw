@@ -22,6 +22,11 @@ from enum import Enum
 from typing import Any, Optional
 
 from vulnclaw.kb.ranking import BM25, CrossEncoderReranker
+
+# Backward-compatible alias: experience_context (upstream 0.3.9) imports
+# _tokenize from this module. Same semantics as bigram_tokenize -- keeps
+# Chinese queries retrievable in the keyword-fallback path.
+from vulnclaw.kb.ranking import bigram_tokenize as _tokenize
 from vulnclaw.kb.store import KnowledgeStore
 
 logger = logging.getLogger(__name__)

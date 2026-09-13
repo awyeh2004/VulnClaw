@@ -1566,6 +1566,50 @@ class TestClassicReplSlashPalette:
         assert result.kind == "command"
         assert result.value == "language"
 
+    def test_experience_command_dispatches_without_args(self):
+        from vulnclaw.cli.tui import dispatch_repl_slash
+
+        result = dispatch_repl_slash("/experience")
+
+        assert result.kind == "command"
+        assert result.value == "experience"
+        assert result.text == ""
+
+    def test_experience_alias_and_subcommand_carry_args(self):
+        from vulnclaw.cli.tui import dispatch_repl_slash
+
+        result = dispatch_repl_slash("/exp show L1")
+
+        assert result.kind == "command"
+        assert result.value == "experience"
+        assert result.text == "show L1"
+
+    def test_learn_command_carries_run_name(self):
+        from vulnclaw.cli.tui import dispatch_repl_slash
+
+        result = dispatch_repl_slash("/learn my-run")
+
+        assert result.kind == "command"
+        assert result.value == "learn"
+        assert result.text == "my-run"
+
+    def test_feedback_command_carries_full_argument(self):
+        from vulnclaw.cli.tui import dispatch_repl_slash
+
+        result = dispatch_repl_slash("/feedback my-run 4 solid recon coverage")
+
+        assert result.kind == "command"
+        assert result.value == "feedback"
+        assert result.text == "my-run 4 solid recon coverage"
+
+    def test_experience_and_learn_and_feedback_in_palette(self):
+        import vulnclaw.cli.tui as tui_mod
+
+        names = [name for name, _ in tui_mod.list_repl_palette_entries()]
+
+        for expected in ("experience", "learn", "feedback"):
+            assert expected in names
+
     def test_repl_palette_lists_commands_before_skills(self):
         import vulnclaw.cli.tui as tui_mod
 
@@ -1574,6 +1618,147 @@ class TestClassicReplSlashPalette:
 
         assert names[:2] == ["config", "language"]
         assert "recon" in names  # skills still follow the commands
+
+    def test_run_repl_command_routes_experience_to_handler(self, monkeypatch):
+        import vulnclaw.cli.main as main_mod
+
+        seen = {}
+        monkeypatch.setattr(main_mod, "_repl_experience", lambda args: seen.setdefault("args", args))
+
+        out = main_mod._run_repl_command("experience", "approve L1", object(), "cfg")
+
+        assert seen["args"] == "approve L1"
+        assert out == "cfg"  # experience is read/side-effecting; config passes through
+
+    def test_run_repl_command_routes_learn_and_feedback(self, monkeypatch):
+        import vulnclaw.cli.main as main_mod
+
+        calls = {}
+        monkeypatch.setattr(
+            main_mod, "_repl_learn", lambda args, cfg: calls.setdefault("learn", (args, cfg))
+        )
+        monkeypatch.setattr(
+            main_mod, "_repl_feedback", lambda args, cfg: calls.setdefault("feedback", (args, cfg))
+        )
+
+        main_mod._run_repl_command("learn", "my-run", object(), "cfg")
+        main_mod._run_repl_command("feedback", "my-run 5 great", object(), "cfg")
+
+        assert calls["learn"] == ("my-run", "cfg")
+        assert calls["feedback"] == ("my-run 5 great", "cfg")
+
+    def test_parse_edit_flags_extracts_both_values(self):
+        import vulnclaw.cli.main as main_mod
+
+        context_val, lesson_val, error = main_mod._parse_edit_flags(
+            ["--context", "new ctx", "--lesson", "new lesson"]
+        )
+
+        assert context_val == "new ctx"
+        assert lesson_val == "new lesson"
+        assert error is None
+
+    def test_parse_edit_flags_rejects_flag_as_value(self):
+        import vulnclaw.cli.main as main_mod
+
+        context_val, lesson_val, error = main_mod._parse_edit_flags(
+            ["--lesson", "--context", "foo"]
+        )
+
+        assert context_val is None
+        assert lesson_val is None
+        assert "--lesson needs a value" in error
+
+    def test_parse_edit_flags_rejects_missing_trailing_value(self):
+        import vulnclaw.cli.main as main_mod
+
+        _, _, error = main_mod._parse_edit_flags(["--context"])
+
+        assert "--context needs a value" in error
+
+    def test_parse_edit_flags_rejects_unquoted_extra_token(self):
+        import vulnclaw.cli.main as main_mod
+
+        _, _, error = main_mod._parse_edit_flags(["--lesson", "prefer", "double"])
+
+        assert "Unexpected argument: double" in error
+
+    def test_experience_show_rejects_unsafe_lesson_id(self):
+        from vulnclaw.cli import experience_ops
+
+        result = experience_ops.render_lesson("../../foo")
+
+        assert result.ok is False
+        assert "Lesson not found" in str(result.renderable)
+
+    def test_experience_status_survives_unwritable_store(self, monkeypatch):
+        from vulnclaw.cli import experience_ops
+
+        class _Boom:
+            def approve(self, lesson_id):
+                raise OSError("read-only file system")
+
+            def reject(self, lesson_id):
+                raise OSError("read-only file system")
+
+        monkeypatch.setattr(experience_ops, "_experience_store", lambda: _Boom())
+
+        result = experience_ops.set_lesson_status("L1", "approved")
+
+        assert result.ok is False
+        assert "Could not write the experience store" in str(result.renderable)
+
+    def test_experience_edit_survives_unwritable_store(self, monkeypatch):
+        from vulnclaw.cli import experience_ops
+
+        class _Boom:
+            def update(self, lesson_id, *, context=None, lesson=None):
+                raise OSError("no space left on device")
+
+        monkeypatch.setattr(experience_ops, "_experience_store", lambda: _Boom())
+
+        result = experience_ops.edit_lesson("L1", lesson="new")
+
+        assert result.ok is False
+        assert "Could not write the experience store" in str(result.renderable)
+
+    def test_feedback_survives_unwritable_run_dir(self, monkeypatch, tmp_path):
+        from vulnclaw.cli import experience_ops
+        from vulnclaw.config.schema import VulnClawConfig
+
+        class _RunContext:
+            manifest = {"status": "completed"}
+            run_dir = tmp_path
+
+            def append_event(self, *args, **kwargs):
+                raise AssertionError("should not be reached")
+
+        monkeypatch.setattr(
+            "vulnclaw.run_context.load_run_context",
+            lambda *args, **kwargs: _RunContext(),
+        )
+
+        def _boom(run_dir, *, rating, notes):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("vulnclaw.feedback.save_feedback", _boom)
+
+        result = experience_ops.save_run_feedback(
+            "run-1", rating=4, notes="solid", config=VulnClawConfig()
+        )
+
+        assert result.ok is False
+        assert "Could not save feedback" in str(result.renderable)
+
+    def test_tui_palette_excludes_repl_only_learning_commands(self):
+        import vulnclaw.cli.tui as tui_mod
+
+        entries = dict(tui_mod.build_slash_palette_entries())
+        repl_entries = dict(tui_mod.list_repl_palette_entries())
+
+        for cmd in ("experience", "learn", "feedback"):
+            assert cmd not in entries
+            assert cmd in repl_entries
 
     def test_repl_palette_filters_commands_by_prefix(self):
         import vulnclaw.cli.tui as tui_mod

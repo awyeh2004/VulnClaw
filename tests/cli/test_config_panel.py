@@ -105,6 +105,44 @@ def test_text_edit_commits_on_enter(model):
     assert model.editing is False
 
 
+def test_paste_text_appends_into_active_editor_and_strips_newlines(model):
+    """Bracketed paste / clipboard paste must land in edit_text, not be dropped."""
+    _focus(model, "llm.api_key")
+    model.activate()
+    model.set_edit_text("sk-")
+
+    model.paste_text("pre\r\nfix\nkey\r")
+
+    assert model.edit_text == "sk-prefixkey"
+    assert model.row_error == ""
+
+
+def test_paste_text_is_a_no_op_when_not_editing(model):
+    _focus(model, "llm.api_key")
+
+    model.paste_text("sk-should-not-land")
+
+    assert model.editing is False
+    assert model.edit_text == ""
+
+
+def test_apply_clipboard_routes_text_and_reports_empty_or_unavailable(model):
+    _focus(model, "llm.api_key")
+    model.activate()
+
+    model.apply_clipboard("sk-from-clipboard")
+    assert model.edit_text == "sk-from-clipboard"
+    assert model.row_error == ""
+
+    model.apply_clipboard("")
+    assert model.edit_text == "sk-from-clipboard"
+    assert model.row_error == "Nothing to paste: clipboard is empty"
+
+    model.apply_clipboard(None)
+    assert model.edit_text == "sk-from-clipboard"
+    assert model.row_error == "Paste failed: clipboard unavailable"
+
+
 def test_text_edit_cancel_restores_previous_value(model):
     model.draft.llm.reasoning_effort = "medium"
     _focus(model, "llm.reasoning_effort")
@@ -253,6 +291,87 @@ def test_dropdown_selection_does_not_run_off_either_end(model):
 
     model.select_option(5)
     assert model.dropdown_index == 1
+
+
+def test_long_dropdown_only_exposes_a_window_around_the_selection(model):
+    """OpenRouter-sized model lists must not dump every option into the UI."""
+    model.models = [f"provider/model-{i:03d}" for i in range(80)]
+    _focus(model, "llm.model")
+    model.activate()
+    model.set_viewport_height(10)
+
+    _, dropdown_rows = model._table_row_budget()
+    visible = model.visible_dropdown_options()
+    assert len(visible) <= dropdown_rows
+    assert visible[0][0] == 0  # (absolute_index, name)
+    assert all(visible[i][0] == i for i in range(len(visible)))
+
+    # Move past the first window; the slice must follow the selection.
+    model.select_option(25)
+    visible = model.visible_dropdown_options()
+    indices = [index for index, _ in visible]
+    assert model.dropdown_index in indices
+    assert len(visible) <= dropdown_rows
+    assert indices[0] > 0
+
+
+def test_dropdown_table_rows_fit_within_viewport(model):
+    model.models = [f"m-{i}" for i in range(40)]
+    _focus(model, "llm.model")
+    model.activate()
+    model.set_viewport_height(8)
+
+    panel_rows, dropdown_rows = model._table_row_budget()
+    assert panel_rows + dropdown_rows <= model.viewport_height
+    assert len(model.visible_rows()) <= panel_rows
+    assert len(model.visible_dropdown_options()) <= dropdown_rows
+
+
+def test_dropdown_window_scrolls_up_when_selection_moves_above_it(model):
+    model.models = [f"m-{i}" for i in range(40)]
+    _focus(model, "llm.model")
+    model.activate()
+    model.set_viewport_height(5)
+    model.select_option(20)
+    assert model.visible_dropdown_options()[0][0] > 0
+
+    for _ in range(30):
+        model.select_option(-1)
+
+    assert model.dropdown_index == 0
+    assert model.visible_dropdown_options()[0][0] == 0
+
+
+def test_render_omits_dropdown_options_outside_the_window():
+    import io
+
+    from rich.console import Console
+
+    from vulnclaw.cli.config_panel_render import render_panel
+
+    model = ConfigPanelModel(VulnClawConfig())
+    model.models = [f"provider/model-{i:03d}" for i in range(50)]
+    _focus(model, "llm.model")
+    model.activate()
+    model.set_viewport_height(6)
+
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=True, width=120).print(render_panel(model))
+    output = buf.getvalue()
+
+    _, dropdown_rows = model._table_row_budget()
+    # Labels may be ellipsis-truncated; count option rows via the stable prefix.
+    assert output.count("model-") == dropdown_rows
+    assert "model-49" not in output
+
+
+def test_paste_into_list_field_preserves_item_separators(model):
+    _focus(model, "llm.api_keys")
+    model.activate()
+
+    model.paste_text("sk-one\nsk-two")
+
+    assert model.edit_text == "sk-one,sk-two"
 
 
 def test_changing_provider_applies_the_preset_and_bumps_the_generation(model):
