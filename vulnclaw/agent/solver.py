@@ -292,11 +292,13 @@ def _looks_like_quiz(goal: str) -> bool:
 def _quiz_questions_inline(goal: str) -> bool:
     """Return True when the quiz questions are pasted directly in ``goal``.
 
-    Positive signals are structural question content: option markers, fill-in
-    blanks, 对-错 stems, or a question mark — bare type keywords like "单选"
-    and bare instructions like "开始答题" never count, otherwise a
-    target-command-driven quiz ("开始答题" + URL given earlier) would skip
-    reading entirely and pass a hallucinated FINAL through the gate.
+    Positive signals are structural question content only: option markers,
+    fill-in blanks, or 对-错 stems. A question mark alone does NOT count
+    (audit A1: "知识竞赛？开始答题" is an instruction, not a question) —
+    without structural content the gate keeps the fetch-first requirement;
+    when no URL exists either, the rejection message explicitly tells the
+    model to answer from the task text instead of fetching (audit A2: no
+    impossible-action dead end).
     """
     text = goal or ""
     if len(set(_QUIZ_OPTIONS_RE.findall(text))) >= 3:
@@ -304,12 +306,12 @@ def _quiz_questions_inline(goal: str) -> bool:
     if "（ ）" in text or "( )" in text or "对/错" in text or "正确/错误" in text:
         return True
     lowered = text.lower()
+    # No URL and no structural markers: question content lives in the text iff
+    # a numbered question stem is present ("1."/"第1题"/"问："), not a bare "?"
+    # that may belong to an instruction sentence.
     if "http://" in lowered or "https://" in lowered:
-        # A URL means the questions live on a page — go read them.
         return False
-    # No URL anywhere: the questions can only be in the task text, but require
-    # actual question content (a question mark), not just an instruction.
-    return bool(re.search(r"[？？?]", text))
+    return bool(re.search(r"(?:^|\n)\s*(?:\d{1,2}[.、）\)]|第\s*\d{1,3}\s*题|问\s*[：:])", text))
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
@@ -698,12 +700,14 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
         r"flag|getshell|shell", goal_text, re.IGNORECASE
     ):
         if not state.evidence and not _quiz_questions_inline(goal_text):
-            return (
-                False,
-                "quiz goal: fetch the quiz page and read the questions first so they "
-                "are recorded as evidence, then answer them from knowledge",
-                cited,
+            hint = (
+                "quiz goal: no questions found in the task text and no URL to fetch — "
+                "ask the user for the quiz page URL or the pasted questions"
+                if "http" not in goal_text.lower()
+                else "quiz goal: fetch the quiz page and read the questions first so they "
+                "are recorded as evidence, then answer them from knowledge"
             )
+            return False, hint, cited
         ungrounded = [
             flag for flag in flags_in_answer
             if not _flag_token_grounded(flag, evidence_text, evidence_flags)

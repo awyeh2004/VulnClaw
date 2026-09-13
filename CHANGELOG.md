@@ -24,6 +24,7 @@
 - **知识题门禁与护栏审计修复** — 完成闸门的 quiz 短路仅在 goal 未显式要求 flag/shell 时生效（"答题拿flag"类混合目标回落到 flag 落地校验，杜绝无 flag 提前判完成）；新增 `_quiz_questions_inline` 内联题目判定（≥3 个选项标记或"（ ）"填空），题目直接粘贴在任务文本时不再要求先抓取证据（原逻辑会指向不可能执行的动作并烧尽 max_steps）；`_should_switch_target` 按目标形态切分——quiz 文本中出现的完整 URL 视为真实换靶（"改打 http://x"），裸 IP/域名诱饵维持豁免；续跑任务类型后缀改走 i18n（`cli.resume_quiz_suffix`）。
 - **工具裁剪与完成路径全量审计修复** — `_infer_allowed_tools` 为知识题目标保底 web 工具束：技术型题面（含 RSA/AES/端口等词）不再把 `fetch` 从工具 schema 裁掉（原 crypto bundle 首位命中会导致 quiz 指令要求的工具不存在）；`_implicit_flag_completion` 改为仅在 goal 显式要求 flag/shell 时触发，纯答题 goal 不再被页面证据中的 flag 形态字符串隐式判完成；premature-ASK_USER 守卫对 quiz 目标豁免——quiz 页面证据（表单/输入框）必触发 near-miss 启发，原守卫会把"超纲题转交用户"的既定流程随"资料/搜索"措辞永久拦截；`_quiz_questions_inline` 补判断题格式（对/错、正确/错误）与"无 URL 即内联"兜底。
 - **quiz 启发式边界收紧（第三轮审计修复）** — 内联判定去掉过宽的"无 URL 即内联"兜底：改为要求实际题干内容（问句/选项/填空/对错格式），防止 `target` 命令给 URL、goal 仅"开始答题"时不读题即通过门禁；`_QUIZ_KEYWORDS` 移除裸"答题"（"对 XX 答题系统做渗透测试"是攻击任务，quiz 判定会同时翻转门禁豁免/ASK_USER 豁免/禁攻击指令三项行为；自动模式触发词表保留"答题"）；换靶守卫的 URL 分支需伴随"改打/切换到/换成"类显式换靶动词才重置会话（题干引用"判断题：https://x 是…"不再误清上下文）；`_infer_allowed_tools` 的 quiz 分支改为模块级导入并移除裸吞异常（当前无循环导入，回归会在导入期显式暴露）。
+- **quiz 内联判定第四轮审计修复** — 问号不再作为题干内联信号（"知识竞赛？开始答题"是指令不是题，原判定可让未读题的 FINAL 通过门禁）；无 URL 且无结构标记的内联题面，门禁拒绝消息改为指引"向用户要题面 URL 或粘贴题目"，不再指向不可能执行的 fetch（消除烧尽 max_steps 的死循环残余）。
 
 </details>
 

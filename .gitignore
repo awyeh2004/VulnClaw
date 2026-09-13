@@ -115,3 +115,13 @@ docs/
 # Rust TUI build artifacts
 tui/target/
 
+
+# TSecBench 跑分本地产物 (审计 B1: 含 token/会话 cookie/内网 IP, 严禁入库)
+tsec_bench/
+tsec.env
+cookies.txt
+cook.txt
+ih.db
+quiz_drill/
+quiz.html
+.zcode/
