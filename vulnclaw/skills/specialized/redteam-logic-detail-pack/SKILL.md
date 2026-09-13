@@ -1,6 +1,10 @@
 ---
 name: redteam-logic-detail-pack
 description: "Domain routing and boundary guidance for authorized business logic vulnerability testing, including race conditions, flow bypass, price tampering, permission logic errors, and bulk operation abuse. Use when a task belongs to the logic testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  vulnerability_classes: [business_logic]
+  aliases: [逻辑漏洞, 业务逻辑, 支付逻辑]
+  role: support
 ---
 
 # 业务逻辑漏洞测试

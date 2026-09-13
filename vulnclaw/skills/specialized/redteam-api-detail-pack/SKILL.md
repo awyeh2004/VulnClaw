@@ -1,6 +1,11 @@
 ---
 name: redteam-api-detail-pack
 description: "Domain routing and boundary guidance for authorized API security testing, including BOLA/IDOR, authentication bypass, mass assignment, missing rate limits, and GraphQL issues. Use when a task belongs to the API testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  target_types: [api]
+  task_types: [pentest]
+  aliases: [接口测试, api安全]
+  role: support
 ---
 
 # API 安全测试

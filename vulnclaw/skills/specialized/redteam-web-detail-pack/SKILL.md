@@ -1,6 +1,11 @@
 ---
 name: redteam-web-detail-pack
 description: "Routing and boundary guidance for authorized general web application security testing. Use as a web testing router when the attack surface should be dispatched to more specific web vulnerability skills."
+routing:
+  target_types: [web]
+  broad: true
+  aliases: [web渗透]
+  role: support
 ---
 
 # Web 综合渗透测试

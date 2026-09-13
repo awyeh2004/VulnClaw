@@ -1,6 +1,11 @@
 ---
 name: redteam-recon-intake
 description: "Recon intake skill for first contact with a bare domain, URL, or IP address. Use to build an initial recon_profile and provide factual inputs for CVE lookup and attack-path routing."
+routing:
+  task_types: [recon]
+  phases: [recon]
+  aliases: [侦察受理, 测试范围确认]
+  role: support
 ---
 
 # Recon Intake

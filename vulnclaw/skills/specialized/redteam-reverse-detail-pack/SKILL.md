@@ -1,6 +1,10 @@
 ---
 name: redteam-reverse-detail-pack
 description: "Domain routing and boundary guidance for authorized reverse engineering analysis, including decompilation, debugging, protocol reversing, firmware extraction, and deobfuscation. Use when a task belongs to the reverse engineering domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  task_types: [reverse]
+  aliases: [二进制逆向, 逆向分析]
+  role: support
 ---
 
 # 逆向工程分析

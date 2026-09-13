@@ -1,6 +1,10 @@
 ---
 name: redteam-postex-detail-pack
 description: "Domain routing and boundary guidance for authorized post-exploitation testing after initial access, including privilege escalation, persistence, lateral movement, data collection, and cleanup considerations. Use when a task belongs to the post-exploitation domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  phases: [post_exploitation]
+  aliases: [后渗透, 权限维持]
+  role: support
 ---
 
 # 后渗透利用

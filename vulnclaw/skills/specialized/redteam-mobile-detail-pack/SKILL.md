@@ -1,6 +1,10 @@
 ---
 name: redteam-mobile-detail-pack
 description: "Domain routing and boundary guidance for authorized mobile application security testing, including insecure storage, certificate pinning bypass, exposed components, and binary reverse engineering. Use when a task belongs to the mobile testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  target_types: [android, mobile]
+  aliases: [移动端安全, app测试]
+  role: support
 ---
 
 # 移动应用安全测试

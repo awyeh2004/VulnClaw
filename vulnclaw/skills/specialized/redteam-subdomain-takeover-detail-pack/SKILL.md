@@ -1,6 +1,9 @@
 ---
 name: redteam-subdomain-takeover-detail-pack
 description: "Domain routing and boundary guidance for authorized subdomain takeover testing, including dangling CNAME records, NS takeover, and cloud service takeover paths such as S3, Azure, and Heroku. Use when a task belongs to the subdomain takeover domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  aliases: [子域名接管, subdomain takeover, 悬空cname]
+  role: support
 ---
 
 # 子域名接管测试

@@ -2,6 +2,9 @@
 name: hackerone
 description: HackerOne 赏金项目 scope-guard 流程 — 读取 program scope，强制 scope 与 program rules，再逐个把 in-scope asset 交给 pentest-flow
 requires_target: false
+routing:
+  task_types: [bugbounty]
+  aliases: [hackerone, 赏金计划, src项目]
 ---
 
 # HackerOne 赏金 scope-guard Skill

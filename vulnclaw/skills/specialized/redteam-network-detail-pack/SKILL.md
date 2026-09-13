@@ -1,6 +1,10 @@
 ---
 name: redteam-network-detail-pack
 description: "Domain routing and boundary guidance for authorized network-layer security testing, including exposed services, protocol downgrade, man-in-the-middle risks, and segmentation bypasses. Use when a task belongs to the network testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  target_types: [network, host]
+  aliases: [网络设备, 网络层攻击]
+  role: support
 ---
 
 # 网络层渗透测试
