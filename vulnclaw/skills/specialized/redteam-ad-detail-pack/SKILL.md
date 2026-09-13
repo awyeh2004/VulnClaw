@@ -1,6 +1,11 @@
 ---
 name: redteam-ad-detail-pack
 description: "Domain routing and boundary guidance for authorized Active Directory red-team security testing, including Kerberos attacks, domain privilege escalation, lateral movement, and GPO abuse. Use when a task belongs to the AD testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  vulnerability_classes: [lateral_movement]
+  task_types: [pentest]
+  aliases: [域渗透, active directory, ad域攻击, mimikatz]
+  role: support
 ---
 
 # Active Directory 域渗透

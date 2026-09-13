@@ -12,12 +12,15 @@ findings names the same reference bundle that was offered to the model.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from vulnclaw.config.domain_models import phase_canonical_id
 from vulnclaw.skills.loader import load_skill_by_name
 from vulnclaw.skills.resolver import SkillQuery, SkillResolver, SkillSelection
 from vulnclaw.skills.routing import keyword_present, normalize_token
+
+logger = logging.getLogger(__name__)
 
 # Free-text vulnerability keywords (bilingual) -> canonical routing token.
 _VULN_HINT_KEYWORDS: dict[str, str] = {
@@ -133,7 +136,12 @@ def resolve_active_skill_selection(
         return None
     try:
         selection = SkillResolver().resolve(_build_query(user_input, **kwargs))
-        return selection if not selection.is_empty() else None
+        if selection.is_empty():
+            # Observable recall gap: nothing matched — keep it debug-level so a
+            # skill that "should have fired" shows up in traces without noise.
+            logger.debug("skill routing: no skill matched input=%r", (user_input or "")[:120])
+        else:
+            return selection
     except Exception:
         return None
 

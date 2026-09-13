@@ -1,6 +1,10 @@
 ---
 name: redteam-xss-detail-pack
 description: "Domain routing and boundary guidance for authorized cross-site scripting testing, including reflected, stored, DOM-based, mXSS, and CSP bypass variants. Use when a task belongs to the XSS domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  vulnerability_classes: [xss]
+  aliases: [跨站脚本]
+  role: support
 ---
 
 # XSS 跨站脚本测试

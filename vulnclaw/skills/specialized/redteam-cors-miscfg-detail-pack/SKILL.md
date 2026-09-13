@@ -1,6 +1,10 @@
 ---
 name: redteam-cors-miscfg-detail-pack
 description: "Domain routing and boundary guidance for authorized CORS misconfiguration testing, including reflected origins, null origins, subdomain trust, and credential exposure. Use when a task belongs to the CORS testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  vulnerability_classes: [cors]
+  aliases: [跨域配置, cors错误配置]
+  role: support
 ---
 
 # CORS 配置错误测试

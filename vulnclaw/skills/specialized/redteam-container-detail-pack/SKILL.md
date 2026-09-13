@@ -1,6 +1,9 @@
 ---
 name: redteam-container-detail-pack
 description: "Domain routing and boundary guidance for authorized container and orchestration security testing, including Docker escape, Kubernetes privilege escalation, image vulnerabilities, and service mesh bypasses. Use when a task belongs to the container testing domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  aliases: [容器逃逸, docker安全, k8s安全, kubernetes]
+  role: support
 ---
 
 # 容器安全测试

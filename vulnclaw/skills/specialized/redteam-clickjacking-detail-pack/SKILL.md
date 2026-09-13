@@ -1,6 +1,9 @@
 ---
 name: redteam-clickjacking-detail-pack
 description: "Domain routing and boundary guidance for authorized clickjacking testing, including missing X-Frame-Options, CSP frame-ancestors bypasses, and drag-and-drop hijacking. Use when a task belongs to the clickjacking domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  aliases: [点击劫持, clickjacking, ui重定向]
+  role: support
 ---
 
 # Clickjacking 点击劫持测试

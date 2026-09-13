@@ -1,6 +1,10 @@
 ---
 name: redteam-xxe-detail-pack
 description: "Domain routing and boundary guidance for authorized XXE testing, including file read, SSRF, blind XXE, and parameter entity variants. Use when a task belongs to the XXE domain and needs scope, evidence, pivot, or exit criteria."
+routing:
+  vulnerability_classes: [xxe]
+  aliases: [xml外部实体]
+  role: support
 ---
 
 # XXE XML 外部实体注入测试
