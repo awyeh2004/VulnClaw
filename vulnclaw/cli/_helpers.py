@@ -576,6 +576,7 @@ async def _run_cli_orchestrated_task(
     """Run a CLI task through the shared orchestrator helpers."""
 
     from vulnclaw.agent.core import AgentCore
+    from vulnclaw.cli.approval_channel import install_cli_approval_channel
     from vulnclaw.config.settings import load_config
     from vulnclaw.mcp.lifecycle import MCPLifecycleManager
     from vulnclaw.orchestrator import run_agent_task
@@ -585,6 +586,7 @@ async def _run_cli_orchestrated_task(
     # challenge's category/difficulty before the agent builds its LLM client.
     # An explicit --model override (glm/ds) takes precedence over routing.
     _apply_task_model_route(config, target, model_override)
+    install_cli_approval_channel(config)
     mcp_manager = MCPLifecycleManager(config)
     mcp_manager.start_enabled_servers()
     agent = AgentCore(config, mcp_manager)
