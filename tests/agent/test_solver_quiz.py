@@ -101,11 +101,14 @@ class TestCompletionGateQuiz:
         """N2 residual: marker-less judge stems still count as inline."""
         goal = "（判断题）HTTPS 默认使用 443 端口。（对/错）"
         assert _quiz_questions_inline(goal) is True
-        # Numbered stems count as pasted question content…
+        # Numbered stems + question marks count as pasted question content…
         assert _quiz_questions_inline("知识竞赛答题：\n1. 网安法何时施行？\n2. 等保核心是什么") is True
         # …but a question mark on an INSTRUCTION does not (audit A1)…
         assert _quiz_questions_inline("知识竞赛？开始答题") is False
         assert _quiz_questions_inline("开始答题") is False
+        # …and numbered RULE LISTS without question marks are not questions
+        # (audit F1: rules list must not bypass the read-first gate)…
+        assert _quiz_questions_inline("知识竞赛规则：\n1. 不得扫描靶机\n2. 限时30分钟") is False
         # …and a URL-based prompt keeps the read-first requirement.
         assert _quiz_questions_inline("入口在 http://x/quiz，20道单选题") is False
 

@@ -306,12 +306,14 @@ def _quiz_questions_inline(goal: str) -> bool:
     if "（ ）" in text or "( )" in text or "对/错" in text or "正确/错误" in text:
         return True
     lowered = text.lower()
-    # No URL and no structural markers: question content lives in the text iff
-    # a numbered question stem is present ("1."/"第1题"/"问："), not a bare "?"
-    # that may belong to an instruction sentence.
+    # No URL and no structural markers: numbered question stems count as pasted
+    # content ONLY when a question mark co-occurs — bare numbered lists are
+    # rules/instructions ("规则：1. 不得扫描靶机"), not questions (audit F1).
     if "http://" in lowered or "https://" in lowered:
         return False
-    return bool(re.search(r"(?:^|\n)\s*(?:\d{1,2}[.、）\)]|第\s*\d{1,3}\s*题|问\s*[：:])", text))
+    numbered = bool(re.search(r"(?:^|\n)\s*(?:\d{1,3}[.、）\)]|第\s*\d{1,3}\s*题|问\s*[：:])", text))
+    question_mark = bool(re.search(r"[？？?]", text))
+    return numbered and question_mark
 
 
 def extract_json(text: str) -> dict[str, Any] | None:

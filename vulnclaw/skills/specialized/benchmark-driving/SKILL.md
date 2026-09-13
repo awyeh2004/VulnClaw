@@ -107,16 +107,8 @@ deepseek-v4-flash 实测分布（3 并行）：
 
 ## 六、参照实现
 
-`D:\GitClone\VulnClaw\VulnClaw\tsec_bench\run_bench.py`（本地测试工具，
-不提交 git）：
-
-```bash
-python tsec_bench/run_bench.py --selftest              # 离线自测
-python tsec_bench/run_bench.py --dry-run               # 列题计划
-python tsec_bench/run_bench.py --model ds              # 全量(easy优先)
-python tsec_bench/run_bench.py --challenge a-05        # 单题
-python tsec_bench/run_bench.py --skip c-03,c-06        # 跳过指定题
-```
-
-配套文档：`tsec_bench/README.md`（使用说明）、
-`tsec_bench/c03_analysis.md`（三次解题对比的深度复盘案例）。
+驱动脚本 `tsec_bench/run_bench.py` 含平台 token 与靶机内网地址（本机私有副本，
+不入库）。按第三、四章的设计要点可自行实现，核心不到 300 行：持续补位调度、
+flag 三道闸提取、双闸超时（45 分钟总限 + 40 分钟无 checkpoint 弃题）。
+配套：`tsec_bench/README.md`（使用说明）、`c03_analysis.md`（三次解题对比
+复盘案例——同一题被打断两次损失两轮推理的教训）。
