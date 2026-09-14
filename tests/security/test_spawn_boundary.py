@@ -53,7 +53,7 @@ class TestMechanicalBoundary:
         report = __import__("json").loads(result.stdout)
         assert report["ok"] is True
         reviewed = {(s["file"], s["line"], s["call"]) for s in report["reviewed_sites"]}
-        assert ("vulnclaw/agent/builtin_tools.py", 437, "subprocess.Popen") in reviewed
+        assert ("vulnclaw/agent/builtin_tools.py", 451, "subprocess.Popen") in reviewed
 
 
 class TestSubagentDangerousToolRefusal:
