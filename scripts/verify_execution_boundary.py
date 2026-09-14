@@ -75,19 +75,25 @@ _SPAWN_CALLS = {
 # "operator control plane" sites run fixed commands chosen by the local
 # operator (doctor probes, TUI launcher).
 ALLOWED_SPAWN_SITES: dict[str, str] = {
-    "vulnclaw/agent/builtin_tools.py:437:subprocess.Popen": (
+    "vulnclaw/agent/builtin_tools.py:451:subprocess.Popen": (
         "shared gated process runner for shell/python/PHP execution"
     ),
-    "vulnclaw/agent/builtin_tools.py:622:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:636:subprocess.run": (
         "fixed Windows taskkill fallback for the gated process runner"
     ),
-    "vulnclaw/agent/builtin_tools.py:1618:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2252:subprocess.run": (
         "fixed Windows nmap path lookup"
     ),
-    "vulnclaw/agent/builtin_tools.py:1697:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2331:subprocess.run": (
         "structured argv nmap execution constrained by the nmap tool schema"
     ),
-    "vulnclaw/agent/builtin_tools.py:1705:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2339:subprocess.run": (
+        "structured argv non-privileged nmap retry"
+    ),
+    "vulnclaw/agent/builtin_tools.py:3990:subprocess.run": (
+        "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)"
+    ),
+    "vulnclaw/agent/builtin_tools.py:3990:subprocess.run": (
         "structured argv non-privileged nmap retry"
     ),
     "vulnclaw/report/verifier.py:487:subprocess.run": (
@@ -99,10 +105,10 @@ ALLOWED_SPAWN_SITES: dict[str, str] = {
     "vulnclaw/cli/tui.py:1747:subprocess.run": (
         "operator control plane: fixed version diagnostic"
     ),
-    "vulnclaw/cli/tui.py:2623:subprocess.run": (
+    "vulnclaw/cli/tui.py:2636:subprocess.run": (
         "operator control plane: Windows Get-Clipboard via powershell for /config paste"
     ),
-    "vulnclaw/cli/tui.py:2662:subprocess.run": (
+    "vulnclaw/cli/tui.py:2675:subprocess.run": (
         "operator control plane: Unix pbpaste/wl-paste/xclip/xsel for /config paste"
     ),
     "vulnclaw/cli/main.py:3486:subprocess.run": (
