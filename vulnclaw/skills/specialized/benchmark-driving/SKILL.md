@@ -128,6 +128,14 @@ deepseek-v4-flash 实测分布（3 并行）：
 12. **重试 = 重新解题，不是重交旧 flag**：flag 按容器实例轮换的平台，
     历史 flag 必然失效；solve prompt 必须显式写明"历史 flag 已失效"，
     否则模型会从 playbook/writeup 里捡旧 flag 直接提交。
+13. **协议类流量先找"说明书"**：拿到 pcap 第一件事不是逐流解码，而是
+    grep 明文可读段（deprecated/runbook/wiki/documentation 等关键词）——
+    出题人常把完整协议规范以"遗留通道说明/内部 wiki"形式埋在明文流量里，
+    找到它协议逆向从 20 轮降到 1 轮（ghostpatch 实测）。方法论详见
+    `references/protocol-reverse-methodology.md`。
+14. **握手密码学弱点检查**：小模数 DH（p < 64 bit 用 sympy.discrete_log
+    秒解）、无认证 DH（MITM）、RC4/异或流密码（已知明文恢复 keystream）——
+    确认加密层后按帧类型价值排序：SHELL/EXEC > 文件读取 > 枚举 > 调试帧。
 
 ## 六、参照实现
 
