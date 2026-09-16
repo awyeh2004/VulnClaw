@@ -93,9 +93,6 @@ ALLOWED_SPAWN_SITES: dict[str, str] = {
     "vulnclaw/agent/builtin_tools.py:3990:subprocess.run": (
         "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)"
     ),
-    "vulnclaw/agent/builtin_tools.py:3990:subprocess.run": (
-        "structured argv non-privileged nmap retry"
-    ),
     "vulnclaw/report/verifier.py:487:subprocess.run": (
         "generated-PoC verification after synchronous ExecutionGate approval"
     ),
