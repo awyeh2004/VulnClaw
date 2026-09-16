@@ -136,6 +136,11 @@ deepseek-v4-flash 实测分布（3 并行）：
 14. **握手密码学弱点检查**：小模数 DH（p < 64 bit 用 sympy.discrete_log
     秒解）、无认证 DH（MITM）、RC4/异或流密码（已知明文恢复 keystream）——
     确认加密层后按帧类型价值排序：SHELL/EXEC > 文件读取 > 枚举 > 调试帧。
+15. **慢线路靶机的批量请求必须并发**：跨海/跨区线路单请求往返 1-3 秒，
+    串行 for 循环逐个 curl 会把整批拖到分钟级（且单个超时全批陪葬）。
+    正确做法：`requests.Session` 复用连接 + `ThreadPoolExecutor` 并发
+    （10 线程，20 请求串行 30s → 并发 3s）；shell_command 里写 curl 循环
+    是最差形态（PowerShell 启动开销 + 无连接复用 + 逐个超时叠加）。
 
 ## 六、参照实现
 
