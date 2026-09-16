@@ -138,7 +138,7 @@ scan_full.py
 disasm*.txt
 out*.txt
 
-# DataCon EncFlask 探测产物 (临时, 含会话 cookie 与靶机数据)
+# DataCon 解题产物 (探针脚本/页面快照/cookie/块分析, EncFlask 会话数据)
 adm_home.html
 alive.html
 body_*.bin
@@ -156,20 +156,14 @@ lognew.txt
 marker.txt
 md5test.py
 out*.html
-pwn_tmp/
-upstream_tree/
-
-# DataCon 探针/快照零散产物 (probe1-10, gsearch1-3, md5test, page_*, out1 等)
-probe*.py
-gsearch*.py
-md5test.py
-page_*.html
 out1.html
 p_b64.txt
 p_ssrf*.py
-hello.asm
-body_*.bin
+page_*.html
+probe*.py
+pwn_tmp/
 regnew.txt
+upstream_tree/
 vres.txt
 w1block.txt
 w*.html
