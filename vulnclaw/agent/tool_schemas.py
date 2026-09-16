@@ -405,12 +405,17 @@ def append_builtin_tool_schemas(
                 "description": (
                     "执行 Python 代码片段。用于:构造复杂 HTTP 请求并解析响应、"
                     "做编码转换和数据处理、批量测试不同 payload、比较响应差异、"
-                    "执行数学计算等。代码在受限环境中执行,超时 30 秒。"
+                    "执行数学计算等。代码在受限环境中执行,默认超时 30 秒"
+                    "(可用 timeout 参数调整,上限 300)。"
                     "预装库:requests, beautifulsoup4, pycryptodome, base64, json, re 等。"
                     "普通 HTTP/HTTPS 请求优先使用 fetch 或 http_probe_batch,避免用 Python 手写请求浪费上下文;"
                     "只有需要复杂解析、生成 payload 或批量逻辑时再使用此工具。"
                     "工作目录默认与 shell_command 一致（进程 cwd）；若依赖 shell_command 下载/生成的文件，"
                     "请在代码里使用绝对路径，或通过 workdir 指定目录。"
+                    "性能模式: 批量请求必须用 Session 复用连接 + 线程池并发"
+                    "(from concurrent.futures import ThreadPoolExecutor; "
+                    "ex.map(lambda p: s.get(url, params={'q':p}, timeout=10), payloads)),"
+                    "禁止串行 for 循环逐个请求 — 20 个串行请求约 30s(整批超时), 并发仅 3s。"
                 ),
                 "parameters": {
                     "type": "object",
