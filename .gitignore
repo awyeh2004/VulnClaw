@@ -169,3 +169,8 @@ p_b64.txt
 p_ssrf*.py
 hello.asm
 body_*.bin
+regnew.txt
+vres.txt
+w1block.txt
+w*.html
+w*.txt
