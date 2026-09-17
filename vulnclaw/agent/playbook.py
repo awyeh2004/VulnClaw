@@ -24,6 +24,27 @@ from typing import Any, Optional
 
 from vulnclaw.config.settings import CONFIG_DIR
 
+MIN_PLAYBOOK_CHARS = 80  # minimum steps length (prevents 3-line low-effort entries)
+_FLAG_FINGERPRINT_RE = re.compile(r"(flag|FLAG|ctf|CTF)\{([^{}]{4,80})\}")
+
+
+def _fingerprint_flags(text: str) -> str:
+    """Replace full flag values with first4…last4 fingerprints.
+
+    Cross-instance hygiene: flags rotate per container instance; storing the
+    full value lets a future run mistakenly resubmit a stale flag. The
+    fingerprint preserves enough structure for the model to recognise the
+    pattern while preventing accidental resubmission.
+    """
+
+    def _fp(m: re.Match) -> str:
+        prefix, inner = m.group(1), m.group(2)
+        if len(inner) > 12:
+            return f"{prefix}{{{inner[:4]}…{inner[-4:]}}}"
+        return m.group(0)
+
+    return _FLAG_FINGERPRINT_RE.sub(_fp, text)
+
 PLAYBOOKS_DIR = CONFIG_DIR / "playbooks"
 
 # Tokens that are (almost) never meaningful for challenge identity and only add
@@ -195,8 +216,27 @@ def save_playbook(
     status: str = "draft",
     slug: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Persist (or cover-update) a playbook. Returns a small ack dict."""
+    """Persist (or cover-update) a playbook. Returns a small ack dict.
+
+    Quality validation (inspired by heimdall brief-summarizer):
+    1. steps must be >= MIN_PLAYBOOK_CHARS (prevents 3-line low-effort entries)
+    2. must contain at least one of LOCK/CONFIRMED/ANGLES headings (structured)
+    3. full flag values are fingerprinted to flag{first4…last4} (cross-instance hygiene)
+    """
     ensure_dirs()
+
+    # ── Quality gates ─────────────────────────────────────────────────
+    stripped = steps.strip()
+    if len(stripped) < MIN_PLAYBOOK_CHARS:
+        return {"error": f"steps too short ({len(stripped)} chars, min {MIN_PLAYBOOK_CHARS}); "
+                 "write LOCK / CONFIRMED / ANGLES with real evidence"}
+    low = stripped.lower()
+    if "lock" not in low and "confirmed" not in low and "angles" not in low:
+        return {"error": "missing structured headings (LOCK / CONFIRMED / ANGLES)"}
+
+    # ── Flag fingerprinting ───────────────────────────────────────────
+    steps = _fingerprint_flags(stripped)
+
     status = "validated" if status == "validated" else "draft"
     slug = slug or _slugify(name)
     from datetime import datetime, timezone
