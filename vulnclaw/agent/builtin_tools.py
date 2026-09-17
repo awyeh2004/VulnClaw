@@ -1266,7 +1266,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         return execute_evidence_tool(agent, tool_name, args)
 
 # ── Blackboard reasoning graph ──
-    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_verify_fact", "blackboard_challenge_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent", "blackboard_review"):
+    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_verify_fact", "blackboard_challenge_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent", "blackboard_review", "blackboard_set_lock", "blackboard_create_angle", "blackboard_hit_angle", "blackboard_miss_angle", "blackboard_create_tension"):
         try:
             from vulnclaw.agent.blackboard import dispatch_blackboard_tool
             return await dispatch_blackboard_tool(agent, tool_name, args)
@@ -1538,6 +1538,11 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "blackboard_start_intent",
     "blackboard_reject_intent",
     "blackboard_review",
+    "blackboard_set_lock",
+    "blackboard_create_angle",
+    "blackboard_hit_angle",
+    "blackboard_miss_angle",
+    "blackboard_create_tension",
     "lookup_playbook",
     "save_playbook",
     "web_map_add",
@@ -1829,6 +1834,105 @@ def build_openai_tools(
                         },
                     },
                     "required": ["node_id"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_set_lock",
+                "description": "Set or replace your current understanding of what this challenge tests and where the flag likely lives. Replaces the previous LOCK. The LOCK wins over speculation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "One-sentence LOCK statement (e.g. 'WordPress 5.x site, flag likely in wp-config.php behind auth bypass on /wp-admin')",
+                        },
+                    },
+                    "required": ["description"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_create_angle",
+                "description": "Register an untried attack surface/direction for systematic coverage. Each angle should be a specific testable hypothesis.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Attack surface description (e.g. 'sqli on login param', 'IDOR on /api/user/1')",
+                        },
+                        "parent_id": {
+                            "type": "string",
+                            "description": "Optional parent angle this refines",
+                        },
+                    },
+                    "required": ["description"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_hit_angle",
+                "description": "Mark an angle as tried and it produced a positive result (vulnerability confirmed, data leaked, etc).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "The angle node ID to mark as hit",
+                        },
+                    },
+                    "required": ["node_id"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_miss_angle",
+                "description": "Mark an angle as tried and it did not work (no vulnerability, false positive, etc).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "The angle node ID to mark as miss",
+                        },
+                    },
+                    "required": ["node_id"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_create_tension",
+                "description": "Record two mutually exclusive judgments that coexist and cannot both be true. Forces explicit resolution instead of silent contradiction.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the contradiction (e.g. 'evidence A suggests XSS is possible, but CSP header blocks inline scripts')",
+                        },
+                    },
+                    "required": ["description"],
                 },
             },
         }
