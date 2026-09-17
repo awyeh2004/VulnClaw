@@ -483,6 +483,17 @@ def _no_path_rejection_reason(state: AgentState, no_path_text: str) -> str:
     )
 
 
+def _no_path_open_angles(agent: AgentState) -> int:
+    """Count ANGLE nodes still in open (PROPOSED) status on the blackboard.
+
+    Used to enforce coverage: NO_PATH is premature if untried angles remain.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return 0
+    return len(bb.open_angles())
+
+
 def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     """Reject premature user questions when evidence says the agent should continue."""
 
@@ -1080,6 +1091,19 @@ async def _solve_impl(
         if _has_marker(cleaned, _NO_PATH_MARKERS):
             no_path = _after_marker(cleaned, _NO_PATH_MARKERS) or cleaned
             rejection = _no_path_rejection_reason(state, no_path)
+            if not rejection:
+                # Coverage tracking: open ANGLES block NO_PATH even when the
+                # near-miss heuristic passes (audit v4 risk 3 — the prompt
+                # promises this behavior, so the code must enforce it too).
+                bb = getattr(agent, "runtime", None) and getattr(
+                    agent.runtime, "blackboard", None
+                )
+                open_angles = len(bb.open_angles()) if bb else 0
+                if open_angles > 0:
+                    rejection = (
+                        f"{open_angles} open ANGLES remain — close them (hit/miss) "
+                        "before claiming no viable path"
+                    )
             if rejection:
                 state.add_correction_hint(rejection)
                 emit("no_path_rejected", {"reason": rejection})
