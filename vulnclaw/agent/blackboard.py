@@ -530,6 +530,7 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
 
     if tool_name == "blackboard_create_angle":
         desc = args.get("description", "")
+        parent = args.get("parent_id")
         if not desc:
             return "[!] blackboard_create_angle requires 'description'"
         node = bb.create_angle(desc, parent_id=parent)
