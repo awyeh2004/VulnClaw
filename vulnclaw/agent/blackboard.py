@@ -27,6 +27,9 @@ class NodeType(str, Enum):
     FACT = "fact"
     INTENT = "intent"
     HINT = "hint"
+    ANGLE = "angle"
+    LOCK = "lock"
+    TENSION = "tension"
 
 
 class NodeStatus(str, Enum):
@@ -191,6 +194,23 @@ class Blackboard:
             for h in hints:
                 parts.append(f"  💡 {h.description}")
 
+        lock = self.current_lock()
+        if lock:
+            parts.append(f"[LOCK — 当前锁定的题面理解, 替换须显式更新]")
+            parts.append(f"  🔒 {lock.description}")
+
+        angles_open = self.open_angles()
+        if angles_open:
+            parts.append(f"[ANGLES — 未试攻击面 ({len(angles_open)})] 按序尝试, 不要跳过")
+            for a in angles_open[:6]:
+                parts.append(f"  🔺 {a.description}")
+
+        tensions = self.open_tensions()
+        if tensions:
+            parts.append(f"[TENSION — 矛盾判断 ({len(tensions)})] 两者不能同时为真, 需消解")
+            for tn in tensions[:4]:
+                parts.append(f"  ⚡ {tn.description}")
+
         parts.append("=== End Blackboard ===")
         return "\n".join(parts)
 
@@ -308,6 +328,54 @@ class Blackboard:
 
     def create_hint(self, description: str, parent_id: Optional[str] = None) -> BlackboardNode:
         return self._add_node(NodeType.HINT, NodeStatus.CONFIRMED, description, parent_id)
+
+    def create_angle(self, description: str, parent_id: Optional[str] = None) -> BlackboardNode:
+        """Register an untried attack surface / direction for systematic coverage."""
+        return self._add_node(NodeType.ANGLE, NodeStatus.PROPOSED, description, parent_id)
+
+    def hit_angle(self, node_id: str) -> Optional[BlackboardNode]:
+        """Mark an angle as tried and it worked."""
+        node = self._nodes.get(node_id)
+        if not node or node.type != NodeType.ANGLE:
+            return None
+        node.status = NodeStatus.CONFIRMED
+        node.updated_at = datetime.now(timezone.utc).isoformat()
+        return node
+
+    def miss_angle(self, node_id: str) -> Optional[BlackboardNode]:
+        """Mark an angle as tried and it didn't work."""
+        node = self._nodes.get(node_id)
+        if not node or node.type != NodeType.ANGLE:
+            return None
+        node.status = NodeStatus.CHALLENGED
+        node.updated_at = datetime.now(timezone.utc).isoformat()
+        return node
+
+    def open_angles(self) -> list[BlackboardNode]:
+        """Angles not yet tried (PROPOSED status)."""
+        return [n for n in self._nodes.values() if n.type == NodeType.ANGLE and n.status == NodeStatus.PROPOSED]
+
+    def set_lock(self, description: str) -> BlackboardNode:
+        """Set or replace the current LOCK (challenge understanding). Replace semantics:
+        the old LOCK is superseded."""
+        for n in self._nodes.values():
+            if n.type == NodeType.LOCK and n.status == NodeStatus.CONFIRMED:
+                n.status = NodeStatus.SUPERSEDED
+                n.updated_at = datetime.now(timezone.utc).isoformat()
+        return self._add_node(NodeType.LOCK, NodeStatus.CONFIRMED, description, None)
+
+    def current_lock(self) -> Optional[BlackboardNode]:
+        for n in self._nodes.values():
+            if n.type == NodeType.LOCK and n.status == NodeStatus.CONFIRMED:
+                return n
+        return None
+
+    def create_tension(self, description: str) -> BlackboardNode:
+        """Record a pair of mutually exclusive judgments that coexist."""
+        return self._add_node(NodeType.TENSION, NodeStatus.CONFIRMED, description, None)
+
+    def open_tensions(self) -> list[BlackboardNode]:
+        return [n for n in self._nodes.values() if n.type == NodeType.TENSION and n.status == NodeStatus.CONFIRMED]
 
     def start_intent(self, node_id: str) -> None:
         node = self._nodes.get(node_id)
@@ -450,6 +518,43 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
                 f"Do not retry the same failed approach without a materially new angle."
             )
         return f"[blackboard] intent {node.id} declared: {desc}"
+
+    # ── Coverage tracking: LOCK / ANGLES / TENSION ─────────────────────
+
+    if tool_name == "blackboard_set_lock":
+        desc = args.get("description", "")
+        if not desc:
+            return "[!] blackboard_set_lock requires 'description'"
+        node = bb.set_lock(desc)
+        return f"[blackboard] LOCK set ({node.id}): {desc}"
+
+    if tool_name == "blackboard_create_angle":
+        desc = args.get("description", "")
+        if not desc:
+            return "[!] blackboard_create_angle requires 'description'"
+        node = bb.create_angle(desc, parent_id=parent)
+        return f"[blackboard] angle {node.id} registered: {desc}"
+
+    if tool_name == "blackboard_hit_angle":
+        node_id = args.get("node_id", "")
+        node = bb.hit_angle(node_id)
+        if not node:
+            return f"[!] blackboard: angle {node_id} not found"
+        return f"[blackboard] angle {node_id} HIT: {node.description}"
+
+    if tool_name == "blackboard_miss_angle":
+        node_id = args.get("node_id", "")
+        node = bb.miss_angle(node_id)
+        if not node:
+            return f"[!] blackboard: angle {node_id} not found"
+        return f"[blackboard] angle {node_id} MISS: {node.description}"
+
+    if tool_name == "blackboard_create_tension":
+        desc = args.get("description", "")
+        if not desc:
+            return "[!] blackboard_create_tension requires 'description'"
+        node = bb.create_tension(desc)
+        return f"[blackboard] tension {node.id} recorded: {desc}"
 
 
 def _run_blackboard_review(bb: Blackboard, evidence_by_id: dict[str, str]) -> list[str]:
