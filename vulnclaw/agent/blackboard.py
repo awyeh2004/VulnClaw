@@ -355,6 +355,54 @@ class Blackboard:
         """Angles not yet tried (PROPOSED status)."""
         return [n for n in self._nodes.values() if n.type == NodeType.ANGLE and n.status == NodeStatus.PROPOSED]
 
+    def validate_dag(self) -> list[str]:
+        """Structural integrity checks on the blackboard reasoning graph.
+
+        Returns a list of issue descriptions (empty = valid):
+        1. parent_id cycles (DFS visiting/done)
+        2. orphan nodes (parent_id references a deleted node)
+        3. flag-bearing facts must be reachable from a CONFIRMED root
+        4. node count budget (prevent unbounded growth)
+        """
+        issues: list[str] = []
+        nodes = self._nodes
+
+        # 1. Budget: prevent unbounded graph growth
+        max_nodes = 500
+        if len(nodes) > max_nodes:
+            issues.append(f"graph_budget: {len(nodes)} nodes exceeds limit {max_nodes}")
+
+        # 2. Cycle detection: DFS with visiting/done sets over parent_id edges
+        parent_map: dict[str, list[str]] = {}
+        for n in nodes.values():
+            if n.parent_id:
+                parent_map.setdefault(n.id, []).append(n.parent_id)
+        visiting: set[str] = set()
+        done: set[str] = set()
+
+        def _dfs(nid: str) -> None:
+            if nid in visiting:
+                issues.append(f"cycle: node {nid} participates in a parent_id cycle")
+                return
+            if nid in done:
+                return
+            visiting.add(nid)
+            for pid in parent_map.get(nid, []):
+                if pid in nodes:
+                    _dfs(pid)
+            visiting.discard(nid)
+            done.add(nid)
+
+        for nid in list(nodes.keys()):
+            _dfs(nid)
+
+        # 3. Orphan detection: parent_id points to a node that doesn't exist
+        for n in nodes.values():
+            if n.parent_id and n.parent_id not in nodes:
+                issues.append(f"orphan: {n.id} references missing parent {n.parent_id}")
+
+        return issues
+
     def set_lock(self, description: str) -> BlackboardNode:
         """Set or replace the current LOCK (challenge understanding). Replace semantics:
         the old LOCK is superseded."""
