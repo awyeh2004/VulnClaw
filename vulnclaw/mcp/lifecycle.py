@@ -124,6 +124,10 @@ class MCPLifecycleManager(ProbeMixin):
         # per (event loop, server). This protects shared stateful stdio sessions
         # across parent tools and every sub-agent.
         self._server_call_gates: dict[tuple[int, str], asyncio.Semaphore] = {}
+        # Same loop-binding concern for session CREATION: the chrome-devtools
+        # preinit task and the first tool call race on the same cache, and the
+        # loser's context-manager teardown kills the winner's in-flight call.
+        self._stdio_session_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
     async def __aenter__(self) -> MCPLifecycleManager:
         self.start_enabled_servers()
@@ -483,7 +487,28 @@ class MCPLifecycleManager(ProbeMixin):
                     session.call_tool(tool_name, arguments=arguments), timeout=timeout_s
                 )
 
+    def _stdio_session_lock(self, server_name: str) -> asyncio.Lock:
+        """One creation lock per (event loop, server), mirroring _server_call_gates."""
+        key = (id(asyncio.get_running_loop()), server_name)
+        lock = self._stdio_session_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._stdio_session_locks[key] = lock
+        return lock
+
     async def _get_or_create_persistent_stdio_session(self, server_name: str) -> Any:
+        """Return the persistent stdio session, creating it at most once per loop.
+
+        Serialized because the chrome-devtools preinit task (scheduled from
+        start_enabled_servers) and the first tool call can reach the cache
+        concurrently; the cache check below alone cannot dedupe two concurrent
+        creators, and the loser's context-manager athrow tears down the winner's
+        in-flight request ('Connection closed' / stray CancelledError).
+        """
+        async with self._stdio_session_lock(server_name):
+            return await self._create_persistent_stdio_session(server_name)
+
+    async def _create_persistent_stdio_session(self, server_name: str) -> Any:
         """Create and cache a persistent stdio-backed MCP session for the current loop."""
         # stdio_client is an anyio TaskGroup-based async generator. When the
         # per-request event loop tears down (asyncio.run -> shutdown_asyncgens),
