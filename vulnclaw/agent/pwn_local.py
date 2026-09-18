@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import shlex
 import shutil
@@ -46,6 +47,20 @@ _GLIBC_IMAGE_MAP: list[tuple[tuple[int, int], str]] = [
     ((2, 31), "20.04"),
 ]
 _DEFAULT_IMAGE_TAG = "22.04"
+
+# (EOL tags kept for reference; apt repoint now uses the CN mirror for all tags)
+# plain `apt-get update` on archive.ubuntu.com 404s for these.
+_EOL_TAGS = {"16.04", "18.04", "20.04"}
+
+# Docker Hub is unreachable from some networks (DNS poisoning); these mirror
+# prefixes are used as fallbacks when a direct pull fails. Override with
+# VULNCLAW_DOCKER_MIRRORS="m1,m2".
+_DEFAULT_MIRRORS = [
+    "docker.1ms.run",
+    "docker.m.daocloud.io",
+    "hub.rat.dev",
+    "dockerproxy.net",
+]
 
 HELPER_IMAGE = "vulnclaw-pwn"
 
@@ -103,11 +118,23 @@ def helper_image_name(tag: str) -> str:
 
 
 def helper_dockerfile(tag: str) -> str:
-    """Distro image + socat + 32-bit runtime so both arches replay anywhere."""
+    """Distro image + socat + 32-bit runtime so both arches replay anywhere.
+
+    apt sources are repointed to a mirror for every tag: EOL distros (16.04
+    etc.) no longer exist on archive.ubuntu.com at all, and the mirror is
+    reachable from CN networks with or without a VPN. Override with
+    VULNCLAW_APT_MIRROR.
+    """
+    mirror = os.environ.get(
+        "VULNCLAW_APT_MIRROR", "mirrors.aliyun.com/ubuntu"
+    ).strip().rstrip("/")
     return (
         f"FROM ubuntu:{tag}\n"
         "ENV DEBIAN_FRONTEND=noninteractive\n"
-        "RUN dpkg --add-architecture i386 && apt-get update && "
+        f"RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://{mirror}|g; "
+        "s|http://security.ubuntu.com/ubuntu|"
+        f"http://{mirror}|g' /etc/apt/sources.list && "
+        "dpkg --add-architecture i386 && apt-get update && "
         "apt-get install -y --no-install-recommends socat libc6:i386 && "
         "rm -rf /var/lib/apt/lists/*\n"
     )
@@ -152,12 +179,49 @@ def _run(cmd: list[str], *, timeout_s: float = 120) -> tuple[int, str, str]:
     return _spawn([docker, *cmd], timeout_s=timeout_s)
 
 
+def _mirror_list() -> list[str]:
+    custom = os.environ.get("VULNCLAW_DOCKER_MIRRORS", "").strip()
+    if custom:
+        return [m.strip() for m in custom.split(",") if m.strip()]
+    return list(_DEFAULT_MIRRORS)
+
+
+def _pull_base_image(tag: str) -> tuple[bool, str]:
+    """Pull library/ubuntu:<tag> directly, falling back to mirror prefixes.
+
+    Returns (ok, error_message). Direct-first keeps VPN'd setups on the
+    canonical image; mirrors cover networks where Hub is DNS-poisoned.
+    """
+    attempts: list[list[str]] = [["pull", f"library/ubuntu:{tag}"]]
+    for mirror in _mirror_list():
+        attempts.append(["pull", f"{mirror}/library/ubuntu:{tag}"])
+    last_err = ""
+    for cmd in attempts:
+        code, _out, err = _run(cmd, timeout_s=600)
+        if code == 0:
+            if cmd[1].startswith("docker.io/") is False and "/" in cmd[1].split(":")[0]:
+                # retag mirror image to the canonical name the Dockerfile FROM uses
+                _run(["tag", cmd[1], f"ubuntu:{tag}"], timeout_s=30)
+            return True, ""
+        last_err = (err or "").strip()[-300:]
+    return False, last_err
+
+
 def _ensure_helper_image(tag: str) -> tuple[bool, str]:
     """Build the socat-enabled distro image once; skip when already present."""
     image = helper_image_name(tag)
     code, out, _err = _run(["images", "-q", image], timeout_s=30)
     if code == 0 and out.strip():
         return True, image
+    # The build needs the ubuntu:<tag> base; Hub may be unreachable directly.
+    code, out, _err = _run(["images", "-q", f"ubuntu:{tag}"], timeout_s=30)
+    if not (code == 0 and out.strip()):
+        ok, err = _pull_base_image(tag)
+        if not ok:
+            return False, (
+                f"[pwn_local] cannot obtain base image ubuntu:{tag} "
+                f"(direct + mirrors failed): {err}"
+            )
     with tempfile.TemporaryDirectory() as td:
         df = Path(td) / "Dockerfile"
         df.write_text(helper_dockerfile(tag), encoding="utf-8")
