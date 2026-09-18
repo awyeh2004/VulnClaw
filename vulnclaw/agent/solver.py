@@ -494,6 +494,49 @@ def _no_path_open_angles(agent: AgentState) -> int:
     return len(bb.open_angles())
 
 
+def _no_path_coverage_thin(agent: AgentState) -> bool:
+    """True when the blackboard is too empty to support any NO_PATH claim.
+
+    The ANGLES coverage gate is vacuous if the model never registers surfaces:
+    with zero ANGLES and (almost) nothing confirmed, "no viable path" is just
+    an early quit. Loose thresholds — only the truly-empty board is blocked.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return False  # no blackboard: cannot judge, do not block
+    from vulnclaw.agent.blackboard import NodeType
+
+    angles = sum(1 for n in bb.all_nodes() if n.type == NodeType.ANGLE)
+    facts = len(bb.confirmed_facts())
+    return angles == 0 and facts < 2
+
+
+def _auto_review_blackboard(agent: AgentState, state: AgentState) -> list[str]:
+    """Run the Review-Arbiter over the blackboard unconditionally.
+
+    The review (witness-check facts against evidence, merge duplicates, flag
+    dead intents) previously ran only when the model chose to call
+    blackboard_review — past runs never did. Returns actionable messages;
+    also marks the challenged/merged state on the blackboard itself.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return []
+    try:
+        from vulnclaw.agent.blackboard import _run_blackboard_review
+    except Exception:
+        return []
+    evidence_by_id = {
+        ev.id: getattr(ev, "content", "")
+        for ev in getattr(state, "evidence", [])
+        if getattr(ev, "id", None)
+    }
+    try:
+        return _run_blackboard_review(bb, evidence_by_id)
+    except Exception:
+        return []
+
+
 def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     """Reject premature user questions when evidence says the agent should continue."""
 
@@ -999,6 +1042,22 @@ async def _solve_impl(
             except Exception:
                 pass
 
+        if step % 10 == 0:
+            # Periodic Review-Arbiter: challenge uncorroborated facts and merge
+            # duplicates regardless of whether the model calls blackboard_review.
+            try:
+                review_results = _auto_review_blackboard(agent, state)
+                if review_results:
+                    review_text = "; ".join(review_results[:6])
+                    state.add_correction_hint(review_text)
+                    emit("auto_review", {"findings": len(review_results)})
+                    agent.context.add_user_message(
+                        "[auto-review] " + review_text
+                        + " — reassess the affected facts before relying on them."
+                    )
+            except Exception:
+                pass
+
         try:
             bb = getattr(agent.runtime, "blackboard", None)
             bb_summary = bb.summary() if bb else ""
@@ -1140,6 +1199,15 @@ async def _solve_impl(
                         f"{open_angles} open ANGLES remain — close them (hit/miss) "
                         "before claiming no viable path"
                     )
+            if not rejection and _no_path_coverage_thin(agent):
+                # Empty-board escape hatch: with no ANGLES ever registered and
+                # almost nothing confirmed, the coverage gate above never fires.
+                rejection = (
+                    "coverage too thin to claim no viable path: no ANGLES "
+                    "registered and fewer than 2 confirmed facts — record the "
+                    "surfaces you considered (blackboard_create_angle) and "
+                    "verified findings (blackboard_add_fact) before giving up"
+                )
             if rejection:
                 state.add_correction_hint(rejection)
                 emit("no_path_rejected", {"reason": rejection})
