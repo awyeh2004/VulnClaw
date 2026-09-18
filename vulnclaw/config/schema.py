@@ -490,6 +490,14 @@ class SessionConfig(BaseModel):
         default=240,
         description="Runaway safety cap for model-led solve turns; not a planned workflow length",
     )
+    solve_max_model_tokens: int = Field(
+        default=6_000_000,
+        description=(
+            "Hard cap on cumulative LLM tokens (prompt+completion) for one solve "
+            "run; 0 disables. The loop stops with a budget-exhausted reason once "
+            "exceeded — auto-captured run notes still persist the findings."
+        ),
+    )
     solve_max_directions: int = Field(
         default=3,
         description="Deprecated compatibility field; model-led solve no longer plans research directions",

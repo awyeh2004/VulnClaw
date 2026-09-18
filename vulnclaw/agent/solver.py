@@ -9,9 +9,13 @@ Tool choice and investigation strategy are deliberately left to the model.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from vulnclaw.agent.agent_state import (
@@ -908,6 +912,77 @@ def _thinking_repetition_hint(state: AgentState, text: str, threshold: float = 0
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return True  # cannot tell — assume alive to stay safe
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _solve_lock_path(target: str) -> Path:
+    from vulnclaw.config.settings import CONFIG_DIR
+
+    key = hashlib.sha1((target or "").encode("utf-8")).hexdigest()[:16]
+    return CONFIG_DIR / "solve_locks" / f"{key}.lock"
+
+
+def _acquire_solve_lock(target: str) -> Optional[dict[str, Any]]:
+    """Return the ACTIVE holder's info if another solve owns this target, else
+    acquire the lock and return None. Stale locks (dead pid) are overwritten."""
+    from vulnclaw.config.settings import CONFIG_DIR
+
+    path = _solve_lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            info = None
+        if (
+            info
+            and int(info.get("pid", 0)) != os.getpid()
+            and _pid_alive(int(info.get("pid", 0)))
+        ):
+            holder = dict(info)
+            holder["lock_path"] = str(path)
+            return holder
+    path.write_text(
+        json.dumps(
+            {"pid": os.getpid(), "target": target, "started": time.strftime("%H:%M:%S")}
+        ),
+        encoding="utf-8",
+    )
+    return None
+
+
+def _release_solve_lock(target: str) -> None:
+    path = _solve_lock_path(target)
+    try:
+        if path.exists():
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if int(info.get("pid", 0)) == os.getpid():
+                path.unlink()
+    except Exception:
+        pass
+
+
 def _prepare_state(agent: AgentContext, *, origin: str, goal: str) -> AgentState:
     state = agent.context.state.agent_state
     should_reset = bool(
@@ -938,6 +1013,22 @@ async def solve(
     """Run the model-led solve loop."""
 
     reset_root_context(agent)
+    # One solver per target: two concurrent runs on the same challenge fight
+    # over single-connection services, clobber each other's files and double
+    # the token burn (seen in practice). Stale locks (dead pid) auto-clear.
+    lock_holder = _acquire_solve_lock(origin)
+    if lock_holder is not None:
+        return SolveResult(
+            completed=False,
+            reason=(
+                f"another solve run is active for this target "
+                f"(pid {lock_holder.get('pid')}, started {lock_holder.get('started')}); "
+                "stop it first or wait for it to finish"
+            ),
+            steps=0,
+            evidence=0,
+            agent_state=agent.context.state.agent_state,
+        )
     try:
         return await _solve_impl(
             agent,
@@ -950,6 +1041,7 @@ async def solve(
             on_event=on_event,
         )
     finally:
+        _release_solve_lock(origin)
         await shutdown_subagents(agent)
 
 
@@ -1018,10 +1110,32 @@ async def _solve_impl(
     needs_user = False
     reason = "runaway safety budget reached"
 
+    token_budget = 0
+    try:
+        from vulnclaw.config.settings import load_config
+
+        token_budget = int(
+            getattr(load_config().session, "solve_max_model_tokens", 0) or 0
+        )
+    except Exception:
+        token_budget = 0
+
     for step in range(1, max(1, max_steps) + 1):
         if state.completed:
             reason = state.complete_reason
             break
+
+        if token_budget > 0:
+            used = state.llm_usage_prompt_tokens + state.llm_usage_completion_tokens
+            if used > token_budget:
+                reason = (
+                    f"token budget exhausted: {used} tokens used > "
+                    f"{token_budget} (session.solve_max_model_tokens); captured "
+                    "run notes hold the conclusions gathered so far"
+                )
+                state.complete_reason = reason
+                emit("token_budget_exceeded", {"used": used, "budget": token_budget})
+                break
 
         before_tools = len(state.tool_calls)
         before_evidence = len(state.evidence)
@@ -1285,6 +1399,7 @@ async def _solve_impl(
             goal=goal,
             blackboard=getattr(agent.runtime, "blackboard", None),
             outcome=reason,
+            status="validated" if state.completed else "draft",
         )
     except Exception:
         pass
