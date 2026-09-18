@@ -1095,10 +1095,7 @@ async def _solve_impl(
                 # Coverage tracking: open ANGLES block NO_PATH even when the
                 # near-miss heuristic passes (audit v4 risk 3 — the prompt
                 # promises this behavior, so the code must enforce it too).
-                bb = getattr(agent, "runtime", None) and getattr(
-                    agent.runtime, "blackboard", None
-                )
-                open_angles = len(bb.open_angles()) if bb else 0
+                open_angles = _no_path_open_angles(agent)
                 if open_angles > 0:
                     rejection = (
                         f"{open_angles} open ANGLES remain — close them (hit/miss) "
