@@ -46,6 +46,25 @@ def _jwt_exp(token: str) -> int | None:
         return None
 
 
+def _jwt_iat(token: str) -> int:
+    """Return the JWT ``iat`` (issued-at) claim, or 0 when absent/unparseable.
+
+    Session selection must rank by iat, not exp: a stale-but-long-exp JWT left
+    in leveldb otherwise beats the freshly minted one (whose exp is shorter),
+    and the server has already revoked it — the scraper then hands out a
+    zombie token that fails with TOKEN_EXPIRED.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return 0
+    try:
+        payload = json.loads(_b64d(parts[1]))
+        iat = payload.get("iat")
+        return int(iat) if isinstance(iat, (int, float)) else 0
+    except Exception:
+        return 0
+
+
 def _scan_leveldb_dir(leveldb_dir: str) -> list[tuple[int, str]]:
     """Return (exp, token) pairs found under a leveldb storage directory."""
     found: list[tuple[int, str]] = []
@@ -84,10 +103,14 @@ def _profiles() -> list[str]:
 
 
 def read_edge_session_token() -> str:
-    """Return the newest unexpired JWT for CTF2 across Browsers/profiles."""
+    """Return the newest-issued unexpired JWT for CTF2 across Browsers/profiles.
+
+    Ranked by ``iat`` (issued-at) first, ``exp`` second — see _jwt_iat for why
+    exp-ranking hands out server-revoked zombie tokens.
+    """
 
     now = int(time.time())
-    best: tuple[int, str] | None = None
+    best: tuple[int, int, str] | None = None
     for user_data_dir in _profiles():
         if not os.path.isdir(user_data_dir):
             continue
@@ -97,9 +120,10 @@ def read_edge_session_token() -> str:
                 for exp, tok in _scan_leveldb_dir(level):
                     if exp <= now:
                         continue
-                    if best is None or exp > best[0]:
-                        best = (exp, tok)
-    return best[1] if best else ""
+                    rank = (_jwt_iat(tok), exp)
+                    if best is None or rank > best[:2]:
+                        best = (rank[0], rank[1], tok)
+    return best[2] if best else ""
 
 
 def read_edge_session_token_any() -> str:
