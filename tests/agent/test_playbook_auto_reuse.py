@@ -129,3 +129,39 @@ def test_solver_prompt_injects_prior_brief():
 
     prompt = _system_prompt(_Agent(), _State())
     assert "Prior-run notes for this exact target" in prompt
+
+
+def test_lock_quality_gate_rejects_vague(tmp_playbooks):
+    from vulnclaw.agent.blackboard import Blackboard as BB
+
+    bb = BB()
+    assert bb.set_lock("unknown") is None            # placeholder
+    assert bb.set_lock("no idea yet") is None        # too short/few words
+    node = bb.set_lock("heap UAF on user description pointer; flag at /flag")
+    assert node is not None
+
+
+def test_capture_synthesizes_lock_from_final_answer(tmp_playbooks):
+    # Blackboard-avoidant run (0 usage) but completed: notes must not be empty.
+    ack = pb.capture_run_notes(
+        target="E:/x/challenge.elf",
+        goal="pwn it and capture the flag",
+        blackboard=None,
+        outcome="solved",
+        status="validated",
+        final_answer="Flag CTF2{xxxx} — heap UAF on description pointer, "
+        "libc leak via puts@got, system over free hook, /bin/sh desc trigger",
+    )
+    assert ack is not None and "error" not in ack
+    stored = (tmp_playbooks / f"{ack['slug']}.md").read_text(encoding="utf-8")
+    assert "LOCK: (from final answer)" in stored
+
+
+def test_capture_still_none_when_nothing_at_all(tmp_playbooks):
+    # Mid-run capture on an avoidant run: no board, no final answer yet.
+    assert (
+        pb.capture_run_notes(
+            target="http://t/", goal="g", blackboard=None, outcome="in progress"
+        )
+        is None
+    )

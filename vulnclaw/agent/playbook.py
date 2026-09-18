@@ -300,6 +300,7 @@ def capture_run_notes(
     blackboard: Any,
     outcome: str = "",
     status: str = "draft",
+    final_answer: str = "",
 ) -> Optional[dict[str, Any]]:
     """Deterministically persist confirmed run conclusions as a draft playbook.
 
@@ -307,35 +308,39 @@ def capture_run_notes(
     quota or a dead end), the solve loop calls this automatically — at intervals
     and at termination — so the next run of the same target starts from confirmed
     conclusions (LOCK / CONFIRMED facts / angle outcomes) instead of raw
-    evidence. Returns the save ack, or None when there is nothing worth keeping.
+    evidence. When the model never engaged the blackboard, a fallback LOCK is
+    synthesized from the final answer so the notes are never empty after a
+    completed run. Returns the save ack, or None when there is nothing at all.
     """
-    if blackboard is None:
-        return None
-    try:
-        from vulnclaw.agent.blackboard import NodeStatus, NodeType
-    except Exception:
-        return None
+    from vulnclaw.agent.blackboard import NodeStatus, NodeType
 
     lines: list[str] = []
-    lock = blackboard.current_lock()
+    lock = blackboard.current_lock() if blackboard is not None else None
     if lock is not None:
         lines.append(f"LOCK: {lock.description}")
-    facts = blackboard.confirmed_facts()
+    facts = blackboard.confirmed_facts() if blackboard is not None else []
     if facts:
         lines.append("CONFIRMED: " + "; ".join(f.description for f in facts[:8]))
-    mark = {
-        NodeStatus.CONFIRMED: "hit",
-        NodeStatus.CHALLENGED: "miss",
-        NodeStatus.PROPOSED: "open",
-    }
-    angle_bits = [
-        f"[{mark.get(n.status, '?')}] {n.description}"
-        for n in blackboard.all_nodes()
-        if n.type == NodeType.ANGLE
-    ]
+    angle_bits: list[str] = []
+    if blackboard is not None:
+        mark = {
+            NodeStatus.CONFIRMED: "hit",
+            NodeStatus.CHALLENGED: "miss",
+            NodeStatus.PROPOSED: "open",
+        }
+        angle_bits = [
+            f"[{mark.get(n.status, '?')}] {n.description}"
+            for n in blackboard.all_nodes()
+            if n.type == NodeType.ANGLE
+        ]
     if angle_bits:
         lines.append("ANGLES: " + "; ".join(angle_bits[:10]))
-    if not lines:  # empty blackboard — nothing trustworthy to persist
+    if not lines and final_answer:
+        # Blackboard-avoidant run: the completion declaration is still a real
+        # conclusion — keep it, clearly labelled, so reuse is not lost.
+        synth = " ".join(final_answer.split())[:300]
+        lines.append(f"LOCK: (from final answer) {synth}")
+    if not lines:
         return None
     lines.append(f"TARGET: {target}")
     lines.append(f"GOAL: {goal}")

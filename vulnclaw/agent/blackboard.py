@@ -17,6 +17,7 @@ traces the reasoning process end-to-end.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -424,14 +425,28 @@ class Blackboard:
 
         return issues
 
-    def set_lock(self, description: str) -> BlackboardNode:
+    def set_lock(self, description: str) -> Optional[BlackboardNode]:
         """Set or replace the current LOCK (challenge understanding). Replace semantics:
-        the old LOCK is superseded."""
+        the old LOCK is superseded.
+
+        Quality gate: a LOCK is the anchor for run-note reuse, so vague or
+        placeholder text is rejected — name the vulnerability class and where
+        the flag lives. Returns None (no node) when rejected.
+        """
+        text = (description or "").strip()
+        words = [w for w in re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", text)]
+        placeholders = {"unknown", "tbd", "todo", "none", "n/a", "暂无", "未知", "待定"}
+        if (
+            len(text) < 20
+            or len(words) < 4
+            or all(w.lower() in placeholders for w in words)
+        ):
+            return None
         for n in self._nodes.values():
             if n.type == NodeType.LOCK and n.status == NodeStatus.CONFIRMED:
                 n.status = NodeStatus.SUPERSEDED
                 n.updated_at = datetime.now(timezone.utc).isoformat()
-        return self._add_node(NodeType.LOCK, NodeStatus.CONFIRMED, description, None)
+        return self._add_node(NodeType.LOCK, NodeStatus.CONFIRMED, text, None)
 
     def current_lock(self) -> Optional[BlackboardNode]:
         for n in self._nodes.values():
@@ -595,6 +610,13 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         if not desc:
             return "[!] blackboard_set_lock requires 'description'"
         node = bb.set_lock(desc)
+        if node is None:
+            return (
+                "[!] LOCK rejected as too vague — name the vulnerability class "
+                "and your flag-location hypothesis (>=20 chars, e.g. 'LOCK: "
+                "heap UAF on user description ptr; flag likely at /flag') and "
+                "retry"
+            )
         return f"[blackboard] LOCK set ({node.id}): {desc}"
 
     if tool_name == "blackboard_create_angle":
