@@ -194,6 +194,20 @@ async def create_target(practice_id: str, challenge_id: str) -> dict:
     )
 
 
+async def stop_target(practice_id: str, challenge_id: str) -> dict:
+    """Release a practice target (DELETE the session target resource).
+
+    Call after the flag is captured/submitted so the container slot is freed
+    instead of lingering until the platform TTL reclaims it.
+    """
+    client = get_client(timeout=60.0)
+    return await _session_request(
+        client,
+        "DELETE",
+        f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+    )
+
+
 async def submit_flag(practice_id: str, challenge_id: str, flag: str) -> dict:
     """Submit a confirmed practice flag (requires ``confirmation: true``)."""
     client = get_client()
