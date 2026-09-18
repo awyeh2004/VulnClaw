@@ -446,6 +446,26 @@ async def _stream_chat_completion_message(
     if reasoning_buffer:
         full_text += f"<thinking>\n{reasoning_buffer}\n</thinking>\n"
     stream_sink.on_stream_end()
+    # Streaming responses do not carry reliable usage totals here (the
+    # usage-only final chunk is skipped above and include_usage is not
+    # universally supported), so record an estimate — otherwise the token
+    # budget guard is blind on streaming runs (TUI), which is worse than a
+    # ±20% approximation.
+    try:
+        from vulnclaw.agent.token_counter import estimate_tokens
+
+        state = getattr(getattr(agent, "context", None), "state", None)
+        record = getattr(state, "record_llm_usage", None)
+        if record is not None:
+            record(
+                prompt_tokens=estimate_tokens(messages)
+                + estimate_tokens([{"role": "system", "content": repr(tools)[:20000]}]),
+                completion_tokens=estimate_tokens(
+                    [{"role": "assistant", "content": full_text}]
+                ),
+            )
+    except Exception:
+        pass
     message = _message_from_stream(full_text, _assemble_tool_calls(tool_calls_chunks))
     if repetition_count:
         message.repetition_count = repetition_count
