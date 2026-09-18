@@ -1281,6 +1281,14 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         except Exception as e:
             return f"[!] playbook 工具执行错误: {e}"
 
+    # ── Pwn local replay (Docker) ──
+    if tool_name in ("pwn_local_replay", "pwn_local_stop"):
+        try:
+            from vulnclaw.agent.pwn_local import execute_pwn_local_tool
+            return await execute_pwn_local_tool(agent, tool_name, args)
+        except Exception as e:
+            return f"[!] pwn_local 工具执行错误: {e}"
+
     # ── 后台任务（爆破等耗时操作不阻塞）───────────────────────────────────────
     if tool_name in _BG_TOOL_NAMES:
         if tool_name == "bg_launch":
@@ -1543,6 +1551,8 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "blackboard_hit_angle",
     "blackboard_miss_angle",
     "blackboard_create_tension",
+    "pwn_local_replay",
+    "pwn_local_stop",
     "lookup_playbook",
     "save_playbook",
     "web_map_add",
@@ -1687,6 +1697,12 @@ def build_openai_tools(
             tools.append(tool)
 
     append_builtin_tool_schemas(append_tool)
+
+    # ── Pwn local replay (Docker) ────────────────────────────────────
+    from vulnclaw.agent.pwn_local import pwn_local_tool_schemas
+
+    for schema in pwn_local_tool_schemas():
+        append_tool(schema)
 
     if include_subagent_tool:
         from vulnclaw.agent.subagent.integration import tool_schemas
