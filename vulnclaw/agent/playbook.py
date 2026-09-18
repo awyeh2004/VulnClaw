@@ -19,6 +19,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Optional
 
@@ -265,6 +266,89 @@ def save_playbook(
     ]
     (PLAYBOOKS_DIR / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
     return {"slug": slug, "status": status, "name": name}
+
+
+def target_fingerprint(origin: str, goal: str = "") -> str:
+    """Build a lookup fingerprint from the run's target identity.
+
+    Local binary targets fold in a short content hash so the same attachment
+    matches exactly across runs; URL/host targets use the target string itself.
+    The goal is appended as weak signal (technique keywords widen family match).
+    """
+    o = (origin or "").strip()
+    if not o:
+        return ""
+    p = Path(o)
+    if p.exists() and p.is_file():
+        try:
+            digest = sha256(p.read_bytes()).hexdigest()[:16]
+            return f"{o} sha256:{digest} {goal}".strip()
+        except OSError:
+            pass
+    return f"{o} {goal}".strip()
+
+
+def _auto_notes_name(target: str) -> str:
+    short = target.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or target
+    return f"AutoNotes {short}"[:80]
+
+
+def capture_run_notes(
+    *,
+    target: str,
+    goal: str,
+    blackboard: Any,
+    outcome: str = "",
+) -> Optional[dict[str, Any]]:
+    """Deterministically persist confirmed run conclusions as a draft playbook.
+
+    Unlike ``save_playbook`` (model-initiated, often skipped when a run dies on
+    quota or a dead end), the solve loop calls this automatically — at intervals
+    and at termination — so the next run of the same target starts from confirmed
+    conclusions (LOCK / CONFIRMED facts / angle outcomes) instead of raw
+    evidence. Returns the save ack, or None when there is nothing worth keeping.
+    """
+    if blackboard is None:
+        return None
+    try:
+        from vulnclaw.agent.blackboard import NodeStatus, NodeType
+    except Exception:
+        return None
+
+    lines: list[str] = []
+    lock = blackboard.current_lock()
+    if lock is not None:
+        lines.append(f"LOCK: {lock.description}")
+    facts = blackboard.confirmed_facts()
+    if facts:
+        lines.append("CONFIRMED: " + "; ".join(f.description for f in facts[:8]))
+    mark = {
+        NodeStatus.CONFIRMED: "hit",
+        NodeStatus.CHALLENGED: "miss",
+        NodeStatus.PROPOSED: "open",
+    }
+    angle_bits = [
+        f"[{mark.get(n.status, '?')}] {n.description}"
+        for n in blackboard.all_nodes()
+        if n.type == NodeType.ANGLE
+    ]
+    if angle_bits:
+        lines.append("ANGLES: " + "; ".join(angle_bits[:10]))
+    if not lines:  # empty blackboard — nothing trustworthy to persist
+        return None
+    lines.append(f"TARGET: {target}")
+    lines.append(f"GOAL: {goal}")
+    if outcome:
+        lines.append(f"OUTCOME: {outcome}")
+    steps = "\n".join(lines).strip()
+    if len(steps) < MIN_PLAYBOOK_CHARS:
+        return None
+    return save_playbook(
+        name=_auto_notes_name(target),
+        fingerprint=target_fingerprint(target, goal),
+        steps=steps,
+        status="draft",
+    )
 
 
 def format_playbook_list(items: list[dict[str, Any]]) -> str:
