@@ -1190,6 +1190,25 @@ async def _solve_impl(
                 )
             except Exception:
                 pass
+            # One-shot nudge when the board is still virgin: an avoidant run
+            # ends with nothing to capture (input side of the reuse chain).
+            try:
+                bb_mid = getattr(agent.runtime, "blackboard", None)
+                if (
+                    bb_mid is not None
+                    and not getattr(state, "blackboard_nudged", False)
+                    and bb_mid.current_lock() is None
+                    and not bb_mid.confirmed_facts()
+                ):
+                    state.blackboard_nudged = True
+                    agent.context.add_user_message(
+                        "[blackboard] 20 steps in and nothing recorded yet — "
+                        "set a LOCK (blackboard_set_lock) and add your confirmed "
+                        "findings (blackboard_add_fact) so this run's knowledge "
+                        "survives for reuse."
+                    )
+            except Exception:
+                pass
 
         if step % 10 == 0:
             # Periodic Review-Arbiter: challenge uncorroborated facts and merge
@@ -1451,6 +1470,7 @@ async def _solve_impl(
             blackboard=getattr(agent.runtime, "blackboard", None),
             outcome=reason,
             status="validated" if state.completed else "draft",
+            final_answer=getattr(state, "final_answer", ""),
         )
     except Exception:
         pass
