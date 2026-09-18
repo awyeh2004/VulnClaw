@@ -25,7 +25,8 @@ from typing import Any, Optional
 from vulnclaw.config.settings import CONFIG_DIR
 
 MIN_PLAYBOOK_CHARS = 80  # minimum steps length (prevents 3-line low-effort entries)
-_FLAG_FINGERPRINT_RE = re.compile(r"(flag|FLAG|ctf|CTF)\{([^{}]{4,80})\}")
+# Case-insensitive: Flag{...}/CTf{...} variants must also be fingerprinted.
+_FLAG_FINGERPRINT_RE = re.compile(r"(flag|ctf)\{([^{}]{4,80})\}", re.IGNORECASE)
 
 
 def _fingerprint_flags(text: str) -> str:

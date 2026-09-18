@@ -2267,7 +2267,8 @@ def go(
         vulnclaw go target --goal "get a shell" --model ds
     """
     resolved_goal = goal or _("cli.default_goal")
-    if type:
+    # 显式 --goal 优先; 仅在用户没给 goal 时才用 type 预设
+    if type and not goal:
         type_goal = {
             "crypto": "solve the crypto challenge and output the flag",
             "web": "find and exploit the web vulnerability, capture the flag",

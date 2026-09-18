@@ -334,19 +334,31 @@ class Blackboard:
         return self._add_node(NodeType.ANGLE, NodeStatus.PROPOSED, description, parent_id)
 
     def hit_angle(self, node_id: str) -> Optional[BlackboardNode]:
-        """Mark an angle as tried and it worked."""
+        """Mark an angle as tried and it worked.
+
+        Idempotent: only an open (PROPOSED) angle transitions. Re-marking a
+        closed angle is a no-op so hit/miss flips cannot drift the coverage
+        counts that gate NO_PATH.
+        """
         node = self._nodes.get(node_id)
         if not node or node.type != NodeType.ANGLE:
             return None
+        if node.status != NodeStatus.PROPOSED:
+            return node
         node.status = NodeStatus.CONFIRMED
         node.updated_at = datetime.now(timezone.utc).isoformat()
         return node
 
     def miss_angle(self, node_id: str) -> Optional[BlackboardNode]:
-        """Mark an angle as tried and it didn't work."""
+        """Mark an angle as tried and it didn't work.
+
+        Idempotent, mirroring hit_angle: only PROPOSED angles transition.
+        """
         node = self._nodes.get(node_id)
         if not node or node.type != NodeType.ANGLE:
             return None
+        if node.status != NodeStatus.PROPOSED:
+            return node
         node.status = NodeStatus.CHALLENGED
         node.updated_at = datetime.now(timezone.utc).isoformat()
         return node
@@ -598,6 +610,11 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         node = bb.hit_angle(node_id)
         if not node:
             return f"[!] blackboard: angle {node_id} not found"
+        if node.status != NodeStatus.CONFIRMED:
+            return (
+                f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
+                "already closed; coverage stays as recorded"
+            )
         return f"[blackboard] angle {node_id} HIT: {node.description}"
 
     if tool_name == "blackboard_miss_angle":
@@ -605,6 +622,11 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         node = bb.miss_angle(node_id)
         if not node:
             return f"[!] blackboard: angle {node_id} not found"
+        if node.status != NodeStatus.CHALLENGED:
+            return (
+                f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
+                "already closed; coverage stays as recorded"
+            )
         return f"[blackboard] angle {node_id} MISS: {node.description}"
 
     if tool_name == "blackboard_create_tension":
