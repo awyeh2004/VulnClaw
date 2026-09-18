@@ -487,6 +487,15 @@ def _no_path_rejection_reason(state: AgentState, no_path_text: str) -> str:
     )
 
 
+def _looks_like_binary_target(origin: str) -> bool:
+    """True when the run target is a local file (binary attachment path)."""
+    try:
+        p = Path(origin)
+        return p.is_file()
+    except Exception:
+        return False
+
+
 def _no_path_open_angles(agent: AgentState) -> int:
     """Count ANGLE nodes still in open (PROPOSED) status on the blackboard.
 
@@ -630,6 +639,18 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
     runtime = getattr(agent, "runtime", None)
     prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
+    pwn_local_instruction = ""
+    if "pwn" in (state.goal or "").lower() or _looks_like_binary_target(state.origin or ""):
+        pwn_local_instruction = (
+            "\n\n# Local-first exploit development\n"
+            "For binary challenges with a remote service, call `pwn_local_replay` "
+            "with the binary path FIRST and develop the exploit against the local "
+            "127.0.0.1 replay — remote services are usually single-connection with "
+            "a short alarm, so blind iterations there waste expensive rounds. Fire "
+            "the real remote only after the exploit works locally. Release the "
+            "container with `pwn_local_stop` when done (same discipline as "
+            "releasing remote instances)."
+        )
     return (
         "You are VulnClaw's autonomous, model-led penetration-testing agent. "
         "The user controls the engagement scope; treat the given target/task as authorized.\n"
@@ -683,6 +704,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"{constraints}"
         f"{bb_instruction}"
         f"{playbook_instruction}{prior_playbook_brief}"
+        f"{pwn_local_instruction}"
     )
 
 
