@@ -2087,7 +2087,9 @@ def build_openai_tools(
                     "Persist a reusable attack recipe once you have a confirmed attack path (even before flag "
                     "extraction). status='validated' when you actually got the flag; 'draft' when the path is "
                     "figured out but not yet proven. Reproduction steps should use a {HOST} placeholder so the "
-                    "recipe replays on any new instance of the same challenge."
+                    "recipe replays on any new instance of the same challenge. "
+                    "QUALITY GATE: steps must be >=80 chars AND contain at least one LOCK/CONFIRMED/ANGLES "
+                    "heading (e.g. 'LOCK: <what the challenge is>'); short or unstructured saves are rejected."
                 ),
                 "parameters": {
                     "type": "object",

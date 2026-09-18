@@ -214,7 +214,27 @@ class OpenAIStructuredDistiller:
             "type": "json_schema",
             "json_schema": {"name": "lesson_candidates", "strict": True, "schema": _LESSON_SCHEMA},
         }
-        response = self._client.chat.completions.create(**kwargs)
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            # Some providers reject json_schema response_format (deepseek-flash:
+            # 400 "This response_format type is unavailable now"). Fall back to
+            # plain completion with the schema inlined in the prompt — the
+            # system message already demands JSON-only output.
+            if "response_format" not in str(exc):
+                raise
+            kwargs.pop("response_format", None)
+            kwargs["messages"] = messages + [
+                {
+                    "role": "system",
+                    "content": (
+                        "Your provider does not support structured response_format. "
+                        "Return ONLY a single JSON object matching this schema:\n"
+                        + json.dumps(_LESSON_SCHEMA, ensure_ascii=False)
+                    ),
+                }
+            ]
+            response = self._client.chat.completions.create(**kwargs)
         choices = getattr(response, "choices", []) or []
         if not choices:
             return []
