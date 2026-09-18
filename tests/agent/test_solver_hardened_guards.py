@@ -73,3 +73,23 @@ def test_auto_review_silent_when_fact_witnessed():
 def test_auto_review_no_blackboard_no_findings():
     agent = SimpleNamespace(runtime=SimpleNamespace(blackboard=None))
     assert _auto_review_blackboard(agent, _state_with_evidence([])) == []
+
+
+# ── completion gate LOCK nudge ───────────────────────────────────────────
+
+
+def test_lock_nudge_rejects_once_then_allows():
+    from vulnclaw.agent.solver import _blackboard_lock_missing
+
+    bb = Blackboard()
+    agent = _agent_with(bb)
+    assert _blackboard_lock_missing(agent) is True
+    bb.set_lock("heap UAF, flag in /flag")
+    assert _blackboard_lock_missing(agent) is False
+
+
+def test_lock_nudge_never_blocks_without_blackboard():
+    from vulnclaw.agent.solver import _blackboard_lock_missing
+
+    agent = SimpleNamespace(runtime=SimpleNamespace(blackboard=None))
+    assert _blackboard_lock_missing(agent) is False

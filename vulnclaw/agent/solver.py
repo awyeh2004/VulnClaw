@@ -496,6 +496,19 @@ def _looks_like_binary_target(origin: str) -> bool:
         return False
 
 
+def _blackboard_lock_missing(agent: AgentState) -> bool:
+    """True when a live blackboard exists but the model never set a LOCK.
+
+    Used by the completion gate: one deterministic nudge so run conclusions
+    land on the blackboard (and thus in the auto-captured notes) even when the
+    model would not bother on its own. Boards that do not exist never block.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return False
+    return bb.current_lock() is None
+
+
 def _no_path_open_angles(agent: AgentState) -> int:
     """Count ANGLE nodes still in open (PROPOSED) status on the blackboard.
 
@@ -1358,6 +1371,22 @@ async def _solve_impl(
 
         if _has_marker(cleaned, _FINAL_MARKERS):
             ok, gate_reason, evidence_ids = _completion_gate(state, cleaned)
+            if (
+                ok
+                and not getattr(state, "lock_nudged", False)
+                and _blackboard_lock_missing(agent)
+            ):
+                # Deterministic nudge (once per run): success declarations must
+                # leave a LOCK + findings trail, or the auto-captured notes for
+                # the next run come back empty.
+                state.lock_nudged = True
+                ok = False
+                gate_reason = (
+                    "record your conclusion before finishing: set a LOCK "
+                    "(blackboard_set_lock), confirm key findings "
+                    "(blackboard_add_fact), and close your ANGLES — then "
+                    "declare success again"
+                )
             if ok:
                 state.mark_complete(gate_reason, final_answer=cleaned, evidence_ids=evidence_ids)
                 reason = state.complete_reason
