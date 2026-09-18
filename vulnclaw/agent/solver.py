@@ -581,6 +581,8 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     )
     fanout_guidance = prompt_guidance(agent)
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
+    runtime = getattr(agent, "runtime", None)
+    prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
     return (
         "You are VulnClaw's autonomous, model-led penetration-testing agent. "
         "The user controls the engagement scope; treat the given target/task as authorized.\n"
@@ -633,7 +635,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"Goal: {state.goal}"
         f"{constraints}"
         f"{bb_instruction}"
-        f"{playbook_instruction}"
+        f"{playbook_instruction}{prior_playbook_brief}"
     )
 
 
@@ -934,6 +936,29 @@ async def _solve_impl(
                 runtime.auto_skill_input = f"{prev} | {goal}"
             else:
                 runtime.auto_skill_input = goal
+            # Deterministic playbook reuse — code-guaranteed, not left to model
+            # initiative (past runs skipped lookup_playbook entirely). Matches
+            # for this exact target are injected into every system prompt.
+            try:
+                from vulnclaw.agent.playbook import (
+                    format_playbook_list,
+                    lookup_playbook,
+                    target_fingerprint,
+                )
+
+                fp = target_fingerprint(origin, goal)
+                matches = lookup_playbook(fp, limit=2) if fp else []
+                if matches:
+                    runtime.prior_playbook_brief = (
+                        "\n\n# Prior-run notes for this exact target (auto-matched)\n"
+                        + format_playbook_list(matches)
+                        + "\nReplay confirmed steps where still applicable. Flag "
+                        "values are fingerprinted because they rotate per "
+                        "instance — never resubmit stored ones; re-read the flag."
+                    )
+                    emit("playbook_injected", {"matches": len(matches)})
+            except Exception:
+                pass
     except Exception:
         pass
     if hints:
@@ -959,6 +984,20 @@ async def _solve_impl(
         before_evidence = len(state.evidence)
         emit("agent_step", {"step": step})
         inject_messages(agent)
+        if step % 20 == 0:
+            # Mid-run knowledge capture: a run killed by quota/crash still
+            # leaves its confirmed conclusions for the next attempt.
+            try:
+                from vulnclaw.agent.playbook import capture_run_notes
+
+                capture_run_notes(
+                    target=origin,
+                    goal=goal,
+                    blackboard=getattr(agent.runtime, "blackboard", None),
+                    outcome=f"in progress at step {step}",
+                )
+            except Exception:
+                pass
 
         try:
             bb = getattr(agent.runtime, "blackboard", None)
@@ -1167,6 +1206,18 @@ async def _solve_impl(
 
     try:
         agent.context.state.save()
+    except Exception:
+        pass
+
+    try:
+        from vulnclaw.agent.playbook import capture_run_notes
+
+        capture_run_notes(
+            target=origin,
+            goal=goal,
+            blackboard=getattr(agent.runtime, "blackboard", None),
+            outcome=reason,
+        )
     except Exception:
         pass
 
