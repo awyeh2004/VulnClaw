@@ -299,6 +299,7 @@ def capture_run_notes(
     goal: str,
     blackboard: Any,
     outcome: str = "",
+    status: str = "draft",
 ) -> Optional[dict[str, Any]]:
     """Deterministically persist confirmed run conclusions as a draft playbook.
 
@@ -347,7 +348,7 @@ def capture_run_notes(
         name=_auto_notes_name(target),
         fingerprint=target_fingerprint(target, goal),
         steps=steps,
-        status="draft",
+        status=status,
     )
 
 
