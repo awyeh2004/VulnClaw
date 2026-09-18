@@ -359,10 +359,9 @@ class Blackboard:
         """Structural integrity checks on the blackboard reasoning graph.
 
         Returns a list of issue descriptions (empty = valid):
-        1. parent_id cycles (DFS visiting/done)
-        2. orphan nodes (parent_id references a deleted node)
-        3. flag-bearing facts must be reachable from a CONFIRMED root
-        4. node count budget (prevent unbounded growth)
+        1. node count budget (prevent unbounded growth)
+        2. parent_id cycles (iterative DFS with visiting/done sets)
+        3. orphan nodes (parent_id references a deleted node)
         """
         issues: list[str] = []
         nodes = self._nodes
@@ -372,29 +371,39 @@ class Blackboard:
         if len(nodes) > max_nodes:
             issues.append(f"graph_budget: {len(nodes)} nodes exceeds limit {max_nodes}")
 
-        # 2. Cycle detection: DFS with visiting/done sets over parent_id edges
+        # 2. Cycle detection: iterative DFS over parent_id edges (no recursion
+        # depth limit — deep node chains must not raise RecursionError)
         parent_map: dict[str, list[str]] = {}
         for n in nodes.values():
             if n.parent_id:
                 parent_map.setdefault(n.id, []).append(n.parent_id)
-        visiting: set[str] = set()
         done: set[str] = set()
-
-        def _dfs(nid: str) -> None:
-            if nid in visiting:
-                issues.append(f"cycle: node {nid} participates in a parent_id cycle")
-                return
-            if nid in done:
-                return
-            visiting.add(nid)
-            for pid in parent_map.get(nid, []):
-                if pid in nodes:
-                    _dfs(pid)
-            visiting.discard(nid)
-            done.add(nid)
-
-        for nid in list(nodes.keys()):
-            _dfs(nid)
+        reported_cycles: set[str] = set()
+        for root in list(nodes.keys()):
+            if root in done:
+                continue
+            visiting: set[str] = {root}
+            stack: list[tuple[str, list[str], int]] = [(root, parent_map.get(root, []), 0)]
+            while stack:
+                nid, parents, idx = stack[-1]
+                if idx >= len(parents):
+                    stack.pop()
+                    visiting.discard(nid)
+                    done.add(nid)
+                    continue
+                stack[-1] = (nid, parents, idx + 1)
+                pid = parents[idx]
+                if pid not in nodes or pid in done:
+                    continue
+                if pid in visiting:
+                    if pid not in reported_cycles:
+                        reported_cycles.add(pid)
+                        issues.append(
+                            f"cycle: node {pid} participates in a parent_id cycle"
+                        )
+                    continue
+                visiting.add(pid)
+                stack.append((pid, parent_map.get(pid, []), 0))
 
         # 3. Orphan detection: parent_id points to a node that doesn't exist
         for n in nodes.values():
@@ -663,7 +672,8 @@ def _count_genuine_failures_for_route(intent_node: BlackboardNode, evidence_by_i
             for ev in agent_state.evidence:
                 evidence_by_id[ev.id] = getattr(ev, "content", "")
 
-        review_results = _run_blackboard_review(bb, evidence_by_id)
+        review_results = [f"DAG: {issue}" for issue in bb.validate_dag()]
+        review_results += _run_blackboard_review(bb, evidence_by_id)
         if not review_results:
             return "[blackboard review] No actionable findings"
         return "\n".join(

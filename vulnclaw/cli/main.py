@@ -3268,7 +3268,7 @@ def config_model(
         vulnclaw config model                 # 显示当前
         vulnclaw config model zhipu           # zhipu glm-5.3 + thinking=low + zhipu key
         vulnclaw config model zhipu high      # zhipu glm-5.3 + thinking=high
-        vulnclaw config model ds              # deepseek-v4-flash + thinking=low + ds key
+        vulnclaw config model ds              # deepseek-flash + thinking=low + ds key
         vulnclaw config model ds --deep       # deepseek-v4-pro + thinking=low
         vulnclaw config model ds --deep max   # deepseek-v4-pro + thinking=max
     """
@@ -3302,7 +3302,7 @@ def config_model(
             "base_url": "https://open.bigmodel.cn/api/paas/v4",
         },
         "ds": {
-            "shallow": "deepseek-v4-flash",
+            "shallow": "deepseek-flash",
             "deep": "deepseek-v4-pro",
             "base_url": "https://api.deepseek.com/v1",
         },
@@ -3312,6 +3312,7 @@ def config_model(
 
     config = load_config()
     llm = config.llm
+    prev_provider = llm.provider
     llm.provider = provider
     llm.model = model
     llm.base_url = m["base_url"]
@@ -3322,6 +3323,15 @@ def config_model(
     keys = getattr(llm, "provider_keys", {}) or {}
     if provider in keys and keys[provider]:
         llm.api_key = keys[provider]
+        # key_pool() 优先用 api_keys 池, 不同步会导致旧厂商 key 继续生效。
+        # 换厂商时旧池子全是旧厂商 key, 直接替换; 同厂商重跑则只把目标 key
+        # 提到首位, 保住手动配置的多 key 轮换池。
+        pool = [k.strip() for k in (llm.api_keys or []) if k and k.strip()]
+        new_key = keys[provider].strip()
+        if prev_provider != provider or not pool:
+            llm.api_keys = [new_key]
+        else:
+            llm.api_keys = [new_key] + [k for k in pool if k != new_key]
     save_config(config)
 
     console.print(

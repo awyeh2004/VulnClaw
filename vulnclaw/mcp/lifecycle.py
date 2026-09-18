@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import time
+import weakref
 from contextlib import suppress
 from typing import Any
 from urllib.parse import urlparse
@@ -122,12 +123,18 @@ class MCPLifecycleManager(ProbeMixin):
         self._fetch_body_cache: dict[str, str] = {}
         # asyncio primitives are loop-bound once contended, so keep one gate
         # per (event loop, server). This protects shared stateful stdio sessions
-        # across parent tools and every sub-agent.
-        self._server_call_gates: dict[tuple[int, str], asyncio.Semaphore] = {}
+        # across parent tools and every sub-agent. Keyed by the loop object in a
+        # WeakKeyDictionary: per-request loops are reclaimed with their entries
+        # (no leak), and object keys cannot collide the way recycled id()s do.
+        self._server_call_gates: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]
+        ] = weakref.WeakKeyDictionary()
         # Same loop-binding concern for session CREATION: the chrome-devtools
         # preinit task and the first tool call race on the same cache, and the
         # loser's context-manager teardown kills the winner's in-flight call.
-        self._stdio_session_locks: dict[tuple[int, str], asyncio.Lock] = {}
+        self._stdio_session_locks: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
+        ] = weakref.WeakKeyDictionary()
 
     async def __aenter__(self) -> MCPLifecycleManager:
         self.start_enabled_servers()
@@ -488,12 +495,16 @@ class MCPLifecycleManager(ProbeMixin):
                 )
 
     def _stdio_session_lock(self, server_name: str) -> asyncio.Lock:
-        """One creation lock per (event loop, server), mirroring _server_call_gates."""
-        key = (id(asyncio.get_running_loop()), server_name)
-        lock = self._stdio_session_locks.get(key)
+        """One creation lock per (event loop, server), mirroring _server_call_gate."""
+        loop = asyncio.get_running_loop()
+        per_loop = self._stdio_session_locks.get(loop)
+        if per_loop is None:
+            per_loop = {}
+            self._stdio_session_locks[loop] = per_loop
+        lock = per_loop.get(server_name)
         if lock is None:
             lock = asyncio.Lock()
-            self._stdio_session_locks[key] = lock
+            per_loop[server_name] = lock
         return lock
 
     async def _get_or_create_persistent_stdio_session(self, server_name: str) -> Any:
@@ -1282,10 +1293,15 @@ class MCPLifecycleManager(ProbeMixin):
     def _server_call_gate(self, server_name: str) -> asyncio.Semaphore:
         """Return the shared per-server gate for the current event loop."""
 
-        key = (id(asyncio.get_running_loop()), server_name)
-        gate = self._server_call_gates.get(key)
-        if gate is not None:
-            return gate
+        loop = asyncio.get_running_loop()
+        per_loop = self._server_call_gates.get(loop)
+        if per_loop is None:
+            per_loop = {}
+            self._server_call_gates[loop] = per_loop
+        else:
+            gate = per_loop.get(server_name)
+            if gate is not None:
+                return gate
 
         server_cfg = self.config.mcp.servers.get(server_name)
         transport = getattr(server_cfg, "transport", None)
@@ -1294,7 +1310,7 @@ class MCPLifecycleManager(ProbeMixin):
         else:
             limit = self.config.safety.tool_max_concurrent
         gate = asyncio.Semaphore(max(1, int(limit or 1)))
-        self._server_call_gates[key] = gate
+        per_loop[server_name] = gate
         return gate
 
     async def _dispatch_call_tool(

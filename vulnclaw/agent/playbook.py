@@ -306,6 +306,8 @@ async def execute_playbook_tool(tool_name: str, args: dict[str, Any]) -> str:
             steps=steps,
             status=status,
         )
+        if "error" in ack:
+            return f"[!] save_playbook rejected: {ack['error']}"
         return (
             f"[playbook] saved '{ack['name']}' as {ack['status']} "
             f"(slug={ack['slug']}). It will be offered to future runs of this "
