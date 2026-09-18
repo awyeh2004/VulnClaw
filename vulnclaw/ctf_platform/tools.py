@@ -19,6 +19,7 @@ CTF_TOOL_NAMES: list[str] = [
     "ctf2_read_challenge",
     "ctf2_start_environment",
     "ctf2_get_target",
+    "ctf2_stop_environment",
     "ctf2_submit_flag",
     "ctf2_list_competitions",
     "ctf2_list_stage_challenges",
@@ -111,7 +112,9 @@ def ctf2_tool_schemas() -> list[dict[str, Any]]:
                 "description": (
                     "Start (or reuse) a practice challenge's live environment and "
                     "return its connection info (host/port). Each start consumes "
-                    "platform quota, so prefer reading the challenge first."
+                    "platform quota, so prefer reading the challenge first. "
+                    "Pair every successful start with ctf2_stop_environment once "
+                    "the flag is captured — do not leave instances running."
                 ),
                 "parameters": {
                     "type": "object",
@@ -159,11 +162,40 @@ def ctf2_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "ctf2_stop_environment",
+                "description": (
+                    "Release a practice challenge's live environment (frees the "
+                    "platform container slot). ALWAYS call this after the flag is "
+                    "captured or submitted — leaving instances running exhausts "
+                    "quota and slots; instances otherwise linger until the ~1h "
+                    "platform TTL. Requires the front-end session token."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "practice_id": {
+                            "type": "string",
+                            "description": "Practice ground id.",
+                        },
+                        "challenge_id": {
+                            "type": "string",
+                            "description": "Challenge id inside the practice ground.",
+                        },
+                    },
+                    "required": ["practice_id", "challenge_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "ctf2_submit_flag",
                 "description": (
                     "Submit a confirmed flag for a practice challenge on the CTF2 "
                     "platform. Only call after the flag value is fully known; the "
-                    "API requires an explicit confirmation sentinel."
+                    "API requires an explicit confirmation sentinel. After a "
+                    "successful (or definitively final) submission, release the "
+                    "instance with ctf2_stop_environment."
                 ),
                 "parameters": {
                     "type": "object",
@@ -372,6 +404,21 @@ async def _handle_get_target(args: dict[str, Any]) -> str:
     return _format(payload)
 
 
+async def _handle_stop_environment(args: dict[str, Any]) -> str:
+    if not _client.session_token():
+        return (
+            "[ctf2_config] CTF2 session token not available for releasing the "
+            "target (VULNCLAW_CTF2_SESSION_TOKEN). The instance will still be "
+            "reclaimed by the platform TTL, but the slot stays busy until then."
+        )
+    try:
+        usage, challenge = await _named(args["practice_id"], args["challenge_id"])
+        payload = await _client.stop_target(usage, challenge)
+    except Exception as exc:
+        return f"[ctf2_error] stop environment failed: {exc}"
+    return "[ctf2] environment released (target deleted).\n" + _format(payload)
+
+
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
     blocking = await _guard_config()
     if blocking:
@@ -439,6 +486,7 @@ def _build_handlers() -> dict[str, Callable[[dict[str, Any]], Awaitable[str]]]:
         "ctf2_read_challenge": _handle_read_challenge,
         "ctf2_start_environment": _handle_start_environment,
         "ctf2_get_target": _handle_get_target,
+        "ctf2_stop_environment": _handle_stop_environment,
         "ctf2_submit_flag": _handle_submit_flag,
         "ctf2_list_competitions": _handle_list_competitions,
         "ctf2_list_stage_challenges": _handle_list_stage_challenges,
