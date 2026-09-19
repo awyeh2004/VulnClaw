@@ -1282,7 +1282,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             return f"[!] playbook 工具执行错误: {e}"
 
     # ── Pwn local replay (Docker) ──
-    if tool_name in ("pwn_local_replay", "pwn_local_stop"):
+    if tool_name in ("pwn_local_replay", "pwn_local_stop", "libc_lookup"):
         try:
             from vulnclaw.agent.pwn_local import execute_pwn_local_tool
             return await execute_pwn_local_tool(agent, tool_name, args)
@@ -1553,6 +1553,7 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "blackboard_create_tension",
     "pwn_local_replay",
     "pwn_local_stop",
+    "libc_lookup",
     "lookup_playbook",
     "save_playbook",
     "web_map_add",

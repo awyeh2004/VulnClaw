@@ -305,6 +305,115 @@ def stop_replay(binary_path: str) -> str:
     return f"[pwn_local] released {name}."
 
 
+def _parse_leaks(raw: Any) -> dict[str, int]:
+    """Normalize the symbols argument: dict or 'name=0x..,name=0x..' string."""
+    leaks: dict[str, int] = {}
+    if isinstance(raw, dict):
+        items = raw.items()
+    elif isinstance(raw, str):
+        items = []
+        for part in raw.split(","):
+            part = part.strip()
+            if "=" in part:
+                name, _, val = part.partition("=")
+                items.append((name.strip(), val.strip()))
+            elif part:
+                items.append((part.strip(), ""))
+    else:
+        items = []
+    for name, val in items:
+        name = str(name).strip().strip('"')
+        if not name or not val:
+            continue
+        try:
+            leaks[name] = int(str(val), 16) if str(val).lower().startswith("0x") else int(str(val), 10)
+        except ValueError:
+            continue
+    return leaks
+
+
+def _pick_libc_build(cands: list[dict], leaks: dict[str, int]) -> list[dict[str, Any]]:
+    """Keep candidates where ALL leaked symbols share ONE page-aligned base.
+
+    Returns [{id, base, system, download_url}] best (most symbols matched,
+    lowest base) first. Requires >=1 symbol; libc.rip already narrows by the
+    low 12 bits of each provided symbol, so alignment re-check is the gate.
+    """
+    out: list[dict[str, Any]] = []
+    for c in cands or []:
+        syms = c.get("symbols") or {}
+        if not isinstance(syms, dict):
+            continue
+        base = None
+        ok = True
+        for name, addr in leaks.items():
+            off = syms.get(name)
+            if off is None:
+                ok = False
+                break
+            try:
+                off = int(off, 16)
+            except (ValueError, TypeError):
+                ok = False
+                break
+            b = addr - off
+            if base is None:
+                base = b
+            elif b != base:
+                ok = False
+                break
+        if not ok or base is None or base < 0 or base & 0xFFF:
+            continue
+        try:
+            system = int(syms["system"], 16)
+        except (KeyError, ValueError, TypeError):
+            system = None
+        out.append({
+            "id": c.get("id", "?"),
+            "base": base,
+            "system": system,
+            "download_url": c.get("download_url", ""),
+        })
+    out.sort(key=lambda x: (x["system"] is None, x["base"]))
+    return out
+
+
+def libc_lookup(leaks: dict[str, int], arch: str = "i386") -> str:
+    """Query libc.rip and report builds consistent with the leaked addresses."""
+    if not leaks:
+        return "[!] libc_lookup requires at least one leaked symbol address"
+    import ssl
+    import urllib.request
+
+    body = json.dumps({"symbols": {k: hex(v) for k, v in leaks.items()}}).encode()
+    req = urllib.request.Request(
+        "https://libc.rip/api/find", data=body,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=25, context=ssl.create_default_context()) as resp:
+        cands = json.loads(resp.read())
+    matches = _pick_libc_build(cands, leaks)
+    if not matches:
+        return (
+            f"[libc_lookup] no build in libc.rip puts ALL of "
+            f"{ {k: hex(v) for k, v in leaks.items()} } at one page-aligned "
+            "base — leak more symbols or the build is not in the DB"
+        )
+    lines = [f"[libc_lookup] {len(matches)} consistent build(s):"]
+    for m in matches[:5]:
+        sys_txt = hex(m["system"]) if m["system"] is not None else "?"
+        lines.append(
+            f"  {m['id']} | base={m['base']:#x} | system={sys_txt}"
+            + (f" | {m['download_url']}" if m["download_url"] else "")
+        )
+    if len(matches) == 1:
+        lines.append(
+            "unique match — compute system_addr = base + system and write it "
+            "into a called GOT slot (strchr@got is a good default for menu "
+            "services)"
+        )
+    return "\n".join(lines)
+
+
 async def execute_pwn_local_tool(agent: Any, tool_name: str, args: dict[str, Any]) -> str:
     if tool_name == "pwn_local_replay":
         binary_path = str(args.get("binary_path") or "").strip()
@@ -319,6 +428,12 @@ async def execute_pwn_local_tool(agent: Any, tool_name: str, args: dict[str, Any
         if not binary_path:
             return "[!] pwn_local_stop requires binary_path"
         return await asyncio.to_thread(stop_replay, binary_path)
+    if tool_name == "libc_lookup":
+        leaks = _parse_leaks(args.get("symbols"))
+        if not leaks:
+            return "[!] libc_lookup requires symbols like {\"puts\": \"0xf7...\"}"
+        arch = str(args.get("arch") or "i386").strip()
+        return await asyncio.to_thread(libc_lookup, leaks, arch)
     return f"[!] Unknown pwn_local tool: {tool_name}"
 
 
@@ -369,6 +484,36 @@ def pwn_local_tool_schemas() -> list[dict[str, Any]]:
                         },
                     },
                     "required": ["binary_path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "libc_lookup",
+                "description": (
+                    "Identify a remote glibc build from leaked GOT symbol "
+                    "addresses (puts/fgets/etc read out of the remote process). "
+                    "Returns candidate builds that place every leaked symbol at "
+                    "ONE page-aligned base, with each build's system() offset "
+                    "and download URL. Feed 2+ symbols for a unique match."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {
+                            "type": "object",
+                            "description": (
+                                'Leaked symbol->runtime address map, e.g. '
+                                '{"puts": "0xf7e48140", "fgets": "0xf7e38620"}.'
+                            ),
+                        },
+                        "arch": {
+                            "type": "string",
+                            "description": "Filter: i386 (default) or amd64.",
+                        },
+                    },
+                    "required": ["symbols"],
                 },
             },
         },

@@ -509,6 +509,52 @@ def _blackboard_lock_missing(agent: AgentState) -> bool:
     return bb.current_lock() is None
 
 
+def _completion_lock_gate(agent: AgentState, state: AgentState) -> bool:
+    """Return True when completion should be rejected to demand a LOCK.
+
+    Rejects up to twice per run (a stubborn model must not deadlock the run),
+    and only while a live blackboard exists without a LOCK.
+    """
+    count = getattr(state, "lock_nudge_count", 0)
+    if count >= 2:
+        return False
+    if not _blackboard_lock_missing(agent):
+        return False
+    try:
+        state.lock_nudge_count = count + 1
+    except Exception:
+        return False
+    return True
+
+
+def _pwn_local_first_reminder(agent: AgentState, state: AgentState, origin: str) -> Optional[str]:
+    """One-shot correction when the model starts a REMOTE pwn instance while a
+    local binary sits unused — the local-first discipline enforced by code.
+
+    Returns the reminder text, or None when nothing applies. Fires at most once
+    per run and only for local-file targets.
+    """
+    if not _looks_like_binary_target(origin):
+        return None
+    if getattr(state, "pwn_local_reminded", False):
+        return None
+    calls = [getattr(tc, "tool", "") for tc in getattr(state, "tool_calls", [])]
+    if "ctf2_start_environment" not in calls:
+        return None
+    if "pwn_local_replay" in calls:
+        return None
+    try:
+        state.pwn_local_reminded = True
+    except Exception:
+        return None
+    return (
+        "pwn discipline: a remote instance was started before any local "
+        "replay. Call pwn_local_replay with the binary path and verify the "
+        "exploit against 127.0.0.1 FIRST — remote connections are single-shot "
+        "and alarm-limited; release both instances when done."
+    )
+
+
 def _no_path_open_angles(agent: AgentState) -> int:
     """Count ANGLE nodes still in open (PROPOSED) status on the blackboard.
 
@@ -1172,6 +1218,17 @@ async def _solve_impl(
                 emit("token_budget_exceeded", {"used": used, "budget": token_budget})
                 break
 
+        if step % 5 == 0:
+            # Local-first discipline, enforced: a remote pwn instance started
+            # while the local binary sits unused earns one correction.
+            try:
+                reminder = _pwn_local_first_reminder(agent, state, origin)
+                if reminder:
+                    agent.context.add_user_message("[pwn-local-first] " + reminder)
+                    emit("pwn_local_reminder", {})
+            except Exception:
+                pass
+
         before_tools = len(state.tool_calls)
         before_evidence = len(state.evidence)
         emit("agent_step", {"step": step})
@@ -1390,15 +1447,7 @@ async def _solve_impl(
 
         if _has_marker(cleaned, _FINAL_MARKERS):
             ok, gate_reason, evidence_ids = _completion_gate(state, cleaned)
-            if (
-                ok
-                and not getattr(state, "lock_nudged", False)
-                and _blackboard_lock_missing(agent)
-            ):
-                # Deterministic nudge (once per run): success declarations must
-                # leave a LOCK + findings trail, or the auto-captured notes for
-                # the next run come back empty.
-                state.lock_nudged = True
+            if ok and _completion_lock_gate(agent, state):
                 ok = False
                 gate_reason = (
                     "record your conclusion before finishing: set a LOCK "
