@@ -93,3 +93,44 @@ def test_lock_nudge_never_blocks_without_blackboard():
 
     agent = SimpleNamespace(runtime=SimpleNamespace(blackboard=None))
     assert _blackboard_lock_missing(agent) is False
+
+
+def test_lock_gate_rejects_twice_then_allows():
+    from types import SimpleNamespace as NS
+    from vulnclaw.agent.solver import _completion_lock_gate
+
+    bb = Blackboard()
+    agent = _agent_with(bb)
+    state = NS(lock_nudge_count=0)
+    assert _completion_lock_gate(agent, state) is True   # 第一次拒绝
+    assert state.lock_nudge_count == 1
+    assert _completion_lock_gate(agent, state) is True   # 第二次拒绝
+    assert state.lock_nudge_count == 2
+    assert _completion_lock_gate(agent, state) is False  # 第三次放行
+    bb.set_lock("heap UAF; flag at /flag")
+    assert _completion_lock_gate(agent, state) is False  # 有 LOCK 不拦
+
+
+def test_pwn_local_first_reminder_fires_once():
+    from types import SimpleNamespace as NS
+    from vulnclaw.agent.solver import _pwn_local_first_reminder
+    import os
+
+    real_file = __file__
+    agent = _agent_with(Blackboard())
+    state = NS(pwn_local_reminded=False, tool_calls=[
+        NS(tool="ctf2_start_environment"), NS(tool="shell_command")])
+    r = _pwn_local_first_reminder(agent, state, real_file)
+    assert r is not None and "pwn_local_replay" in r
+    assert state.pwn_local_reminded is True
+    assert _pwn_local_first_reminder(agent, state, real_file) is None  # 一次为限
+
+
+def test_pwn_local_first_reminder_silent_when_replay_used():
+    from types import SimpleNamespace as NS
+    from vulnclaw.agent.solver import _pwn_local_first_reminder
+
+    agent = _agent_with(Blackboard())
+    state = NS(pwn_local_reminded=False, tool_calls=[
+        NS(tool="ctf2_start_environment"), NS(tool="pwn_local_replay")])
+    assert _pwn_local_first_reminder(agent, state, __file__) is None

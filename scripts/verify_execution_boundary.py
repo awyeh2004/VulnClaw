@@ -81,16 +81,16 @@ ALLOWED_SPAWN_SITES: dict[str, str] = {
     "vulnclaw/agent/builtin_tools.py:636:subprocess.run": (
         "fixed Windows taskkill fallback for the gated process runner"
     ),
-    "vulnclaw/agent/builtin_tools.py:2374:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2375:subprocess.run": (
         "fixed Windows nmap path lookup"
     ),
-    "vulnclaw/agent/builtin_tools.py:2453:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2454:subprocess.run": (
         "structured argv nmap execution constrained by the nmap tool schema"
     ),
-    "vulnclaw/agent/builtin_tools.py:2461:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2462:subprocess.run": (
         "structured argv non-privileged nmap retry"
     ),
-    "vulnclaw/agent/builtin_tools.py:4112:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:4113:subprocess.run": (
         "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)"
     ),
     "vulnclaw/report/verifier.py:487:subprocess.run": (

@@ -77,4 +77,37 @@ def test_stop_with_docker_missing_is_graceful(monkeypatch):
 
 def test_schemas_exist():
     names = [s["function"]["name"] for s in pwn_local.pwn_local_tool_schemas()]
-    assert names == ["pwn_local_replay", "pwn_local_stop"]
+    assert names == ["pwn_local_replay", "pwn_local_stop", "libc_lookup"]
+
+
+def test_parse_leaks_forms():
+    from vulnclaw.agent.pwn_local import _parse_leaks
+    assert _parse_leaks({"puts": "0xf7e48140"}) == {"puts": 0xF7E48140}
+    assert _parse_leaks('puts=0xf7e48140, fgets=4194304') == {
+        "puts": 0xF7E48140, "fgets": 4194304}
+    assert _parse_leaks("junk") == {}
+
+
+def test_pick_libc_build_requires_single_base():
+    from vulnclaw.agent.pwn_local import _pick_libc_build
+    cands = [
+        {"id": "good_i386", "download_url": "u1",
+         "symbols": {"puts": "0x5e140", "fgets": "0x5c620", "system": "0x3ada0"}},
+        {"id": "bad_diff", "download_url": "u2",
+         "symbols": {"puts": "0x76140", "fgets": "0x747f0", "system": "0x4a4e0"}},
+    ]
+    leaks = {"puts": 0xF7DF9140, "fgets": 0xF7DF7620}
+    out = _pick_libc_build(cands, leaks)
+    assert [m["id"] for m in out] == ["good_i386"]
+    assert out[0]["base"] == 0xF7DF9140 - 0x5E140
+    assert out[0]["system"] == 0x3ADA0
+    # unaligned candidates are dropped
+    leaks2 = {"puts": 0xF7DF9141}
+    assert _pick_libc_build(cands, leaks2) == []
+
+
+def test_dispatch_includes_libc_lookup():
+    import asyncio
+    from vulnclaw.agent.pwn_local import execute_pwn_local_tool
+    out = asyncio.run(execute_pwn_local_tool(None, "libc_lookup", {"symbols": {}}))
+    assert "requires symbols" in out

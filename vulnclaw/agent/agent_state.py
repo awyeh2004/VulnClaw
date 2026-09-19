@@ -366,6 +366,12 @@ class AgentState(BaseModel):
     completed: bool = False
     complete_reason: str = ""
     final_answer: str = ""
+    # One-shot nudge flags for the solve loop (declared: pydantic v2 would
+    # raise on dynamic setattr of undeclared names, silently killing the
+    # nudges inside their try/except guards).
+    blackboard_nudged: bool = False
+    pwn_local_reminded: bool = False
+    lock_nudge_count: int = 0
     evidence_seq: int = Field(default=0, exclude=True)
     step_seq: int = Field(default=0, exclude=True)
     claim_seq: int = Field(default=0, exclude=True)
