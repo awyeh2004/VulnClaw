@@ -742,6 +742,60 @@ class CompetitionConfig(BaseModel):
     )
 
 
+class SSHHostConfig(BaseModel):
+    """One remote host the agent may reach over SSH for live IR / pentest.
+
+    Deliberately an explicit inventory rather than free-form "host" strings on
+    the tool call: a real engagement (and a competition rulebook) cares about
+    *which* machines are in scope, and an alias-based inventory is the place to
+    enforce that. ``remote_exec`` accepts an alias, and the resolved hostname is
+    what gets approved and logged.
+    """
+
+    hostname: str = Field(description="IP or DNS name actually connected to")
+    port: int = Field(default=22, description="SSH port")
+    username: str = Field(default="root", description="SSH login user")
+    key_file: str = Field(
+        default="",
+        description="Private key path. Empty = fall back to ssh-agent, then ~/.ssh/id_*.",
+    )
+    password: str = Field(
+        default="",
+        description="Password auth fallback. Only used when no key succeeds.",
+    )
+    host_key_policy: str = Field(
+        default="known_hosts",
+        description=(
+            "known_hosts (default, strict) | accept_new (TOFU: record and "
+            "report the fingerprint, then trust it) | insecure (no check)"
+        ),
+    )
+    note: str = Field(default="", description="Free-form label (role, owner, why in scope)")
+
+
+class RemoteConfig(BaseModel):
+    """Remote (SSH) execution inventory.
+
+    Empty by default: remote execution stays inert until the operator declares
+    which hosts are in scope.
+    """
+
+    hosts: dict[str, SSHHostConfig] = Field(
+        default_factory=dict,
+        description="alias -> host. Aliases keep commands short and auditable.",
+    )
+    connect_timeout_s: float = Field(
+        default=15.0, description="TCP/SSH handshake timeout"
+    )
+    command_timeout_s: float = Field(
+        default=60.0, description="Default per-command timeout; overridable per call"
+    )
+    max_output_chars: int = Field(
+        default=60_000,
+        description="Truncate remote output beyond this many chars (tail kept)",
+    )
+
+
 class VulnClawConfig(BaseModel):
     """Top-level VulnClaw configuration."""
 
@@ -753,6 +807,7 @@ class VulnClawConfig(BaseModel):
     recon: ReconConfig = Field(default_factory=ReconConfig)
     gcs: "GCSPLatformConfig" = Field(default_factory=lambda: GCSPLatformConfig())
     competition: CompetitionConfig = Field(default_factory=CompetitionConfig)
+    remote: RemoteConfig = Field(default_factory=RemoteConfig)
 
     model_config = ConfigDict(
         env_prefix="VULNCLAW_",

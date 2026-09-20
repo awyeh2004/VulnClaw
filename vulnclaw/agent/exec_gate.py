@@ -60,12 +60,17 @@ def visualize_single_line_for_display(text: str) -> str:
 
 # ── Request / view ───────────────────────────────────────────────────────
 
+# Kinds whose `display` is a shell command line, and which are therefore subject
+# to the read-only command classifier. Kept as a module constant so the gate and
+# any future kind stay honest about which requests can skip approval.
+_COMMAND_KINDS = ("shell", "remote")
+
 
 @dataclass(frozen=True)
 class GateRequest:
     """One canonical, content-addressed execution request."""
 
-    kind: str  # "shell" | "python" | "php_diff" | "poc"
+    kind: str  # "shell" | "python" | "php_diff" | "poc" | "remote"
     display: str  # raw command or source code
     cwd: str = ""
     detail: str = ""  # extra context shown under the command
@@ -279,9 +284,16 @@ class ExecutionGate:
             return GateOutcome(True, "approved")
 
         # ── auto_review: Codex-style command classification ───────────────
-        # Shell commands matching the read-only table or operator trusted
-        # prefixes run unattended; everything else degrades to the normal
-        # per-request approval flow (interactive channel or stable refusal).
+        # Kinds whose `display` is a plain shell command line are eligible for
+        # the read-only table or the operator's trusted prefixes; everything
+        # else degrades to the normal per-request approval flow (interactive
+        # channel or stable refusal).
+        #
+        # "remote" is included deliberately: a remote `ps aux` is exactly as
+        # safe as a local one, and excluding it would make every remote recon
+        # command prompt -- the fastest way to train an operator into
+        # approving blindly, which is worse than not asking at all.
+        #
         # Non-shell kinds (python/php/poc) are interpreters by definition and
         # always take the approval path in this mode.
         #
@@ -291,7 +303,11 @@ class ExecutionGate:
         # running without approval.
         flagged_review = request.model_risk == "review"
         classifier_reason = ""
-        if self.mode == "auto_review" and request.kind == "shell" and not flagged_review:
+        if (
+            self.mode == "auto_review"
+            and request.kind in _COMMAND_KINDS
+            and not flagged_review
+        ):
             from vulnclaw.agent.command_classifier import classify_shell_command
 
             verdict = classify_shell_command(request.display, self.trusted_commands)

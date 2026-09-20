@@ -1289,6 +1289,17 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         except Exception as e:
             return f"[!] pwn_local 工具执行错误: {e}"
 
+    # ── Remote (SSH) — live IR / pentest against a declared host inventory ──
+    # Note: these route through ExecutionGate with kind="remote", so the same
+    # read-only command classifier that governs local shell_command also governs
+    # remote commands. Do not add a bypass here.
+    if tool_name in _REMOTE_TOOL_NAMES:
+        try:
+            from vulnclaw.agent.remote import execute_remote_tool
+            return await execute_remote_tool(agent, tool_name, args)
+        except Exception as e:
+            return f"[!] remote 工具执行错误: {type(e).__name__}: {e}"
+
     # ── 后台任务（爆破等耗时操作不阻塞）───────────────────────────────────────
     if tool_name in _BG_TOOL_NAMES:
         if tool_name == "bg_launch":
@@ -1528,6 +1539,12 @@ def infer_ports_from_nmap_args(args: dict[str, Any]) -> list[int]:
     return []
 
 
+# Remote (SSH) tools. Kept next to the other name sets so the dispatch branch at
+# the top of this module and the registrations below stay in sync.
+_REMOTE_TOOL_NAMES = frozenset(
+    {"remote_exec", "remote_collect", "remote_fetch", "remote_hosts"}
+)
+
 # Core tools always available regardless of the inferred task type: they are
 # cheap, general-purpose and often needed for grounding/verification.
 _ALWAYS_KEEP_TOOLS = frozenset({
@@ -1554,6 +1571,10 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "pwn_local_replay",
     "pwn_local_stop",
     "libc_lookup",
+    "remote_exec",
+    "remote_collect",
+    "remote_fetch",
+    "remote_hosts",
     "lookup_playbook",
     "save_playbook",
     "web_map_add",
@@ -1703,6 +1724,10 @@ def build_openai_tools(
     from vulnclaw.agent.pwn_local import pwn_local_tool_schemas
 
     for schema in pwn_local_tool_schemas():
+        append_tool(schema)
+
+    from vulnclaw.agent.remote import remote_tool_schemas
+    for schema in remote_tool_schemas():
         append_tool(schema)
 
     if include_subagent_tool:
