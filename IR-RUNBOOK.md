@@ -85,20 +85,21 @@ python .ir-tools\verify-ir.py
 
 | 组 | 检查什么 |
 |---|---|
-| **A** | 技能能被发现、SKILL.md 能解析、frontmatter 正确、12 个 reference 全部可读 |
-| **B** | 结构完整性（12 篇正文齐全，缺一即 FAIL） |
+| **A** | 技能能被发现、SKILL.md 能解析、frontmatter 正确、13 个 reference 全部可读 |
+| **B** | 结构完整性（13 篇正文齐全，缺一即 FAIL） |
 | **C** | 路由（8 个应命中 + 1 个对照不应命中） |
 | **D** | 工具箱（关键文件 + yara 实际编译匹配 + ⭐ **vol 真实分析** banners） |
 | **E** | Log Parser（可选） |
+| **F** | ⭐ **远程执行模块**（4 个工具 schema + 审批门覆盖 remote + 采集脚本生成 + 归档安全） |
 
 **期望输出**（实测基线，`2026-09-20`）：
 
 ```
-PASS=66  FAIL=0  WARN=0
+PASS=76  FAIL=0  WARN=0
 结论: 功能可用
 ```
 
-**WARN=0** —— 12 篇 reference 全部写完，不再有"待补"项。
+**WARN=0** —— 13 篇 reference 全部写完，不再有"待补"项。
 **FAIL > 0 才需要处理。**
 
 ### 单独测某一块
@@ -181,6 +182,7 @@ vulnclaw/skills/specialized/incident-response/
    ├─ 50-memory-traffic.md     ⭐ 内存取证 / 流量分析（tshark·vol·dpkt，全部实测）
    ├─ 60-tools.md              工具落点（CLI/GUI 场景区分）
    ├─ casebook.md              真实处置案例 + 跨主机溯源范例
+   ├─ offline-collection.md    ⭐ 离线取证收集与分诊（远程固化现场 + 证据登记）
    └─ events/
       ├─ webshell.md           11维检测 / 内存马 / 落库型后门 / 流量特征
       ├─ cryptomining.md       分型判据 / 自删除 / base64定时任务 / 清除顺序
@@ -188,8 +190,89 @@ vulnclaw/skills/specialized/incident-response/
       └─ ransomware.md         四项判据 / ⭐错误处置方法 / 查询解密工具
 ```
 
-**全部 12 篇已写完**（`50-memory-traffic.md` 是最后一篇），
-`load_skill_reference` 实测全部可加载，无 `None`。
+**全部 13 篇已写完**，`load_skill_reference` 实测全部可加载，无 `None`。
+
+---
+
+## 四点四、⭐ 远程实操（SSH）：remote_* 工具
+
+**赛题是多题形式：一部分远程实操（给你 SSH），一部分离线取证。**
+目标是**另一台机器**时，别用 `shell_command` 拼 `ssh` 命令 —— 用这三个工具。
+
+### 配置：主机清单（必须先做，否则工具完全惰性）
+
+```yaml
+# ~/.vulnclaw/config.yaml
+remote:
+  hosts:
+    victim1:
+      hostname: 10.0.0.5
+      port: 22
+      username: root
+      key_file: C:/Users/me/.ssh/id_ed25519   # 留空则用 ssh-agent / 默认密钥
+      # password: ''                          # 无密钥时的兜底（会出现在审批详情里，慎用）
+      host_key_policy: accept_new             # 见下
+      note: 应急响应靶机
+  connect_timeout_s: 15
+  command_timeout_s: 60
+```
+
+⭐ **为什么是"清单制"而不是直接传 host 字符串**：比赛规则关心**哪些机器在范围内**。
+别名制让"目标是谁"在审批界面和日志里始终可见，也让未声明的机器**根本连不上**。
+这也是将来接"越界黑名单"的接缝。
+
+### 工具
+
+| 工具 | 用途 |
+|---|---|
+| `remote_hosts` | 列出已配置别名（先跑这个，别猜主机名） |
+| `remote_collect` | ⭐ **一次性只读采集 33 段**并打包拉回本地、自动解包 |
+| `remote_exec` | 在远程跑单条命令 |
+| `remote_fetch` | SFTP 取单个大文件（内存镜像、pcap） |
+
+### ⭐ 关键设计：远程命令走**同一个**审批门
+
+`remote_exec` 的 `kind="remote"` 被纳入**同一套只读分类器**，所以：
+
+| 远程命令 | 行为 |
+|---|---|
+| `ps aux` / `ls -al` / `cat /etc/passwd` / `crontab -l` | ✅ `auto_review` 下**免批准** |
+| `rm` / `userdel` / `systemctl stop` / 重定向 `>` / 解释器 | ⚠️ **仍弹窗** |
+
+> 这是刻意的：如果远程命令不走审批门，这个模块就成了**绕过唯一安全控制**的后门。
+> 而如果远程命令全部弹窗，人会被训练成无脑点同意 —— 那比不弹更糟。
+
+**批量采集是"一次性整体审批"**：审批界面会列出全部 33 条命令
+（`collect_plan()` 与真正执行的脚本由**同一个常量**生成，不可能不一致）。
+
+### ⚠️ 主机密钥策略（现场必读）
+
+| 策略 | 行为 | 什么时候用 |
+|---|---|---|
+| `known_hosts`（默认） | 未知主机**直接报错** | 有既有 known_hosts 的长期环境 |
+| `accept_new` | TOFU：接受并在输出里**报告指纹** | ⭐ **比赛现场**（全新的靶机，没有既有记录） |
+| `insecure` | 不校验 | 不建议 |
+
+> 无论哪种模式，**观测到的指纹都会打进工具输出**，留审计痕迹。
+> 比赛 VM 一定是首次连接，所以现场要用 `accept_new`；但别把它当默认。
+
+### 采集什么（33 段）
+
+覆盖各篇 reference 的检查点：账号/sudoers/authorized_keys、进程/`/proc/*/exe`/
+命令行与环境变量、socket 与网络连接、内核模块与 syscall 表、**cron 全部位置**、
+systemd、启动项、`ld.so.preload`、历史命令、Web 根与上传目录、隐藏 dotfile、
+SUID/SGID 与 capabilities、世界可写目录、**已删除但仍占用**的可执行、
+近 14 天改动、系统与 Web 日志、网络配置与防火墙、软件包、sshd 配置、
+容器痕迹、**反取证线索**。
+
+> ⚠️ 采集用的是**目标上已有的** POSIX 工具（实测目标可能没有 python/busybox/curl）。
+> 不在目标上装任何东西。
+
+### ⚠️ 采集完记得清理，否则污染证据
+
+演练实测踩到：采集/setup 脚本留在目标 `/tmp` 后，**它出现在"近期改动文件"和
+"隐藏文件"清单里**，agent 无法区分"攻击者的"还是"分析员自己的"。
+采完删掉自己的脚本，或在报告里标注哪些文件是分析工具产生的。
 
 ---
 
