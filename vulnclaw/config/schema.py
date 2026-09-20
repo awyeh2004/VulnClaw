@@ -740,6 +740,23 @@ class CompetitionConfig(BaseModel):
         default=True,
         description="At match start, download all challenge attachments so a slow backend never blocks analysis.",
     )
+    # Flag submission is a STATE-CHANGING action on the scoring platform, and the
+    # competition handbook treats "非有效操作" (invalid operations) as grounds for
+    # disqualification. A guessed or exploratory submission is exactly that, so
+    # this defaults to OFF and must be enabled deliberately:
+    #   yaml:  competition.allow_flag_submission: true
+    #   env:   VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION=true
+    # Everything else the platform offers (listing / reading / starting an
+    # environment / stopping it) stays available -- only the irreversible action
+    # is gated. The per-challenge attempt cap in submit_guard still applies on top.
+    allow_flag_submission: bool = Field(
+        default=False,
+        description=(
+            "Allow ctf2_submit_flag to send a flag to the platform. OFF by default: "
+            "an exploratory or wrong submission counts as an invalid operation, which "
+            "the handbook treats as grounds for disqualification."
+        ),
+    )
 
 
 class SSHHostConfig(BaseModel):

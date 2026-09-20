@@ -2,17 +2,17 @@
 
 Two API surfaces share the same host:
 
-- ``/api/open/v1/user`` — the public Open API. Authenticated with a personal
+- ``/api/open/v1/user`` 鈥?the public Open API. Authenticated with a personal
   access token via the ``X-CTF2-API-Key`` header. Covers practice listing /
   challenge reads / environment start / flag submission.
-- ``/api/v1`` — the front-end session API. Authenticated with the Bearer JWT
+- ``/api/v1`` 鈥?the front-end session API. Authenticated with the Bearer JWT
   that the SPA keeps in localStorage. Needed for the pieces the Open API
   deliberately omits: live target connection info (host/port after start) and
   challenge attachment downloads.
 
 Token sources, in order of precedence:
-1. ``VULNCLAW_CTF2_API_KEY`` — Open API personal access token.
-2. ``VULNCLAW_CTF2_SESSION_TOKEN`` — front-end Bearer JWT for the session API.
+1. ``VULNCLAW_CTF2_API_KEY`` 鈥?Open API personal access token.
+2. ``VULNCLAW_CTF2_SESSION_TOKEN`` 鈥?front-end Bearer JWT for the session API.
    When unset, ``session_token()`` may auto-read it from the local Edge/Chrome
    profile localStorage so a logged-in browser session can be reused.
 3. ``VULNCLAW_CTF2_BASE_URL`` override for the API root (defaults to the public
@@ -124,19 +124,19 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, **kwargs) 
 async def list_practice(limit: int = 20) -> dict:
     """List visible public practice grounds."""
     client = get_client()
-    return await _request(client, "GET", "/practice/", params={"limit": limit})
+    return await _request_with_fallback(client, "GET", "/practice/", params={"limit": limit})
 
 
 async def list_daily(limit: int = 20) -> dict:
     """List visible daily challenges."""
     client = get_client()
-    return await _request(client, "GET", "/daily/", params={"limit": limit})
+    return await _request_with_fallback(client, "GET", "/daily/", params={"limit": limit})
 
 
 async def read_challenge(practice_id: str, challenge_id: str) -> dict:
     """Read a practice challenge description."""
     client = get_client()
-    return await _request(
+    return await _request_with_fallback(
         client,
         "GET",
         f"/practice/{practice_id}/challenges/{challenge_id}/",
@@ -146,7 +146,7 @@ async def read_challenge(practice_id: str, challenge_id: str) -> dict:
 async def start_environment(practice_id: str, challenge_id: str) -> dict:
     """Start (or reuse) a practice environment, returning its connection info."""
     client = get_client(timeout=120.0)
-    return await _request(
+    return await _request_with_fallback(
         client,
         "POST",
         f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
@@ -169,10 +169,94 @@ async def _session_request(
     return response.json()
 
 
+# 鈹€鈹€ Open API with a session-API fallback 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#
+# WHY: the two APIs disagree about who may read the same data. The Open API
+# (``/api/open/v1/user`` + ``X-CTF2-API-Key``) covers practice listing, challenge
+# reads, environment start and flag submission; the front-end session API
+# (``/api/v1`` + the SPA's Bearer JWT) exposes the SAME resources and also the
+# pieces the Open API deliberately omits (live target address, attachments).
+#
+# Measured on a real account with only a browser session (no personal access
+# token): every Open API call returned
+#    401 {"code": "AUTH_REQUIRED", "key": "errors.auth.permission_denied"}
+# while the equivalent session paths returned 200. So a perfectly usable
+# logged-in account looked completely broken.
+#
+# The fallback is therefore: prefer the Open API (it is the documented, stable
+# surface), and fall back to the session API when no API key is configured OR
+# the Open API refuses with 401/403. Any other error propagates unchanged --
+# silently retrying a 500 or a 404 would hide real breakage.
+
+# Open API path -> the equivalent session API path (same resource).
+_SESSION_ROUTES: dict[str, str] = {
+    "/practice/": "/practice/",
+    "/competitions/": "/competitions/",
+}
+
+# Open API prefixes that map onto a session path by suffix.
+_SESSION_PREFIX_ROUTES: tuple[tuple[str, str], ...] = (
+    ("/practice/", "/practice/"),
+)
+
+
+def _session_path_for(path: str) -> str | None:
+    """Best-effort mapping of an Open API path to its session API twin."""
+    direct = _SESSION_ROUTES.get(path)
+    if direct is not None:
+        return direct
+    # e.g. /practice/<pid>/challenges/<cid>/environment/start/
+    #   -> /api/v1/practice/<pid>/challenges/<cid>/environment/start/
+    # The session API mirrors the resource path for practice sub-resources, so
+    # the same string works once the prefix differs.
+    if path.startswith("/practice/"):
+        return path
+    if path.startswith("/daily/"):
+        return None  # no session twin observed; do not invent one
+    return None
+
+
+async def _request_with_fallback(
+    client: httpx.AsyncClient, method: str, path: str, **kwargs
+) -> dict:
+    """Try the Open API, then the session API when auth is the only obstacle."""
+    token = api_token()
+    if not token:
+        session_path = _session_path_for(path)
+        if session_path is not None and session_token():
+            return await _session_request(client, method, session_path, **kwargs)
+        # No usable credential for the documented route: report the actionable
+        # cause instead of a bare 401.
+        if not session_token():
+            raise RuntimeError(
+                "CTF2 credentials missing: set VULNCLAW_CTF2_API_KEY (Open API personal "
+                "access token) or log in to CTF2 in Edge/Chrome so the session token "
+                "can be read from localStorage."
+            )
+        raise RuntimeError(
+            f"CTF2 Open API needs a personal access token for {path}; the session "
+            "token cannot cover this route."
+        )
+
+    try:
+        # NOTE: must be the raw _request, not this function -- an earlier bulk
+        # edit rewrote this line too and made it recurse forever.
+        return await _request(client, method, path, **kwargs)
+    except RuntimeError as exc:
+        # _raise_for_status renders as "CTF2 API 401: ..." / "CTF2 API 403: ..."
+        text = str(exc)
+        auth_denied = " 401:" in text or " 403:" in text
+        session_path = _session_path_for(path)
+        if not (auth_denied and session_path is not None and session_token()):
+            raise
+        return await _session_request(client, method, session_path, **kwargs)
+
+
+
 async def get_target(practice_id: str, challenge_id: str) -> dict:
     """Return live target connection info (host/port/url) for a started challenge.
 
-    Requires the front-end session token (Bearer JWT) — the Open API cannot see
+    Requires the front-end session token (Bearer JWT) 鈥?the Open API cannot see
     target addresses. May return ``{"data": null}`` until a target is running.
     """
     client = get_client(timeout=60.0)
@@ -211,7 +295,7 @@ async def stop_target(practice_id: str, challenge_id: str) -> dict:
 async def submit_flag(practice_id: str, challenge_id: str, flag: str) -> dict:
     """Submit a confirmed practice flag (requires ``confirmation: true``)."""
     client = get_client()
-    return await _request(
+    return await _request_with_fallback(
         client,
         "POST",
         f"/practice/{practice_id}/challenges/{challenge_id}/submit/",
@@ -222,13 +306,13 @@ async def submit_flag(practice_id: str, challenge_id: str, flag: str) -> dict:
 async def list_competitions(limit: int = 20) -> dict:
     """List visible competitions."""
     client = get_client()
-    return await _request(client, "GET", "/competitions/", params={"limit": limit})
+    return await _request_with_fallback(client, "GET", "/competitions/", params={"limit": limit})
 
 
 async def list_stage_challenges(stage_id: str, limit: int = 50) -> dict:
     """List visible challenges in a competition stage."""
     client = get_client()
-    return await _request(
+    return await _request_with_fallback(
         client,
         "GET",
         f"/stages/{stage_id}/challenges/",
@@ -239,7 +323,7 @@ async def list_stage_challenges(stage_id: str, limit: int = 50) -> dict:
 async def list_submissions(limit: int = 20) -> dict:
     """List current user submissions (recent flag attempts)."""
     client = get_client()
-    return await _request(
+    return await _request_with_fallback(
         client,
         "GET",
         "/submissions/",
