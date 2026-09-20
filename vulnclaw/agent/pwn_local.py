@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -52,15 +53,37 @@ _DEFAULT_IMAGE_TAG = "22.04"
 # plain `apt-get update` on archive.ubuntu.com 404s for these.
 _EOL_TAGS = {"16.04", "18.04", "20.04"}
 
-# Docker Hub is unreachable from some networks (DNS poisoning); these mirror
-# prefixes are used as fallbacks when a direct pull fails. Override with
-# VULNCLAW_DOCKER_MIRRORS="m1,m2".
-_DEFAULT_MIRRORS = [
+# Docker Hub is unreachable from some networks (DNS poisoning). Third-party
+# registry mirrors are a *deliberate* trust decision, not a safe default:
+# Docker does not verify image signatures, and the helper image's RUN steps
+# execute inside whatever rootfs the mirror serves. They are therefore OFF by
+# default — opt in per operator with:
+#
+#   VULNCLAW_DOCKER_MIRRORS="docker.1ms.run,docker.m.daocloud.io"
+#
+# Direct pulls from Docker Hub are always attempted first, so opting in costs
+# nothing on networks where Hub is reachable.
+_DEFAULT_MIRRORS: list[str] = []
+
+# Kept for documentation/reference when an operator asks how to unblock Hub.
+_KNOWN_MIRRORS = [
     "docker.1ms.run",
     "docker.m.daocloud.io",
     "hub.rat.dev",
     "dockerproxy.net",
 ]
+
+_MIRROR_HINT = (
+    "if Docker Hub is unreachable from this network (DNS poisoning), opt in to "
+    "a third-party registry mirror explicitly with "
+    'VULNCLAW_DOCKER_MIRRORS="docker.1ms.run" — note that Docker does not verify '
+    "image signatures, and this build executes inside the pulled rootfs"
+)
+
+# apt mirror host/path only: it is interpolated into a `RUN sed` expression, so
+# anything that could break out of the s/// command is rejected outright.
+_APT_MIRROR_RE = re.compile(r"^[A-Za-z0-9.\-]+(?::\d+)?(?:/[A-Za-z0-9._\-]+)*$")
+_DEFAULT_APT_MIRROR = "mirrors.aliyun.com/ubuntu"
 
 HELPER_IMAGE = "vulnclaw-pwn"
 
@@ -117,17 +140,33 @@ def helper_image_name(tag: str) -> str:
     return f"{HELPER_IMAGE}:{tag}"
 
 
+def _apt_mirror() -> str:
+    """Resolve VULNCLAW_APT_MIRROR, refusing anything unsafe to interpolate.
+
+    The value lands inside a ``RUN sed -i 's|…|http://<mirror>|g'`` expression,
+    so a malformed value (containing ``|``, quotes, ``;``, whitespace…) could
+    inject build commands. An operator-supplied value is semi-trusted, but
+    validating it costs nothing and keeps the Dockerfile well-formed.
+    """
+    raw = os.environ.get("VULNCLAW_APT_MIRROR", "").strip().rstrip("/")
+    if not raw:
+        return _DEFAULT_APT_MIRROR
+    if not _APT_MIRROR_RE.match(raw):
+        return _DEFAULT_APT_MIRROR
+    return raw
+
+
 def helper_dockerfile(tag: str) -> str:
     """Distro image + socat + 32-bit runtime so both arches replay anywhere.
 
     apt sources are repointed to a mirror for every tag: EOL distros (16.04
     etc.) no longer exist on archive.ubuntu.com at all, and the mirror is
     reachable from CN networks with or without a VPN. Override with
-    VULNCLAW_APT_MIRROR.
+    VULNCLAW_APT_MIRROR (validated; falls back to the default when malformed).
+    Ubuntu's apt signatures are still verified, so the mirror swap does not
+    weaken image integrity — only availability.
     """
-    mirror = os.environ.get(
-        "VULNCLAW_APT_MIRROR", "mirrors.aliyun.com/ubuntu"
-    ).strip().rstrip("/")
+    mirror = _apt_mirror()
     return (
         f"FROM ubuntu:{tag}\n"
         "ENV DEBIAN_FRONTEND=noninteractive\n"
@@ -141,8 +180,37 @@ def helper_dockerfile(tag: str) -> str:
 
 
 def container_name(binary_path: str) -> str:
-    digest = hashlib.sha1(str(binary_path).encode("utf-8")).hexdigest()[:10]
+    """Deterministic container name for a binary.
+
+    The path is normalized to an absolute one first: ``pwn_local_replay`` and
+    ``pwn_local_stop`` must derive the *same* name from the same binary, or a
+    relative path in one call would leak a running container.
+    """
+    try:
+        normalized = str(Path(binary_path).expanduser().resolve())
+    except (OSError, ValueError, RuntimeError):
+        normalized = str(binary_path)
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:10]
     return f"{HELPER_IMAGE}-{digest}"
+
+
+# Container resource caps: a challenge binary is untrusted code, and socat's
+# `fork` mode turns a fork bomb into a host-wide resource exhaustion. Override
+# with VULNCLAW_PWN_MEMORY / VULNCLAW_PWN_CPUS / VULNCLAW_PWN_PIDS.
+_DEFAULT_MEMORY_LIMIT = "512m"
+_DEFAULT_CPU_LIMIT = "1.0"
+_DEFAULT_PIDS_LIMIT = "128"
+
+
+def _resource_limit_flags() -> list[str]:
+    def _env(name: str, default: str) -> str:
+        return (os.environ.get(name) or "").strip() or default
+
+    return [
+        "--memory", _env("VULNCLAW_PWN_MEMORY", _DEFAULT_MEMORY_LIMIT),
+        "--cpus", _env("VULNCLAW_PWN_CPUS", _DEFAULT_CPU_LIMIT),
+        "--pids-limit", _env("VULNCLAW_PWN_PIDS", _DEFAULT_PIDS_LIMIT),
+    ]
 
 
 def _free_port() -> int:
@@ -180,6 +248,11 @@ def _run(cmd: list[str], *, timeout_s: float = 120) -> tuple[int, str, str]:
 
 
 def _mirror_list() -> list[str]:
+    """Third-party registry mirrors to try after a direct pull fails.
+
+    Empty unless the operator opted in via VULNCLAW_DOCKER_MIRRORS — see the
+    comment on _DEFAULT_MIRRORS for why this is not a default.
+    """
     custom = os.environ.get("VULNCLAW_DOCKER_MIRRORS", "").strip()
     if custom:
         return [m.strip() for m in custom.split(",") if m.strip()]
@@ -187,10 +260,11 @@ def _mirror_list() -> list[str]:
 
 
 def _pull_base_image(tag: str) -> tuple[bool, str]:
-    """Pull library/ubuntu:<tag> directly, falling back to mirror prefixes.
+    """Pull library/ubuntu:<tag> directly, then from opted-in mirrors.
 
     Returns (ok, error_message). Direct-first keeps VPN'd setups on the
-    canonical image; mirrors cover networks where Hub is DNS-poisoned.
+    canonical image; mirrors cover networks where Hub is DNS-poisoned but must
+    be opted into explicitly (unsigned rootfs pulled from a third party).
     """
     attempts: list[list[str]] = [["pull", f"library/ubuntu:{tag}"]]
     for mirror in _mirror_list():
@@ -218,9 +292,10 @@ def _ensure_helper_image(tag: str) -> tuple[bool, str]:
     if not (code == 0 and out.strip()):
         ok, err = _pull_base_image(tag)
         if not ok:
+            suffix = "" if _mirror_list() else f" — {_MIRROR_HINT}"
             return False, (
                 f"[pwn_local] cannot obtain base image ubuntu:{tag} "
-                f"(direct + mirrors failed): {err}"
+                f"(direct pull failed): {err}{suffix}"
             )
     with tempfile.TemporaryDirectory() as td:
         df = Path(td) / "Dockerfile"
@@ -250,10 +325,31 @@ def _wait_port(port: int, timeout_s: float = 20.0) -> bool:
 
 
 def start_replay(binary_path: str, port: int | None = None) -> str:
-    p = Path(binary_path)
-    if not p.exists():
+    p = Path(binary_path).expanduser()
+    if not p.is_absolute():
+        # A relative path would bind-mount cwd (or fail as an invalid volume
+        # name); the tool contract asks for an absolute path.
+        return (
+            f"[pwn_local] binary_path must be absolute, got {binary_path!r} "
+            f"(resolved: {p.resolve()})"
+        )
+    try:
+        p = p.resolve()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"[pwn_local] cannot resolve binary_path {binary_path!r}: {exc}"
+    if not p.is_file():
         return f"[pwn_local] binary not found: {binary_path}"
-    data = p.read_bytes()
+    try:
+        data = p.read_bytes()
+    except OSError as exc:
+        return f"[pwn_local] cannot read {p}: {exc}"
+    if not data.startswith(b"\x7fELF"):
+        # Only mount/execute something that is actually an ELF: without this
+        # check any host file the agent names gets bound into the container.
+        return (
+            f"[pwn_local] {p} is not an ELF binary (bad magic) — refusing to "
+            "mount it into the replay container"
+        )
     info = detect_binary_info(data)
     tag = image_tag_for(info)
 
@@ -265,7 +361,8 @@ def start_replay(binary_path: str, port: int | None = None) -> str:
     name = container_name(str(p))
     # Self-heal: a leftover container from a previous run would keep the name.
     _run(["rm", "-f", name], timeout_s=30)
-    mount_dir = str(p.parent)
+    # Mount the binary itself, not its parent directory: a directory mount
+    # exposes every sibling file to a root container for no benefit.
     remote = f"/chall/{p.name}"
     cmd = (
         f"exec socat TCP-LISTEN:{port},reuseaddr,fork "
@@ -274,7 +371,8 @@ def start_replay(binary_path: str, port: int | None = None) -> str:
     code, out, err = _run(
         [
             "run", "-d", "--rm", "--name", name,
-            "-v", f"{mount_dir}:/chall:ro",
+            *_resource_limit_flags(),
+            "-v", f"{p}:{remote}:ro",
             "-p", f"127.0.0.1:{port}:{port}",
             helper_image_name(tag),
             "bash", "-c", cmd,
@@ -332,18 +430,61 @@ def _parse_leaks(raw: Any) -> dict[str, int]:
     return leaks
 
 
-def _pick_libc_build(cands: list[dict], leaks: dict[str, int]) -> list[dict[str, Any]]:
+def _arch_aliases(arch: str) -> set[str]:
+    """Normalize the caller's arch argument into the spellings libc.rip uses."""
+    a = (arch or "").strip().lower()
+    if a in ("amd64", "x86_64", "x64", "x86-64", "64"):
+        return {"amd64", "x86_64"}
+    if a in ("i386", "i486", "i586", "i686", "x86", "386", "32"):
+        return {"i386", "i686", "x86"}
+    if a in ("arm64", "aarch64"):
+        return {"arm64", "aarch64"}
+    if a in ("armhf", "armel", "arm"):
+        return {"armhf", "armel", "arm"}
+    return {a} if a else set()
+
+
+def _candidate_arch(cand: dict) -> str:
+    """Best-effort arch of one libc.rip candidate ('' when undeterminable).
+
+    libc.rip returns an explicit ``arch`` field for most builds; older entries
+    only carry it inside the id (``libc6_2.27-3ubuntu1_amd64``). Both shapes are
+    handled here so the filter does not silently no-op if the field is absent.
+    """
+    explicit = str(cand.get("arch") or "").strip().lower()
+    if explicit:
+        return explicit
+    ident = f"{cand.get('id', '')} {cand.get('build', '')}".lower()
+    for probe in ("amd64", "x86_64", "i386", "i686", "arm64", "aarch64",
+                  "armhf", "armel", "mips", "ppc", "s390"):
+        if probe in ident:
+            return probe
+    return ""
+
+
+def _pick_libc_build(
+    cands: list[dict], leaks: dict[str, int], arch: str = ""
+) -> list[dict[str, Any]]:
     """Keep candidates where ALL leaked symbols share ONE page-aligned base.
 
     Returns [{id, base, system, download_url}] best (most symbols matched,
     lowest base) first. Requires >=1 symbol; libc.rip already narrows by the
     low 12 bits of each provided symbol, so alignment re-check is the gate.
+
+    ``arch`` filters client-side: a candidate whose arch is *known and
+    different* is dropped; a candidate whose arch cannot be determined is kept
+    (filtering it out would silently lose valid matches on API changes).
     """
+    wanted = _arch_aliases(arch)
     out: list[dict[str, Any]] = []
     for c in cands or []:
         syms = c.get("symbols") or {}
         if not isinstance(syms, dict):
             continue
+        if wanted:
+            found = _candidate_arch(c)
+            if found and found not in wanted:
+                continue
         base = None
         ok = True
         for name, addr in leaks.items():
@@ -379,7 +520,11 @@ def _pick_libc_build(cands: list[dict], leaks: dict[str, int]) -> list[dict[str,
 
 
 def libc_lookup(leaks: dict[str, int], arch: str = "i386") -> str:
-    """Query libc.rip and report builds consistent with the leaked addresses."""
+    """Query libc.rip and report builds consistent with the leaked addresses.
+
+    ``arch`` is applied as a client-side filter (see ``_pick_libc_build``); the
+    arch is *not* sent to libc.rip, whose /api/find contract is symbols-only.
+    """
     if not leaks:
         return "[!] libc_lookup requires at least one leaked symbol address"
     import ssl
@@ -391,14 +536,23 @@ def libc_lookup(leaks: dict[str, int], arch: str = "i386") -> str:
         headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=25, context=ssl.create_default_context()) as resp:
         cands = json.loads(resp.read())
-    matches = _pick_libc_build(cands, leaks)
+    matches = _pick_libc_build(cands, leaks, arch)
+    arch_txt = f" (arch={arch})" if (arch or "").strip() else ""
     if not matches:
+        total = len(cands) if isinstance(cands, list) else 0
+        if total and (arch or "").strip():
+            return (
+                f"[libc_lookup] libc.rip returned {total} candidate(s) for "
+                f"{ {k: hex(v) for k, v in leaks.items()} } but none match "
+                f"arch={arch} with all leaks at one page-aligned base — retry "
+                "with the other arch (i386/amd64) or leak more symbols"
+            )
         return (
             f"[libc_lookup] no build in libc.rip puts ALL of "
             f"{ {k: hex(v) for k, v in leaks.items()} } at one page-aligned "
             "base — leak more symbols or the build is not in the DB"
         )
-    lines = [f"[libc_lookup] {len(matches)} consistent build(s):"]
+    lines = [f"[libc_lookup] {len(matches)} consistent build(s){arch_txt}:"]
     for m in matches[:5]:
         sys_txt = hex(m["system"]) if m["system"] is not None else "?"
         lines.append(
@@ -456,7 +610,12 @@ def pwn_local_tool_schemas() -> list[dict[str, Any]]:
                     "properties": {
                         "binary_path": {
                             "type": "string",
-                            "description": "Absolute path to the challenge ELF.",
+                            "description": (
+                                "Absolute path to the challenge ELF. Must be an "
+                                "absolute path (a relative one is refused) and "
+                                "must be an ELF file — only that single file is "
+                                "mounted into the container, read-only."
+                            ),
                         },
                         "port": {
                             "type": "integer",
@@ -510,7 +669,12 @@ def pwn_local_tool_schemas() -> list[dict[str, Any]]:
                         },
                         "arch": {
                             "type": "string",
-                            "description": "Filter: i386 (default) or amd64.",
+                            "description": (
+                                "Architecture filter applied to the returned "
+                                "builds: i386 (default) or amd64. Set it to the "
+                                "challenge's arch so i386 and amd64 builds are "
+                                "not mixed in one result."
+                            ),
                         },
                     },
                     "required": ["symbols"],
