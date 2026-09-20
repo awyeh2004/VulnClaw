@@ -115,6 +115,27 @@ docs/
 # Rust TUI build artifacts
 tui/target/
 
+# IR 便携工具箱 (~359MB: Sysinternals/NirSoft/D盾 的 EXE 与 DLL、volatility3 pylib)
+# 审计 round-3 发现 D: 未跟踪的二进制会被一次 `git add -A` 灌进仓库历史。
+# 清单与哈希见 .ir-tools/MANIFEST.md / _manifest.tsv（随工具箱本地保存）。
+.ir-tools/
+
+# IR 演练靶机（本地教学脚手架，含故意的"后门"痕迹样本与"答案卡"，不应入库）
+#
+# 注意：整个 demo/ 都要忽略，不只是 drill 子目录。
+#
+# drill 的 setup 脚本 / README / ANSWER-KEY 本身就是答案：agent 若从工作目录
+# 读到它们会直接抄答案而不做取证（实测发生过 —— shell_command 的 cwd 是仓库根，
+# agent 的 `ls` 就会撞上这些文件）。
+#
+# 因此演练现已整体移出仓库，放在 D:\ir-drill\（见 demo/README.md）。
+# 这里保留 demo/ 是为了防止将来有人又把演练脚手架放回仓库。
+#
+# 同一条教训在靶机内部也成立：setup 脚本拷进容器 /tmp 后忘记删除，
+# `docker commit` 会把它们烘进镜像，agent 一条 `ls -al /tmp` 就能读到答案。
+# setup.ps1 已用 finally 删除脚本 + commit 前后双重校验 /tmp。
+demo/
+
 
 # TSecBench 跑分本地产物 (审计 B1: 含 token/会话 cookie/内网 IP, 严禁入库)
 tsec_bench/

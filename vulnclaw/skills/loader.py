@@ -135,20 +135,29 @@ def _parse_skill_directory(skill_dir: Path) -> dict[str, Any]:
     Directory structure:
         <skill_name>/
         ├── SKILL.md          (required)
-        └── references/       (optional)
+        └── references/       (optional, may contain subdirectories)
             ├── ref1.md
-            └── ref2.md
+            ├── ref2.md
+            └── events/       (nested groups, e.g. per-event-type docs)
+                └── ref3.md
+
+    Reference names are returned as POSIX-style paths relative to
+    ``references/`` — a top-level file keeps its bare name (``ref1.md``)
+    while a nested one is prefixed with its group (``events/ref3.md``).
+    :func:`load_skill_reference` joins the name onto ``references_dir``,
+    so both forms resolve.
     """
     skill_file = skill_dir / "SKILL.md"
     result = _parse_skill_file(skill_file)
 
-    # Collect reference files
+    # Collect reference files (recursive so skills can group references
+    # into subdirectories without renaming them).
     references_dir = skill_dir / "references"
     ref_files: list[str] = []
     if references_dir.exists() and references_dir.is_dir():
-        for ref in sorted(references_dir.iterdir()):
-            if ref.suffix in (".md", ".yaml", ".yml"):
-                ref_files.append(ref.name)
+        for ref in sorted(references_dir.rglob("*")):
+            if ref.is_file() and ref.suffix in (".md", ".yaml", ".yml"):
+                ref_files.append(ref.relative_to(references_dir).as_posix())
 
     result["references"] = ref_files
     result["references_dir"] = str(references_dir)
@@ -218,22 +227,54 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
     }
 
 
-def load_skill_reference(skill_name: str, ref_name: str) -> Optional[str]:
-    """Load a reference file from a skill's references directory.
+def resolve_skill_reference(skill_name: str, ref_name: str) -> Optional[Path]:
+    """Resolve ``ref_name`` to a file *inside* the skill's references directory.
 
-    Args:
-        skill_name: The skill name
-        ref_name: The reference file name (e.g. "02-client-api-reverse-and-burp.md")
+    ``ref_name`` is model-supplied (``load_skill_reference`` is a built-in tool),
+    so a bare ``Path(references_dir) / ref_name`` join is a path-traversal
+    primitive: ``../../.vulnclaw/config.yaml`` would read any file the process
+    can read, including API keys. Nested names (``events/webshell.md``) are a
+    legitimate, documented shape, so the join is allowed but the *result* must
+    still land under ``references_dir`` after symlink resolution.
 
-    Returns:
-        The reference file content as string, or None if not found.
+    Returns the resolved path, or None when the name escapes the directory,
+    is not a regular file, or does not exist.
     """
     skill = load_skill_by_name(skill_name)
     if not skill or not skill.get("references_dir"):
         return None
 
-    ref_path = Path(skill["references_dir"]) / ref_name
-    if ref_path.exists() and ref_path.is_file():
-        return ref_path.read_text(encoding="utf-8")
+    try:
+        ref_dir = Path(skill["references_dir"]).resolve()
+        # resolve() also collapses ``..`` and follows symlinks, so a link
+        # planted inside references/ cannot be used to step outside either.
+        candidate = (ref_dir / str(ref_name)).resolve()
+    except (OSError, ValueError, RuntimeError):
+        # ValueError covers embedded NUL bytes; RuntimeError covers symlink loops.
+        return None
 
-    return None
+    if candidate != ref_dir and ref_dir not in candidate.parents:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def load_skill_reference(skill_name: str, ref_name: str) -> Optional[str]:
+    """Load a reference file from a skill's references directory.
+
+    Args:
+        skill_name: The skill name
+        ref_name: The reference file name (e.g. "02-client-api-reverse-and-burp.md",
+            or a nested relative path such as "events/webshell.md")
+
+    Returns:
+        The reference file content as string, or None if not found.
+    """
+    ref_path = resolve_skill_reference(skill_name, ref_name)
+    if ref_path is None:
+        return None
+    try:
+        return ref_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
