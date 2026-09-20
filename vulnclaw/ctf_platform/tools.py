@@ -419,10 +419,52 @@ async def _handle_stop_environment(args: dict[str, Any]) -> str:
     return "[ctf2] environment released (target deleted).\n" + _format(payload)
 
 
+def _flag_submission_enabled() -> bool:
+    """Whether flag submission has been explicitly enabled by the operator.
+
+    Submitting a flag is the one IRREVERSIBLE action against the scoring
+    platform, and the competition handbook treats "非有效操作" as grounds for
+    disqualification -- a guessed or exploratory submission is exactly that.
+    Default is therefore OFF; everything else on the platform (listing, reading,
+    starting/stopping an environment) stays available.
+
+    Returns True when `competition.allow_flag_submission` is set (in the config
+    file or via VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION). On any config
+    error the gate fails CLOSED: not being able to read the setting is not a
+    reason to allow an irreversible action.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return bool(getattr(load_config().competition, "allow_flag_submission", False))
+    except Exception:
+        return False
+
+
+async def _guard_submit_enabled() -> str | None:
+    """Block ctf2_submit_flag unless flag submission is explicitly enabled."""
+    if _flag_submission_enabled():
+        return None
+    return (
+        "[ctf2_flag_submission_disabled] Flag submission is OFF by default.\n"
+        "Submitting a flag is irreversible and the competition handbook treats an "
+        "invalid operation (including a wrong guess) as grounds for disqualification, "
+        "so this tool must be enabled deliberately.\n"
+        "Enable it with either:\n"
+        "  - config.yaml:  competition:\\n                    allow_flag_submission: true\\n"
+        "  - env:          VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION=true\n"
+        "Everything else still works without it: list challenges, start the "
+        "environment, read the challenge, and analyse the target."
+    )
+
+
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
     blocking = await _guard_config()
     if blocking:
         return blocking
+    disabled = await _guard_submit_enabled()
+    if disabled:
+        return disabled
     usage, challenge = await _named(args["practice_id"], args["challenge_id"])
     flag = args["flag"]
 
