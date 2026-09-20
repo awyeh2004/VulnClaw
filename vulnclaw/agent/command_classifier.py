@@ -79,13 +79,329 @@ def _diff_args_rule(tokens: list[str]) -> str | None:
     return None
 
 
+# ── Incident-response read-only commands ────────────────────────────────
+#
+# Triage on a compromised host is dominated by *reading* system state, and
+# an unguarded prompt per command costs real wall-clock time. These entries
+# are the read-only subset an investigator actually types; every one carries
+# an argument rule because most of the underlying tools can also mutate
+# state (``systemctl stop``, ``reg add``, ``wevtutil cl``, ``last -x``…).
+#
+# Where a tool takes a *subcommand* (systemctl, schtasks, reg, sc, wevtutil,
+# net, wmic, ps, service) we allow-list the read-only subcommands instead of
+# deny-listing mutating flags: the destructive surface of those tools is open
+# ended, so a deny list would silently miss cases.
+
+# systemctl read-only subcommands
+_SYSTEMCTL_READONLY = {
+    "status", "list-units", "list-unit-files", "list-timers", "list-sockets",
+    "show", "cat", "is-active", "is-enabled", "is-failed", "is-system-running",
+    "get-default", "list-dependencies", "list-jobs", "list-machines",
+    "list-paths", "help", "–help", "--help", "--version", "--no-pager",
+}
+
+
+def _systemctl_args_rule(tokens: list[str]) -> str | None:
+    """第一个非 flag token 是 subcommand；允许后其后的操作数是参数（服务名/单元名）。
+
+    ``systemctl status nginx`` 里的 ``nginx`` 是操作数不是 subcommand ——
+    早先版本把每个非 flag token 都当 subcommand 检查，导致合法命令被拦。
+    """
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            continue
+        if tok.lower() not in _SYSTEMCTL_READONLY:
+            return (
+                f"systemctl subcommand {tok!r} is not read-only "
+                "(only status/list-*/show/cat/is-* are allowed)"
+            )
+        return None  # 首个 subcommand 合法，其余 token 视为操作数
+    return None  # 只有 flag（如 systemctl --version）
+
+
+# ps: forbid the BSD "process status" long option (-S) and keep it simple
+def _ps_args_rule(tokens: list[str]) -> str | None:
+    for tok in tokens[1:]:
+        if tok in ("-S", "--cumulative"):
+            return f"ps flag {tok} mutates"
+    return None
+
+
+# netstat/ss: read-only in practice; -c (continuous) wastes time but is safe
+def _netstat_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _journalctl_args_rule(tokens: list[str]) -> str | None:
+    """journalctl can rotate/vacuum the journal."""
+    mutating = {
+        "--rotate", "--flush", "--sync", "--relinquish-var",
+        "--smart-relinquish-var", "--vacuum-time", "--vacuum-size",
+        "--vacuum-files", "--setup-keys", "--update-catalog",
+    }
+    for tok in tokens[1:]:
+        head = tok.split("=", 1)[0].lower()
+        if head in mutating:
+            return f"journalctl flag {tok} mutates the journal"
+    return None
+
+
+def _wmic_args_rule(tokens: list[str]) -> str | None:
+    """wmic get/list/... is read-only; call/create/delete/set/terminate are not.
+
+    ⚠️ 必须先扫全部 token 找危险动词，再判是否可放行 ——
+    早先版本遇到第一个只读动词就 return None，于是
+    ``wmic process call create calc.exe``（process 只读）被放行了。
+    """
+    mutating = {"call", "create", "delete", "set", "terminate", "where"}
+    for tok in tokens[1:]:
+        if tok.lower() in mutating:
+            return f"wmic verb {tok!r} mutates system state"
+    readonly_verbs = {
+        "get", "list", "process", "useraccount", "service", "os",
+        "logicaldisk", "path", "product", "qfe", "startup", "share",
+        "nic", "bios", "computersystem", "group", "account", "timezone",
+        "diskdrive", "partition", "volume", "printer", "environment",
+    }
+    for tok in tokens[1:]:
+        if tok.lower() in readonly_verbs:
+            return None
+    return "wmic without a read-only verb (get/list/...) is not auto-approved"
+
+
+def _reg_args_rule(tokens: list[str]) -> str | None:
+    """reg query/export/compare only. reg add/delete/import/copy/save/restore mutate."""
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low in ("query", "export", "compare"):
+            return None
+        if low.startswith("-") or low.startswith("/"):
+            continue
+        return (
+            f"reg subcommand {tok!r} is not read-only "
+            "(only query/export/compare are allowed)"
+        )
+    return "reg without a subcommand is not auto-approved"
+
+
+def _sc_args_rule(tokens: list[str]) -> str | None:
+    """sc query/qc/queryex/enumdepend/getdisplayname are read-only."""
+    readonly = {"query", "qc", "queryex", "enumdepend", "getdisplayname",
+                "getkeyname", "querylock", "querytype"}
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low.startswith("-") or low.startswith("/"):
+            continue
+        if low in readonly:
+            return None
+        return (
+            f"sc subcommand {tok!r} is not read-only "
+            "(only query/qc/queryex/... are allowed; create/config/start/stop mutate)"
+        )
+    return "sc without a subcommand is not auto-approved"
+
+
+def _schtasks_args_rule(tokens: list[str]) -> str | None:
+    """schtasks /query is read-only; /create /delete /change /run /end mutate."""
+    for tok in tokens[1:]:
+        low = tok.lower().lstrip("/-")
+        if low in ("create", "delete", "change", "run", "end"):
+            return f"schtasks action {tok!r} mutates scheduled tasks"
+    for tok in tokens[1:]:
+        if tok.lower().lstrip("/-") == "query":
+            return None
+    return "schtasks without /query is not auto-approved"
+
+
+def _wevtutil_args_rule(tokens: list[str]) -> str | None:
+    """wevtutil qe/gl/el/gs are read-only; cl/clear-log wipes logs."""
+    mutating = {"cl", "clear-log", "im", "import", "sl", "set-log",
+                "cd", "configure-log"}
+    for tok in tokens[1:]:
+        if tok.lower().lstrip("/-") in mutating:
+            return f"wevtutil action {tok!r} mutates the event log"
+    readonly = {"qe", "gl", "el", "gs", "gli", "ep", "epl"}
+    for tok in tokens[1:]:
+        if tok.lower().lstrip("/-") in readonly:
+            return None
+    return "wevtutil without a read-only action (qe/gl/...) is not auto-approved"
+
+
+def _net_args_rule(tokens: list[str]) -> str | None:
+    """net user/view/share/... 的**列举**形态只读；带 /add /delete =path 则改状态。
+
+    ⚠️ 同一子命令既能读也能写：
+      net user                     → 列举（只读）
+      net user hacker P@ss /add    → 加账号（改状态）
+      net share                    → 列举（只读）
+      net share evil=c:/           → 建共享（改状态）
+    所以不能只看第一个子命令。
+    """
+    mutating_flags = {"/add", "-add", "/delete", "-delete", "/active:yes",
+                      "/active:no", "/domain", "/times", "/comment"}
+    mutating_verbs = {"start", "stop", "pause", "continue", "share-add",
+                      "share-del", "session-delete", "file-close"}
+    tokens_l = [t.lower() for t in tokens[1:]]
+
+    for tok in tokens_l:
+        if tok in mutating_flags or tok in mutating_verbs:
+            return f"net argument {tok!r} mutates system state"
+        # 形如 evil=c:/ 或 evil="c:/" 的赋值 = 建共享
+        if "=" in tok and not tok.startswith("-"):
+            return f"net argument {tok!r} looks like a share assignment (mutates)"
+
+    readonly = {"view", "user", "users", "share", "session", "sessions",
+                "statistics", "stats", "config", "accounts", "group",
+                "localgroup", "time", "file", "use", "computer"}
+    for tok in tokens_l:
+        if tok.startswith("-") or tok.startswith("/"):
+            continue
+        if tok in readonly:
+            return None
+        return (
+            f"net subcommand {tok!r} is not read-only "
+            "(start/stop/… mutate)"
+        )
+    return "net without a subcommand is not auto-approved"
+
+
+def _service_args_rule(tokens: list[str]) -> str | None:
+    """`service <name> status` is read-only; start/stop/restart are not."""
+    args = [t for t in tokens[1:] if not t.startswith("-")]
+    if len(args) >= 2 and args[-1].lower() == "status":
+        return None
+    return "service is only auto-approved for the 'status' action"
+
+
+def _systeminfo_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _unhide_args_rule(tokens: list[str]) -> str | None:
+    """unhide proc|sys|... — read-only detection."""
+    return None
+
+
+def _chkrootkit_args_rule(tokens: list[str]) -> str | None:
+    """chkrootkit is read-only, but -q/scan are fine. No mutating flags."""
+    return None
+
+
+# Windows cmd.exe builtins that are read-only
+def _win_where_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _dmesg_args_rule(tokens: list[str]) -> str | None:
+    """dmesg -C/-c clear the kernel ring buffer."""
+    for tok in tokens[1:]:
+        if tok.startswith("-") and not tok.startswith("--"):
+            for ch in tok[1:]:
+                if ch in ("C", "c"):
+                    return f"dmesg flag {tok} clears the kernel ring buffer"
+    return None
+
+
+def _lsattr_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _lsblk_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _ac_args_rule(tokens: list[str]) -> str | None:
+    return None
+
+
+def _crontab_args_rule(tokens: list[str]) -> str | None:
+    """crontab -l lists; -e/-r/-i MUTATE (edit / remove-all)."""
+    mutating = {"-e", "-r", "-i"}
+    for tok in tokens[1:]:
+        if tok in mutating:
+            return (
+                f"crontab flag {tok} mutates the schedule "
+                "(only -l / no-flag listing is read-only)"
+            )
+        if tok == "-u":
+            return "crontab -u targets another user's schedule (not read-only here)"
+    return None
+
+
+def _rpm_args_rule(tokens: list[str]) -> str | None:
+    """按模式判定。rpm 的 flag 含义依赖模式：
+
+      -q / -V  查询、校验（只读）→ 此时 -a 表示 all 包、-f 表示 file 归属
+      -i       安装（改状态）
+      -e       卸载（改状态）
+      -U / -F  升级（改状态）
+
+    ⚠️ 早先版本用一个扁平字符集，把 ``-i`` 当只读、把 ``-Va`` 里的 ``a`` 当非法，
+       两头都错。
+    """
+    if len(tokens) == 1:
+        return None
+    mode: str | None = None
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low.startswith("--"):
+            if low.startswith(("--verify", "--query", "--checksig",
+                               "--querytags", "--showrc", "--eval",
+                               "--version", "--help")):
+                mode = mode or "query"
+                continue
+            if low in ("--install", "--erase", "--upgrade", "--freshen",
+                       "--replacepkgs", "--nodeps"):
+                return f"rpm option {tok} mutates the package database"
+            continue
+        if not low.startswith("-"):
+            continue  # package / file operand
+        for ch in low[1:]:
+            if ch in ("q", "V", "K"):
+                mode = "query"
+            elif ch == "i":
+                # -i 是 --info（查询模式内）还是 --install —— 取决于已有模式
+                if mode == "query":
+                    continue
+                return "rpm -i installs a package"
+            elif ch in ("U", "F"):
+                return f"rpm -{ch} installs/upgrades packages"
+            elif ch == "e":
+                return "rpm -e erases a package"
+            elif ch in ("a", "f", "p", "l", "c", "d", "s", "R", "v", "h"):
+                continue  # 查询模式下的合法修饰
+            else:
+                return f"rpm flag -{ch} is not a recognised read-only query"
+    return None
+
+
+def _mount_args_rule(tokens: list[str]) -> str | None:
+    """bare `mount` / `mount -l` lists; adding operands mounts (mutates)."""
+    args = [t for t in tokens[1:] if not t.startswith("-")]
+    if args:
+        return "mount with operands mutates the mount table (only listing is allowed)"
+    return None
+
+
+def _fsutil_args_rule(tokens: list[str]) -> str | None:
+    """fsutil is a known LOLBin with destructive subcommands."""
+    mutating = {"deletejournal", "deleteusnjournal", "setflag", "setzerodata",
+                "dirty", "repair", "behavior", "usn", "file", "hardlink",
+                "reparsepoint", "sparse", "objectid", "recoveredata"}
+    for tok in tokens[1:]:
+        if tok.lower() in mutating:
+            return f"fsutil subcommand {tok!r} mutates the filesystem"
+    return "fsutil is only auto-approved for read-only subcommands"
+
+
 SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
+    # ── original POSIX read-only table ────────────────────────────────
     "ls": None, "pwd": None, "cd": None, "echo": None, "printf": None,
     "cat": None, "head": None, "tail": None, "wc": None,
     "grep": _grep_args_rule, "egrep": None, "fgrep": None,
     "find": _find_args_rule,
     "file": None, "stat": None, "du": None, "df": None,
-    "which": None, "type": None,
+    "which": None,
     "id": None, "whoami": None, "uname": None, "date": None,
     "diff": _diff_args_rule, "cmp": None,
     "cut": None, "tr": None, "tac": None, "rev": None,
@@ -93,6 +409,50 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "md5sum": None, "sha1sum": None, "sha256sum": None, "sha512sum": None,
     "jq": None, "tree": None, "who": None, "w": None,
     "uptime": None, "free": None, "lscpu": None, "ss": None,
+
+    # ── Linux incident-response triage ────────────────────────────────
+    "ps": _ps_args_rule,
+    "netstat": _netstat_args_rule,
+    "lsof": None,                 # -p / -i / -n 均为只读列举
+    "last": None, "lastb": None, "lastlog": None,
+    "systemctl": _systemctl_args_rule,
+    "journalctl": _journalctl_args_rule,
+    "dmesg": _dmesg_args_rule,
+    "lsmod": None, "modinfo": None,
+    "lsattr": _lsattr_args_rule, "lsblk": _lsblk_args_rule,
+    "mount": _mount_args_rule,
+    "strings": None, "xxd": None, "od": None, "hexdump": None,
+    "getcap": None, "getenforce": None, "sestatus": None,
+    "ac": _ac_args_rule,
+    "unhide": _unhide_args_rule,
+    "chkrootkit": _chkrootkit_args_rule,
+    "service": _service_args_rule,
+    "hostname": None, "hostnamectl": None,
+    "locale": None, "ulimit": None, "getent": None,
+    "crontab": _crontab_args_rule,
+    "rpm": _rpm_args_rule,
+
+    # ── Windows incident-response triage ──────────────────────────────
+    "tasklist": None,              # /v /svc /m — 只读列举
+    "sc": _sc_args_rule,
+    "schtasks": _schtasks_args_rule,
+    "reg": _reg_args_rule,
+    "wevtutil": _wevtutil_args_rule,
+    "net": _net_args_rule,
+    "systeminfo": _systeminfo_args_rule,
+    "driverquery": None,
+    "ver": None,
+    "where": _win_where_args_rule,
+    "findstr": None,
+    "wmic": _wmic_args_rule,
+    "attrib": None,
+    "dir": None,
+    "fc": None, "comp": None,
+    "getmac": None, "ipconfig": None, "arp": None, "route": None,
+    "nslookup": None,
+    "fsutil": _fsutil_args_rule,
+    "quser": None,
+    "openfiles": None,
 }
 
 # Basenames that must never be auto-approved, mirroring Codex's
