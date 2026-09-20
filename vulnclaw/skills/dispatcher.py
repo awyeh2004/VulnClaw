@@ -73,6 +73,14 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],
     "quiz|multiple choice|trivia|true or false": ["knowledge-quiz"],
+    # ── incident-response: 主机应急响应与入侵痕迹排查 ────────────────
+    "应急响应|应急排查|入侵排查|被入侵|失陷主机|被植入|恶意程序|恶意行为痕迹": ["incident-response"],
+    "webshell查杀|查马|查杀木马|后门排查|隐藏后门|持久化排查|权限维持": ["incident-response"],
+    "挖矿木马|勒索病毒|勒索信|网页篡改|挂黑链|暗链|网页被改": ["incident-response"],
+    "克隆账号|隐藏账号|隐藏用户|异常账号|账号被篡改": ["incident-response"],
+    "日志分析|日志排查|攻击溯源|溯源分析|应急取证|主机取证|内存取证|痕迹分析": ["incident-response"],
+    "incident response|dfir|forensic|compromise assessment|threat triage": ["incident-response"],
+    "登录类型|事件ID|事件日志|evtx|prefetch|amcache": ["incident-response"],
     # ── OSINT specialized skill — refined routing ───────────────────
     # osint-recon: Full-dimension recon (OSINT + social engineering)
     # Triggered only when user explicitly mentions social engineering / OSINT / author tracking

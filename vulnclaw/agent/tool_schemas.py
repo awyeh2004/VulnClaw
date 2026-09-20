@@ -36,11 +36,11 @@ def append_builtin_tool_schemas(
                     "properties": {
                         "skill_name": {
                             "type": "string",
-                            "description": "Skill 名称,如 client-reverse, web-security-advanced, ai-mcp-security, intranet-pentest-advanced, pentest-tools, rapid-checklist, crypto-toolkit, ctf-web, ctf-crypto, ctf-misc, osint-recon, secknowledge-skill",
+                            "description": "Skill 名称,如 client-reverse, web-security-advanced, ai-mcp-security, intranet-pentest-advanced, pentest-tools, rapid-checklist, crypto-toolkit, ctf-web, ctf-crypto, ctf-misc, osint-recon, secknowledge-skill, incident-response",
                         },
                         "reference_name": {
                             "type": "string",
-                            "description": "参考文档文件名,如 02-client-api-reverse-and-burp.md, web-injection.md, encoding-cheatsheet.md",
+                            "description": "参考文档文件名,如 02-client-api-reverse-and-burp.md, web-injection.md, encoding-cheatsheet.md。部分 skill 的 references 含子目录,需带相对路径,如 incident-response 的 events/webshell.md、events/cryptomining.md",
                         },
                     },
                     "required": ["skill_name", "reference_name"],
