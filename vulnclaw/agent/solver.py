@@ -1001,11 +1001,18 @@ def _pid_alive(pid: int) -> bool:
             import ctypes
 
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(
+            ERROR_ACCESS_DENIED = 5
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
             if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32.CloseHandle(handle)
+                return True
+            # OpenProcess failing without an error code means "no such pid";
+            # ACCESS_DENIED means the pid exists but is elevated. Treating the
+            # latter as dead would let a run overwrite a live lock.
+            if kernel32.GetLastError() == ERROR_ACCESS_DENIED:
                 return True
             return False
         except Exception:
@@ -1013,8 +1020,106 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
     except OSError:
         return False
+
+
+def _process_start_token(pid: int) -> Optional[str]:
+    """Best-effort per-process creation token, used to defeat PID reuse.
+
+    Returns None when unavailable (wrong platform shape, permissions, no
+    /proc); callers must then fall back to a bare liveness check rather than
+    assuming staleness.
+    """
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not handle:
+                return None
+            try:
+                creation = wintypes.FILETIME()
+                exit_time = wintypes.FILETIME()
+                kernel = wintypes.FILETIME()
+                user = wintypes.FILETIME()
+                ok = kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                )
+                if not ok:
+                    return None
+                ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+                return str(ticks)
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            raw = fh.read()
+        # Field 22 (starttime) — offset by 3 because the first two fields are
+        # pid and the parenthesized comm, which may itself contain spaces.
+        fields = raw.rsplit(b")", 1)[-1].split()
+        if len(fields) < 20:
+            return None
+        return fields[19].decode("ascii", "replace")
+    except Exception:
+        return None
+
+
+def _read_solve_lock(path: Path) -> Optional[dict[str, Any]]:
+    """Read a lock file, tolerating the create→write window of a racer.
+
+    The creator holds the file for a few microseconds between O_EXCL creation
+    and the payload write; a reader landing in that window would see an empty
+    file and could mistake a brand-new lock for a stale one. Retrying briefly
+    closes that window in practice.
+    """
+    for attempt in range(3):
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.05)
+                continue
+            return None
+        return info if isinstance(info, dict) else None
+    return None
+
+
+def _lock_is_stale(info: dict[str, Any]) -> bool:
+    """True only when the recorded holder is provably gone.
+
+    Conservative by construction: an unreadable/unknown holder is treated as
+    alive so the lock is never stolen from a running run.
+    """
+    pid = int(info.get("pid", 0) or 0)
+    if pid <= 0:
+        return True  # malformed lock — no holder to protect
+    recorded = str(info.get("start") or "")
+    current = _process_start_token(pid)
+    if recorded and current:
+        # Same pid, different creation time ⇒ the pid was recycled by an
+        # unrelated process; the original holder is gone.
+        return recorded != current
+    return not _pid_alive(pid)
 
 
 def _solve_lock_path(target: str) -> Path:
@@ -1026,40 +1131,68 @@ def _solve_lock_path(target: str) -> Path:
 
 def _acquire_solve_lock(target: str) -> Optional[dict[str, Any]]:
     """Return the ACTIVE holder's info if another solve owns this target, else
-    acquire the lock and return None. Stale locks (dead pid) are overwritten."""
-    from vulnclaw.config.settings import CONFIG_DIR
+    acquire the lock and return None. Stale locks (dead or recycled pid) are
+    replaced.
 
+    The lock file is created with O_EXCL so two processes that race past the
+    staleness check cannot both acquire it; the loser re-reads and reports the
+    winner instead.
+    """
     path = _solve_lock_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
+
+    for _ in range(3):
         try:
-            info = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            info = None
-        if (
-            info
-            and int(info.get("pid", 0)) != os.getpid()
-            and _pid_alive(int(info.get("pid", 0)))
-        ):
-            holder = dict(info)
-            holder["lock_path"] = str(path)
-            return holder
-    path.write_text(
-        json.dumps(
-            {"pid": os.getpid(), "target": target, "started": time.strftime("%H:%M:%S")}
-        ),
-        encoding="utf-8",
-    )
-    return None
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            info = _read_solve_lock(path)
+            if info is not None and int(info.get("pid", 0) or 0) != os.getpid():
+                if not _lock_is_stale(info):
+                    holder = dict(info)
+                    holder["lock_path"] = str(path)
+                    return holder
+            # Stale, corrupt, or ours: drop it and retry the atomic create.
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        except OSError:
+            # Cannot even create the lock file (unwritable config dir). Surface
+            # it rather than silently running a second concurrent solve on the
+            # same target — the previous write_text() raised here too.
+            raise
+        try:
+            payload = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "start": _process_start_token(os.getpid()) or "",
+                    "target": target,
+                    "started": time.strftime("%H:%M:%S"),
+                }
+            )
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return None
+
+    # Three consecutive races: another process keeps recreating this lock. We
+    # could not prove it is stale, so report it as held instead of starting a
+    # concurrent run (the safe direction — the caller just retries later).
+    info = _read_solve_lock(path)
+    if info is None:
+        info = {"pid": 0, "target": target, "started": "unknown (lock contended)"}
+    holder = dict(info)
+    holder["lock_path"] = str(path)
+    return holder
 
 
 def _release_solve_lock(target: str) -> None:
     path = _solve_lock_path(target)
     try:
-        if path.exists():
-            info = json.loads(path.read_text(encoding="utf-8"))
-            if int(info.get("pid", 0)) == os.getpid():
-                path.unlink()
+        info = _read_solve_lock(path)
+        if info is None or int(info.get("pid", 0) or 0) == os.getpid():
+            path.unlink()
     except Exception:
         pass
 
@@ -1139,6 +1272,17 @@ async def _solve_impl(
 ) -> SolveResult:
     """Run the model-led solve loop."""
 
+    def emit(kind: str, payload: dict) -> None:
+        """Publish one NDJSON event.
+
+        Defined before the first call site on purpose: a nested ``def`` binds
+        ``emit`` as a local, so calling it any earlier raises UnboundLocalError
+        — which the surrounding ``except Exception: pass`` swallowed, silently
+        dropping the ``playbook_injected`` event from the stream.
+        """
+        if on_event is not None:
+            on_event(kind, payload)
+
     state = _prepare_state(agent, origin=origin, goal=goal)
     agent._subagent_ctx.event_sink = on_event
     # 让工具 schema 按 goal 裁剪：写入 runtime.auto_skill_input 后，
@@ -1181,10 +1325,6 @@ async def _solve_impl(
         state.compact_summary = (
             state.compact_summary + "\nUser hints: " + " | ".join(hints)
         ).strip()
-
-    def emit(kind: str, payload: dict) -> None:
-        if on_event is not None:
-            on_event(kind, payload)
 
     repeated_errors = 0
     observation_only_streak = 0
