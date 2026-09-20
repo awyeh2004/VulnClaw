@@ -54,6 +54,7 @@ import os
 import shlex
 import tarfile
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,11 +71,47 @@ _PARAMIKO_ERROR = (
 
 
 def _import_paramiko():
+    """Import paramiko.
+
+    Paramiko 2.8.1 on this machine warns twice per run that TripleDES has moved
+    (cryptography >= 48 deprecation). These are harmless, but paramiko imports
+    its `transport`/`pkey` submodules lazily, so a warning filter wrapped around
+    this import does NOT catch them -- measured: they still appeared on the first
+    real connection attempt. The filter is therefore installed at module scope
+    below, narrowed to this exact message so genuine deprecations still surface.
+
+    Suppressing it matters because warnings land on stderr, and stderr is part of
+    the evidence an operator reads; familiar warning spam is how people learn to
+    skim past real errors.
+    """
     try:
         import paramiko  # noqa: PLC0415
     except Exception as exc:  # pragma: no cover - depends on host env
         raise RuntimeError(f"{_PARAMIKO_ERROR} ({type(exc).__name__})") from exc
     return paramiko
+
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*TripleDES has been moved.*",
+    category=DeprecationWarning,
+)
+
+# The TripleDES warning is actually CryptographyDeprecationWarning, whose base is
+# UserWarning -- NOT DeprecationWarning. Measured, after the filter above failed
+# to suppress it. Filter on the real class so this cannot silently regress, and
+# keep the message narrowed so genuine crypto deprecations still surface.
+try:
+    from cryptography.utils import CryptographyDeprecationWarning as _CryptoDepWarning
+except Exception:  # pragma: no cover - cryptography always present with paramiko
+    _CryptoDepWarning = None
+
+if _CryptoDepWarning is not None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*TripleDES has been moved.*",
+        category=_CryptoDepWarning,
+    )
 
 
 # ── results ──────────────────────────────────────────────────────────────
