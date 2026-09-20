@@ -144,12 +144,37 @@ async def read_challenge(practice_id: str, challenge_id: str) -> dict:
 
 
 async def start_environment(practice_id: str, challenge_id: str) -> dict:
-    """Start (or reuse) a practice environment, returning its connection info."""
+    """Start (or reuse) a practice environment, returning its connection info.
+
+    Two APIs, two DIFFERENT routes for the same action (measured):
+      * Open API: `POST /practice/<p>/challenges/<c>/environment/start/`
+      * session : `POST /practice/<p>/challenges/<c>/target/` -> 202 with a
+        `task_id`, then poll `GET .../target/` until `data` is non-null.
+    The session API has NO `/environment/start/` route (404), so the generic
+    path mapping cannot be reused here -- the fallback needs its own route.
+    """
     client = get_client(timeout=120.0)
-    return await _request_with_fallback(
+    if api_token():
+        try:
+            return await _request(
+                client,
+                "POST",
+                f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
+                json={},
+            )
+        except RuntimeError as exc:
+            text = str(exc)
+            if not (" 401:" in text or " 403:" in text or " 404:" in text) or not session_token():
+                raise
+    if not session_token():
+        raise RuntimeError(
+            "CTF2 cannot start an environment: set VULNCLAW_CTF2_API_KEY, or log in "
+            "to CTF2 in Edge/Chrome so the session token can be read from localStorage."
+        )
+    return await _session_request(
         client,
         "POST",
-        f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
+        f"/practice/{practice_id}/challenges/{challenge_id}/target/",
         json={},
     )
 
