@@ -61,26 +61,61 @@ from datetime import datetime
 from pathlib import Path
 
 def _default_home() -> Path:
-    """The config dir the run wrote into, matching vulnclaw's own resolution.
+    """The config dir the run wrote into — resolved exactly like vulnclaw itself.
 
-    Order matters. ``VULNCLAW_CONFIG_DIR`` is authoritative because it is what the
-    run process itself honoured (vulnclaw/config/settings.py:69); then the repo-local
-    ``.test-tmp/vulnclaw-home`` used by the drills here; then ``~/.vulnclaw``, the
-    upstream default. The first version hardcoded one developer's drill path, which
-    would silently read the WRONG (or an empty) directory anywhere else -- and an
-    empty run dir is exactly what makes a watchdog report "no activity" for a run
-    that is working fine.
+    Order matters, and so does having only ONE order. ``VULNCLAW_CONFIG_DIR`` is
+    authoritative because it is what the run process itself honoured
+    (``vulnclaw/config/settings.py:69``); otherwise the default is
+    ``~/.vulnclaw``.
+
+    Round-5 review N9: this used to insert a repo-local
+    ``.test-tmp/vulnclaw-home`` step BEFORE the real default. That directory only
+    ever exists on a development machine (it is a leftover of the local drills),
+    and because it was consulted first, a stray copy hijacked the watchdog — which
+    then silently reported on a different directory's runs, or on none at all, and
+    an empty run dir is exactly what makes a watchdog call a healthy run stalled.
+    The resolution is delegated to vulnclaw's own settings, so the watchdog and
+    the run can no longer disagree.
     """
-    env = os.environ.get("VULNCLAW_CONFIG_DIR")
-    if env:
-        return Path(env)
-    local = Path(__file__).resolve().parent.parent / ".test-tmp" / "vulnclaw-home"
-    if local.is_dir():
-        return local
-    return Path.home() / ".vulnclaw"
+    try:
+        from vulnclaw.config.settings import CONFIG_DIR
+
+        return Path(CONFIG_DIR)
+    except Exception:
+        env = os.environ.get("VULNCLAW_CONFIG_DIR")
+        if env:
+            return Path(env)
+        return Path.home() / ".vulnclaw"
 
 
 DEFAULT_HOME = _default_home()
+
+
+def _run_dir(home: str | Path, run: str) -> Path:
+    """``<home>/runs/<run>``, with ``run`` confined to the runs directory.
+
+    Round-5 review N9: ``--run ../../x`` walked out of ``runs/``, so the watchdog
+    read state — and wrote its report — outside the runs tree. A run name is a
+    single directory entry; anything else is a mistake worth stopping for.
+    """
+    name = str(run or "").strip()
+    if not name or name in (".", ".."):
+        raise SystemExit("[!] --run needs a run name (see --list)")
+    if any(ch in name for ch in ("/", "\\", ":", "\x00")):
+        raise SystemExit(f"[!] --run must be a bare run name, got {name!r}")
+    root = (Path(home) / "runs").resolve()
+    candidate = (root / name).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise SystemExit(f"[!] --run escapes the runs directory: {candidate}")
+    return candidate
+
+
+def _safe_mtime(path: Path) -> float:
+    """mtime, or -1 when the file vanished between listing and stat."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
 
 
 def _fmt_age(seconds: float) -> str:
@@ -160,7 +195,7 @@ def _find_log(run_dir: Path) -> Path | None:
     for p in run_dir.rglob("python_execute_audit.jsonl"):
         return p
     files = [p for p in run_dir.rglob("*") if p.is_file()]
-    return max(files, key=lambda p: p.stat().st_mtime) if files else None
+    return max(files, key=_safe_mtime) if files else None
 
 
 def _outcome(run_dir: Path) -> dict:
@@ -233,7 +268,7 @@ def _current_state(run_dir: Path) -> Path | None:
     files = list(run_dir.rglob("current.json"))
     if not files:
         return None
-    return max(files, key=lambda p: p.stat().st_mtime)
+    return max(files, key=_safe_mtime)
 
 
 def _status_lines(args: argparse.Namespace) -> tuple[list[str], str, tuple[int, int]]:
@@ -246,7 +281,7 @@ def _status_lines(args: argparse.Namespace) -> tuple[list[str], str, tuple[int, 
     Separate from :func:`print_status` so ``--follow`` can compare successive
     snapshots without printing an unchanged block again.
     """
-    run_dir = Path(args.home) / "runs" / args.run
+    run_dir = _run_dir(args.home, args.run)
     run_json = _read_json(run_dir / "run.json")
     log_path = _find_log(run_dir)
     age, source = _activity_age(run_dir, log_path)
@@ -393,7 +428,7 @@ def main() -> int:
     if args.follow:
         return follow_status(args)
 
-    run_dir = Path(args.home) / "runs" / args.run
+    run_dir = _run_dir(args.home, args.run)
     report = _report_path(run_dir, args.report)
     started = time.time()
 
