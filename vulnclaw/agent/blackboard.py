@@ -504,13 +504,35 @@ class Blackboard:
 _MIN_SEGMENT_CHARS = 24
 
 # High-signal literals that only a witness could reproduce: a flag-shaped value, a
-# long hex run, or a UUID. If the fact and the evidence share one, the fact's
+# UUID, or a hex run. If the fact and the evidence share one, the fact's
 # observation was genuinely seen -- and a fabricated claim cannot contain one.
 _FINGERPRINT_PATTERNS = (
     r"[A-Za-z0-9_]{2,32}\{[^}\s]{8,}\}",
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-    r"\b[0-9a-fA-F]{16,}\b",
+    # A hex run must contain an a-f digit to qualify (or carry an explicit 0x).
+    # Round-5 review: a bare 16+ digit DECIMAL number -- a timestamp, an id, a
+    # byte count -- also matched this pattern, so any tool output supplied a
+    # "fingerprint" that said nothing about the claim.
+    r"\b[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]{15,}\b",
+    r"\b0x[0-9a-fA-F]{8,}\b",
 )
+
+# Flag-shaped literals are the one artifact class where citing it IS a claim to
+# have seen it: nobody derives a flag, and a fact that names two flags has to
+# have observed both.
+_FLAG_PATTERN = r"[A-Za-z0-9_]{2,32}\{[^}\s]{8,}\}"
+
+# Wording corroboration bar. Whole-token matching (not substring) plus a higher
+# ratio than the old 0.8 bag-of-common-words test, because the bag let a clause
+# made mostly of generic words pass. The floor is 2 tokens, not more: a short but
+# fully-quoted fact ("admin panel reachable at /admin") only has three.
+_OVERLAP_THRESHOLD = 0.9
+_MIN_OVERLAP_TOKENS = 2
+_TOKEN_PATTERN = r"\b[a-z0-9_]{4,}\b"
+_STOP_TOKENS = {
+    "http", "https", "true", "false", "from", "with", "this", "that", "the",
+    "and", "was", "were", "have", "has", "been", "into", "over", "then", "than",
+}
 
 
 def _fingerprints(text: str) -> set[str]:
@@ -520,6 +542,23 @@ def _fingerprints(text: str) -> set[str]:
     for pattern in _FINGERPRINT_PATTERNS:
         found |= {m.group(0).lower() for m in _re.finditer(pattern, str(text or ""))}
     return found
+
+
+def _flag_literals(text: str) -> set[str]:
+    """Flag-shaped literals (``n1book{...}``, ``CTF2{...}``) in ``text``."""
+    import re as _re
+
+    return {m.group(0).lower() for m in _re.finditer(_FLAG_PATTERN, str(text or ""))}
+
+
+def _substantive_tokens(text: str) -> set[str]:
+    """Whole tokens worth matching on, with the generic ones dropped."""
+    import re as _re
+
+    return {
+        t for t in _re.findall(_TOKEN_PATTERN, str(text or "").lower())
+        if t not in _STOP_TOKENS
+    }
 
 
 def _unescape_evidence(chunk: str) -> str:
@@ -565,44 +604,67 @@ def _fact_segments(fact_text: str) -> list[str]:
 
 
 def _witnessed_in_evidence(fact_text: str, chunk: str) -> bool:
-    """True if the fact text is backed by real tool output (ported from Muteki's
-    ``_fact_witnessed_in_chunk``): either a normalized substring match, or a
-    dominant overlap of the fact's salient tokens within the output.
+    """True if the fact text is backed by real tool output.
 
-    Checked against the whole description first (unchanged behaviour), then against
-    each substantive clause of it, against both the raw and the unescaped evidence.
+    Two tiers, because the two kinds of high-signal literal mean different things:
+
+    * **Flag-shaped literals are definitive.** A flag cannot be derived, so a fact
+      that cites one is claiming to have seen it — and *every* flag it cites must
+      actually be in the evidence. This keeps the round-4 false negative fixed (a
+      flag quoted mid-narrative used to be rejected).
+    * **Hashes/UUIDs are corroborating only.** Round-5 review: a shared hex run
+      used to confirm the fact on its own, so an invented narrative wrapped around
+      one hash that happened to appear in the output passed the guard. Such a
+      literal now has to sit in a clause whose *wording* is also witnessed
+      (verbatim, or >= 90% whole-token overlap), and the literal itself must be
+      present. A clause carrying a literal that the evidence does not contain
+      cannot pass on wording alone.
+
+    Checked against the whole description first, then its substantive clauses,
+    against both the raw and the unescaped evidence.
     """
-    import re as _re
-
     evidence = _unescape_evidence(chunk)
     if not evidence:
         return False
-    stop = {"http", "https", "true", "false", "from", "with", "this", "that", "the"}
-    lowered = evidence.lower()
+    fact_text = str(fact_text or "")
+    evidence_fp = _fingerprints(evidence)
 
-    # Strongest signal first: a shared flag-shaped literal / long hex run / UUID.
-    # This is what actually has to be witnessed, and it is the case the whole-string
-    # and clause tests both missed -- measured, a fact quoting the flag mid-sentence
-    # was rejected even though the evidence contained that exact flag.
-    if _fingerprints(fact_text) & _fingerprints(evidence):
-        return True
+    # Tier 1: definitive artifacts.
+    cited_flags = _flag_literals(fact_text)
+    if cited_flags:
+        return cited_flags <= evidence_fp
 
+    # Tier 2: wording corroboration, with any cited literal tied to its clause.
+    evidence_tokens = _substantive_tokens(evidence)
     for candidate in [fact_text, *_fact_segments(fact_text)]:
-        norm_fact = _norm_text(candidate)
-        norm_chunk = _norm_text(evidence)
-        if not norm_fact or not norm_chunk:
-            continue
-        if norm_fact in norm_chunk:
-            return True
-        tokens = {
-            t for t in _re.findall(r"[a-z0-9_]{4,}", str(candidate).lower()) if t not in stop
-        }
-        if not tokens:
-            continue
-        hit = sum(1 for t in tokens if t in lowered)
-        if hit / len(tokens) >= 0.8:
+        if _clause_witnessed(candidate, evidence, evidence_tokens, evidence_fp):
             return True
     return False
+
+
+def _clause_witnessed(
+    candidate: str, evidence: str, evidence_tokens: set[str], evidence_fp: set[str]
+) -> bool:
+    """Whether one clause of a fact is corroborated by the evidence."""
+    norm_fact = _norm_text(candidate)
+    norm_chunk = _norm_text(evidence)
+    if not norm_fact or not norm_chunk:
+        return False
+
+    cited = _fingerprints(candidate)
+    if cited and not (cited & evidence_fp):
+        # The clause names a literal the evidence does not contain: this is the
+        # "cite something plausible, assert anything" shape.
+        return False
+
+    if norm_fact in norm_chunk:
+        return True
+
+    tokens = _substantive_tokens(candidate)
+    if len(tokens) < _MIN_OVERLAP_TOKENS:
+        return False
+    hit = len(tokens & evidence_tokens)
+    return hit / len(tokens) >= _OVERLAP_THRESHOLD
 
 
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
