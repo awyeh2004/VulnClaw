@@ -36,8 +36,40 @@ GCS_READ_TOOLS: set[str] = {
 }
 
 
+def gcs_tools_enabled() -> bool:
+    """Whether the GCS platform tools should be exposed to the agent.
+
+    OFF by default. The GCS integration is legacy (one online qualifier the team
+    did not advance from) and an agent solving a challenge on a DIFFERENT platform
+    reached for ``gcs_submit_flag`` first -- purely because the name contains
+    "submit_flag" -- without ever establishing which platform the challenge was on.
+
+    Gating the schema is what actually removes the temptation: a tool the model
+    cannot see is a tool it cannot call. Prompt-level instructions would only
+    discourage it.
+
+    Enable with ``gcs.tools_enabled: true`` or
+    ``VULNCLAW_GCS__TOOLS_ENABLED=true``. On any config error this stays False --
+    not being able to read the setting is not a reason to expose a tool face that
+    performs irreversible actions against the wrong platform.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return bool(getattr(load_config().gcs, "tools_enabled", False))
+    except Exception:
+        return False
+
+
 def gcs_tool_schemas() -> list[dict[str, Any]]:
-    """OpenAI function schemas for all GCS competition tools."""
+    """OpenAI function schemas for all GCS competition tools.
+
+    Returns an EMPTY list when the GCS tool face is disabled (the default) --
+    see :func:`gcs_tools_enabled`. Callers register whatever this returns, so an
+    empty list means the tools never enter the schema at all.
+    """
+    if not gcs_tools_enabled():
+        return []
     return [
         {
             "type": "function",
@@ -215,7 +247,18 @@ def gcs_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
-GCS_TOOL_NAMES_BY_SCHEMA: list[str] = [s["function"]["name"] for s in gcs_tool_schemas()]
+# Dispatch accepts every tool the module implements, INDEPENDENT of whether the
+# tool face is currently exposed to the agent.
+#
+# This module-level list used to be derived from `gcs_tool_schemas()`. Once the
+# schema function learned to return [] when the face is disabled, that
+# derivation made dispatch reject every call with "unknown GCS tool" -- coupling
+# two things that must stay separate:
+#   * `gcs_tool_schemas()` decides what the MODEL can see;
+#   * this decides what the CODE can execute.
+# Conflating them means disabling the face would also break the `vulnclaw gcs`
+# command and any programmatic caller.
+GCS_TOOL_NAMES_BY_SCHEMA: list[str] = list(GCS_TOOL_NAMES)
 
 
 def _format(payload: dict | list | str) -> str:

@@ -693,7 +693,7 @@ class SessionConfig(BaseModel):
     )
 
 class GCSPLatformConfig(BaseModel):
-    """GCS (DASCTF competition) platform credentials.
+    """GCS (West Lake Sword / gcsis.dasctf.com) platform credentials and tool face.
 
     Fallback source for ``VULNCLAW_GCS_ACCESS_KEY`` / ``VULNCLAW_GCS_BASE_URL``
     so the platform can be used without exporting environment variables. Env
@@ -704,6 +704,28 @@ class GCSPLatformConfig(BaseModel):
     base_url: str = Field(
         default="https://pro.dasctf.com",
         description="Competition API host (slab-match endpoints)",
+    )
+    # The GCS integration is legacy: it was used for one online qualifier the team
+    # did not advance from, and has been running on leftover configuration since.
+    # Measured problem: an agent solving a CTF2 practice challenge reached for
+    # `gcs_submit_flag` first, purely because the tool name contains
+    # "submit_flag" -- it never asked which platform the challenge belonged to.
+    # So the GCS tool FACE is off by default and does not appear in the schema.
+    #
+    # This gates only the agent tool face. The `vulnclaw gcs <id>` command and
+    # gcs_platform/client.py stay usable; set this true to bring the tools back
+    # (e.g. if a future competition actually runs on GCS).
+    #
+    # NOTE: unrelated to gcs_platform/gateway_proxy.py, which serves the
+    # competition LLM gateway and is wired into core.py's LLM initialisation.
+    # That module must stay regardless of this flag.
+    tools_enabled: bool = Field(
+        default=False,
+        description=(
+            "Expose the GCS platform tools (gcs_*) to the agent. OFF by default: "
+            "the integration is legacy, and an agent solving a challenge on "
+            "another platform would otherwise reach for gcs_submit_flag."
+        ),
     )
 
 

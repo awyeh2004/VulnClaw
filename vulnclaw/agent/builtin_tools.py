@@ -1594,16 +1594,12 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "web_map_render",
     "web_map_summary",
     "web_map_reset",
-    # GCS platform tools (exercise read / env lifecycle / flag submission) are
-    # essential for the DASCTF solve loop and must never be pruned by the
-    # task-type tool inference (e.g. a CRYPTO task bundle would otherwise drop
-    # gcs_submit_flag and leave the agent unable to submit a solved flag).
-    "gcs_notice_list",
-    "gcs_exercise_list",
-    "gcs_read_exercise",
-    "gcs_build_env",
-    "gcs_recover_env",
-    "gcs_submit_flag",
+    # NOTE: the GCS tools used to be pinned here by hand. That list had drifted
+    # from reality -- it named 6 of the 9 gcs_* tools, so three were prunable
+    # while six were force-kept. The GCS tool face is now controlled by one
+    # setting (`gcs.tools_enabled`, default off) and gcs_tool_schemas() returns
+    # an empty list when it is disabled, which removes the tools from the schema
+    # entirely. Nothing to pin, and no list to keep in sync.
 })
 
 # Task-specific tool bundles keyed by inferred task type. Names not listed here
