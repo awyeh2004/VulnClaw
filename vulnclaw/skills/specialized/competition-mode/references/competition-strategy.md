@@ -6,7 +6,7 @@
 
 出现以下信号时视为比赛模式：
 - 有题目列表接口（`exercise_list` / `challenge` 列表），带 `score`/`difficulty` 字段
-- flag 需提交到平台（`gcs_submit_flag`）并按平台格式校验
+- flag 需提交到平台（`platform_submit`）并按平台格式校验
 - 有排名/积分、全局时间限制、多人同场
 
 ## 二、赛前准备（前 10% 时间）
