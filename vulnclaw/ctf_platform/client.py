@@ -44,6 +44,18 @@ SESSION_PREFIX = "/api/v1"
 _client: httpx.AsyncClient | None = None
 _client_loop: object | None = None
 
+# Client default. NOTE: this is only the fallback for requests that carry no
+# timeout of their own, and a longer value asked for AFTER the cached client was
+# created is NOT applied (httpx fixes the default at construction). The slow
+# endpoints therefore pass ``timeout=`` per request -- see SLOW_TIMEOUT below --
+# which is what actually bounds them.
+DEFAULT_TIMEOUT = 30.0
+
+# Budget for the async environment/target calls: they wait on the platform's
+# provisioning queue, so a 30s request timeout was cutting them off.
+SLOW_TIMEOUT = 120.0
+MEDIUM_TIMEOUT = 60.0
+
 
 def _running_loop() -> object | None:
     try:
@@ -52,21 +64,60 @@ def _running_loop() -> object | None:
         return None
 
 
-def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
+def _discard_client(client: httpx.AsyncClient | None, loop: object | None) -> None:
+    """Drop a client whose loop is gone, closing it when that is still possible.
+
+    An AsyncClient is bound to the loop that built it and the CLI calls
+    ``asyncio.run`` repeatedly, so a cached client routinely outlives its loop.
+    If the old loop is still alive the close can be scheduled on it; if it is
+    already closed the transports died with it and only the reference is dropped
+    (prefer :func:`aclose_client` at the end of a long-lived loop).
+    """
+    if client is None or client.is_closed:
+        return
+    try:
+        if loop is not None and not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(client.aclose(), loop)
+    except Exception:
+        pass
+
+
+async def aclose_client() -> None:
+    """Close the shared client. Call at the end of a loop that used it."""
+    global _client, _client_loop
+    client, loop = _client, _client_loop
+    _client = None
+    _client_loop = None
+    _discard_client(client, loop)
+    if client is not None and not client.is_closed and loop is _running_loop():
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+def get_client(timeout: float = DEFAULT_TIMEOUT) -> httpx.AsyncClient:
     """Return the shared AsyncClient for the CURRENT event loop, creating it lazily.
 
     httpx.AsyncClient is thread-safe and reuses TCP/TLS connections, so one
     instance per event loop avoids the per-call handshake overhead of the old
     ``async with httpx.AsyncClient(...)`` pattern -- while never handing a caller
     a client whose loop is gone.
+
+    ``timeout`` only takes effect when the client is created. Pass a per-request
+    ``timeout=`` (as the slow endpoints do) when a single call needs a longer
+    budget, otherwise the cached client's default silently wins.
     """
     global _client, _client_loop
     loop = _running_loop()
-    if (
-        _client is None
-        or _client.is_closed
+    if _client is not None and (
+        _client.is_closed
         or (_client_loop is not None and loop is not None and _client_loop is not loop)
     ):
+        _discard_client(_client, _client_loop)
+        _client = None
+        _client_loop = None
+    if _client is None:
         _client = httpx.AsyncClient(timeout=timeout)
         _client_loop = loop
     return _client
@@ -185,12 +236,13 @@ async def list_practice_challenges(
     Open API lists. Without this, a practice ground's challenges cannot be
     enumerated at all -- there is no Open API equivalent to fall back on.
     """
-    client = get_client(timeout=60.0)
+    client = get_client()
     return await _session_request(
         client,
         "GET",
         f"/practice/{practice_id}/challenges/",
         params={"page": page, "page_size": page_size},
+        timeout=MEDIUM_TIMEOUT,
     )
 
 
@@ -204,7 +256,7 @@ async def start_environment(practice_id: str, challenge_id: str) -> dict:
     The session API has NO `/environment/start/` route (404), so the generic
     path mapping cannot be reused here -- the fallback needs its own route.
     """
-    client = get_client(timeout=120.0)
+    client = get_client()
     if api_token():
         try:
             return await _request(
@@ -212,6 +264,7 @@ async def start_environment(practice_id: str, challenge_id: str) -> dict:
                 "POST",
                 f"/practice/{practice_id}/challenges/{challenge_id}/environment/start/",
                 json={},
+                timeout=SLOW_TIMEOUT,
             )
         except RuntimeError as exc:
             text = str(exc)
@@ -227,6 +280,7 @@ async def start_environment(practice_id: str, challenge_id: str) -> dict:
         "POST",
         f"/practice/{practice_id}/challenges/{challenge_id}/target/",
         json={},
+        timeout=SLOW_TIMEOUT,
     )
 
 
@@ -332,25 +386,27 @@ async def _request_with_fallback(
 async def get_target(practice_id: str, challenge_id: str) -> dict:
     """Return live target connection info (host/port/url) for a started challenge.
 
-    Requires the front-end session token (Bearer JWT) 鈥?the Open API cannot see
+    Requires the front-end session token (Bearer JWT) — the Open API cannot see
     target addresses. May return ``{"data": null}`` until a target is running.
     """
-    client = get_client(timeout=60.0)
+    client = get_client()
     return await _session_request(
         client,
         "GET",
         f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+        timeout=MEDIUM_TIMEOUT,
     )
 
 
 async def create_target(practice_id: str, challenge_id: str) -> dict:
     """Queue creation of a practice target (moves the challenge to running)."""
-    client = get_client(timeout=60.0)
+    client = get_client()
     return await _session_request(
         client,
         "POST",
         f"/practice/{practice_id}/challenges/{challenge_id}/target/",
         json={},
+        timeout=SLOW_TIMEOUT,
     )
 
 
@@ -360,11 +416,12 @@ async def stop_target(practice_id: str, challenge_id: str) -> dict:
     Call after the flag is captured/submitted so the container slot is freed
     instead of lingering until the platform TTL reclaims it.
     """
-    client = get_client(timeout=60.0)
+    client = get_client()
     return await _session_request(
         client,
         "DELETE",
         f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+        timeout=MEDIUM_TIMEOUT,
     )
 
 

@@ -44,6 +44,16 @@ _SUCCESS_CODE = "00000"
 _client: httpx.AsyncClient | None = None
 _client_loop: object | None = None
 
+# Client default: the fallback for requests that carry no timeout of their own.
+# A longer value requested AFTER the cached client exists is not applied (httpx
+# fixes the default at construction), so the slow endpoints pass ``timeout=``
+# per request instead -- that is what actually bounds them.
+DEFAULT_TIMEOUT = 30.0
+
+# Starting an environment waits on the platform's provisioning queue.
+SLOW_TIMEOUT = 120.0
+MEDIUM_TIMEOUT = 60.0
+
 
 def _running_loop() -> object | None:
     try:
@@ -52,15 +62,55 @@ def _running_loop() -> object | None:
         return None
 
 
-def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Return the shared AsyncClient for the CURRENT event loop, creating it lazily."""
+def _discard_client(client: httpx.AsyncClient | None, loop: object | None) -> None:
+    """Drop a client whose loop is gone, closing it when that is still possible.
+
+    An AsyncClient is bound to the loop that built it and the CLI calls
+    ``asyncio.run`` repeatedly, so a cached client routinely outlives its loop.
+    If the old loop is still alive the close can be scheduled on it; if it is
+    already closed the transports died with it and only the reference is dropped
+    (prefer :func:`aclose_client` at the end of a long-lived loop).
+    """
+    if client is None or client.is_closed:
+        return
+    try:
+        if loop is not None and not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(client.aclose(), loop)
+    except Exception:
+        pass
+
+
+async def aclose_client() -> None:
+    """Close the shared client. Call at the end of a loop that used it."""
+    global _client, _client_loop
+    client, loop = _client, _client_loop
+    _client = None
+    _client_loop = None
+    _discard_client(client, loop)
+    if client is not None and not client.is_closed and loop is _running_loop():
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+def get_client(timeout: float = DEFAULT_TIMEOUT) -> httpx.AsyncClient:
+    """Return the shared AsyncClient for the CURRENT event loop, creating it lazily.
+
+    ``timeout`` only takes effect when the client is created. Pass a per-request
+    ``timeout=`` (as the slow endpoints do) when a single call needs a longer
+    budget, otherwise the cached client's default silently wins.
+    """
     global _client, _client_loop
     loop = _running_loop()
-    if (
-        _client is None
-        or _client.is_closed
+    if _client is not None and (
+        _client.is_closed
         or (_client_loop is not None and loop is not None and _client_loop is not loop)
     ):
+        _discard_client(_client, _client_loop)
+        _client = None
+        _client_loop = None
+    if _client is None:
         _client = httpx.AsyncClient(timeout=timeout)
         _client_loop = loop
     return _client
@@ -219,23 +269,25 @@ async def exercise(exercise_id: int) -> dict:
 
 async def build_environment(exercise_id: int) -> dict:
     """Start a challenge environment (async; poll ``exercise()`` until ready)."""
-    client = get_client(timeout=120.0)
+    client = get_client()
     return await _request(
         client,
         "POST",
         "/ctf/build-exercise-env",
         json={"exerciseId": exercise_id},
+        timeout=SLOW_TIMEOUT,
     )
 
 
 async def recover_environment(exercise_id: int) -> dict:
     """Recover (destroy) a challenge environment, releasing quota."""
-    client = get_client(timeout=60.0)
+    client = get_client()
     return await _request(
         client,
         "POST",
         "/ctf/recover-exercise-env",
         json={"exerciseId": exercise_id},
+        timeout=MEDIUM_TIMEOUT,
     )
 
 

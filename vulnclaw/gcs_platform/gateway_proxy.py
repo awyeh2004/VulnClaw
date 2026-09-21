@@ -29,6 +29,8 @@ import httpx
 
 _PROXY_LOCK = threading.Lock()
 _PROXY_BASE_URL: str | None = None
+_PROXY_SERVER: ThreadingHTTPServer | None = None
+_PROXY_THREAD: threading.Thread | None = None
 
 
 class _GatewayProxyHandler(BaseHTTPRequestHandler):
@@ -45,6 +47,27 @@ class _GatewayProxyHandler(BaseHTTPRequestHandler):
         except ValueError:
             return 0
 
+    @staticmethod
+    def _redact(text: object) -> str:
+        """Strip the upstream URL / token / API key out of an error string.
+
+        httpx puts the request URL into most of its exception messages, and this
+        proxy's upstream carries the per-team gateway token in its path. The 502
+        body is echoed back to the SDK, so an unredacted message can land in logs
+        or in the model's context window.
+        """
+        out = str(text or "")
+        upstream = _GatewayProxyHandler.upstream or ""
+        if upstream:
+            out = out.replace(upstream, "<upstream>")
+            token = upstream.rstrip("/").rsplit("/", 1)[-1]
+            if len(token) >= 8:
+                out = out.replace(token, "<token>")
+        key = _GatewayProxyHandler.api_key or ""
+        if len(key) >= 8:
+            out = out.replace(key, "<api-key>")
+        return out
+
     def _forward(self) -> None:
         length = self._read_body_length(self.headers)
         body = self.rfile.read(length) if length else b""
@@ -59,7 +82,7 @@ class _GatewayProxyHandler(BaseHTTPRequestHandler):
                     headers=headers,
                 )
         except Exception as exc:  # noqa: BLE001 - surface anything as an API error
-            self._send_error_json(502, f"gateway proxy error: {exc}")
+            self._send_error_json(502, f"gateway proxy error: {self._redact(exc)}")
             return
         self._send_raw(resp)
 
@@ -114,25 +137,65 @@ def is_gateway_url(base_url: str) -> bool:
     return "llm-gateway.dasctf.com" in host and "/proxy/e/" in base_url
 
 
+def _stop_proxy_locked() -> None:
+    """Shut the current proxy down and release its port.
+
+    Must be called with ``_PROXY_LOCK`` held, from a thread that is NOT the
+    server's own serve_forever thread (``shutdown()`` would deadlock there).
+    Previously a changed upstream/api_key simply built a second server and
+    abandoned the first, so every change leaked a listening socket and a thread
+    for the life of the process.
+    """
+    global _PROXY_BASE_URL, _PROXY_SERVER, _PROXY_THREAD
+    server, thread = _PROXY_SERVER, _PROXY_THREAD
+    _PROXY_BASE_URL = None
+    _PROXY_SERVER = None
+    _PROXY_THREAD = None
+    if server is not None:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+    if thread is not None and thread.is_alive():
+        try:
+            thread.join(timeout=2.0)
+        except Exception:
+            pass
+
+
+def shutdown_gateway_proxy() -> None:
+    """Stop the in-process proxy, if one is running (idempotent)."""
+    with _PROXY_LOCK:
+        _stop_proxy_locked()
+
+
 def ensure_gateway_proxy_running(upstream: str, api_key: str = "") -> str:
     """Start the in-process gateway proxy (once) and return its local base_url.
 
     ``upstream`` is the bare gateway URL that accepts the payload directly.
-    If the proxy already points at a different upstream, a fresh server is
-    started so the mapping is always correct.
+    If the proxy already points at a different upstream, the previous server is
+    shut down and a fresh one is started so the mapping is always correct (and
+    no listener is leaked).
     """
-    global _PROXY_BASE_URL
+    global _PROXY_BASE_URL, _PROXY_SERVER, _PROXY_THREAD
     with _PROXY_LOCK:
         if _PROXY_BASE_URL is not None and (
             _GatewayProxyHandler.upstream == upstream
             and _GatewayProxyHandler.api_key == api_key
         ):
             return _PROXY_BASE_URL
+        _stop_proxy_locked()
         _GatewayProxyHandler.upstream = upstream
         _GatewayProxyHandler.api_key = api_key
         server = ThreadingHTTPServer(("127.0.0.1", 0), _GatewayProxyHandler)
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        _PROXY_SERVER = server
+        _PROXY_THREAD = thread
         _PROXY_BASE_URL = f"http://127.0.0.1:{port}"
         return _PROXY_BASE_URL
