@@ -33,6 +33,15 @@ from pathlib import Path
 _LEGACY_TOOLS_DIR = Path(r"E:\vulnclaw\tools")
 
 
+def _repo_ir_tools_dir() -> Path:
+    """``<repo>/.ir-tools`` when running from a checkout, else a harmless miss.
+
+    Resolved relatively (``tool_registry.py`` -> parents[2]) so the same code
+    works on any machine; never an absolute personal path.
+    """
+    return Path(__file__).resolve().parents[2] / ".ir-tools"
+
+
 def _candidate_roots() -> list[Path]:
     """Every directory a tool bundle may live under, highest priority first."""
     roots: list[Path] = []
@@ -48,6 +57,12 @@ def _candidate_roots() -> list[Path]:
     roots.append(Path.home() / "vulnclaw" / "tools")
     roots.append(Path.home() / "tools")
     roots.append(_LEGACY_TOOLS_DIR)
+    # Workspace-local IR toolkit (gitignored; mirrored to the portable drive as
+    # G:\tool\ir-toolkit). Probed LAST so an explicit override or a wizard-installed
+    # bundle always wins -- but probed at all, because otherwise the ~30 incident-
+    # response tools under .ir-tools/bin were undetectable and never reached the
+    # capability card, leaving the IR half of a competition with no tool awareness.
+    roots.append(_repo_ir_tools_dir())
 
     seen: set[str] = set()
     unique: list[Path] = []
@@ -179,6 +194,142 @@ _IR_REGISTRY: list[dict] = [
         "usage": '/command "open sftp://user:pass@host/" "get /remote/path C:\\local\\" (SFTP 传输)',
         "when": "SFTP/SCP 文件传输（取证采集、webshell 上传）",
     },
+    # ── Windows host forensics (the .ir-tools/bin bundle; Sysinternals + NirSoft) ──
+    {
+        "name": "Autoruns",
+        "rel": ("bin", "Autoruns", "Autoruns64.exe"),
+        "which": "Autoruns64.exe",
+        "cmd": '"{path}" -accepteula -a * -c -h -s -m -v > autoruns.csv',
+        "keywords": ["持久化", "自启动", "开机启动", "persistence", "autorun", "注册表启动", "计划任务", "服务"],
+        "usage": '-accepteula -a * -c -h -s -m -v > out.csv (全量含哈希, 免交互)',
+        "when": "自启动/持久化项全量导出（应急响应第一优先）",
+    },
+    {
+        "name": "Process Explorer",
+        "rel": ("bin", "ProcessExplorer", "procexp64.exe"),
+        "which": "procexp64.exe",
+        "cmd": '"{path}" /accepteula',
+        "keywords": ["进程", "process", "句柄", "handle", "dll", "父进程", "可疑进程", "内存"],
+        "usage": '/accepteula (GUI；查进程树、句柄、加载的 DLL 与数字签名)',
+        "when": "可疑进程与 DLL 分析（比任务管理器深）",
+    },
+    {
+        "name": "Procmon",
+        "rel": ("bin", "Procmon", "Procmon64.exe"),
+        "which": "Procmon64.exe",
+        "cmd": '"{path}" /accepteula /Quiet /Minimized /BackingFile trace.pml',
+        "keywords": ["行为", "监控", "monitor", "文件监控", "注册表监控", "behavior", "动态分析"],
+        "usage": '/accepteula /Quiet /BackingFile t.pml (后台录制文件/注册表/进程行为)',
+        "when": "动态行为监控（复现恶意样本动作）",
+    },
+    {
+        "name": "TCPView",
+        "rel": ("bin", "TCPView", "Tcpview64.exe"),
+        "which": "Tcpview64.exe",
+        "cmd": '"{path}" /accepteula',
+        "keywords": ["网络连接", "tcp", "udp", "外联", "连接", "端口占用", "c2", "回连"],
+        "usage": '/accepteula (GUI；看哪个进程持有哪个连接，含已关闭连接)',
+        "when": "进程↔连接归属（定位外联/C2）",
+    },
+    {
+        "name": "FullEventLogView",
+        "rel": ("bin", "FullEventLogView", "FullEventLogView.exe"),
+        "which": "FullEventLogView.exe",
+        "cmd": '"{path}" /scomma events.csv',
+        "keywords": ["事件日志", "eventlog", "日志分析", "4624", "4625", "登录", "审计", "windows日志"],
+        "usage": '/scomma out.csv (全部事件导出 CSV；含安全/系统/应用日志)',
+        "when": "Windows 事件日志批量导出与检索",
+    },
+    {
+        "name": "LastActivityView",
+        "rel": ("bin", "LastActivityView", "LastActivityView.exe"),
+        "which": "LastActivityView.exe",
+        "cmd": '"{path}" /scomma activity.csv',
+        "keywords": ["活动记录", "操作痕迹", "入侵时间", "时间线", "timeline", "最近操作", "首次入侵"],
+        "usage": '/scomma out.csv (合并出主机活动时间线)',
+        "when": "主机活动时间线（推断入侵时间点）",
+    },
+    {
+        "name": "BrowsingHistoryView",
+        "rel": ("bin", "BrowsingHistoryView", "BrowsingHistoryView.exe"),
+        "which": "BrowsingHistoryView.exe",
+        "cmd": '"{path}" /scomma history.csv',
+        "keywords": ["浏览器", "browser", "历史记录", "history", "下载记录", "上网痕迹"],
+        "usage": '/scomma out.csv (聚合 IE/Edge/Chrome/Firefox 历史)',
+        "when": "浏览器历史取证（攻击者访问痕迹）",
+    },
+    {
+        "name": "ShellBagsView",
+        "rel": ("bin", "ShellBagsView", "ShellBagsView.exe"),
+        "which": "ShellBagsView.exe",
+        "cmd": '"{path}" /scomma shellbags.csv',
+        "keywords": ["shellbags", "文件夹访问", "资源管理器", "目录访问痕迹", "挂载"],
+        "usage": '/scomma out.csv (攻击者浏览过的目录)',
+        "when": "目录访问痕迹（已删除/外接盘的访问证据）",
+    },
+    {
+        "name": "UserAssistView",
+        "rel": ("bin", "UserAssistView", "UserAssistView.exe"),
+        "which": "UserAssistView.exe",
+        "cmd": '"{path}" /scomma userassist.csv',
+        "keywords": ["userassist", "程序执行痕迹", "执行记录", "gui程序"],
+        "usage": '/scomma out.csv (通过 Explorer 启动过的程序)',
+        "when": "程序执行痕迹（攻击者运行过什么）",
+    },
+    {
+        "name": "WinPrefetchView",
+        "rel": ("bin", "WinPrefetchView", "WinPrefetchView.exe"),
+        "which": "WinPrefetchView.exe",
+        "cmd": '"{path}" /scomma prefetch.csv',
+        "keywords": ["prefetch", "预读取", "程序执行", "执行次数", "取证"],
+        "usage": '/scomma out.csv (含执行次数与最后执行时间)',
+        "when": "程序执行取证（Prefetch 解析）",
+    },
+    {
+        "name": "DNSDataView",
+        "rel": ("bin", "DNSDataView", "DNSDataView.exe"),
+        "which": "DNSDataView.exe",
+        "cmd": '"{path}" /scomma dns.csv',
+        "keywords": ["dns", "域名解析", "缓存", "域名", "c2域名", "解析记录"],
+        "usage": '/scomma out.csv (DNS 客户端缓存解析记录)',
+        "when": "DNS 缓存取证（C2 域名解析痕迹）",
+    },
+    {
+        "name": "WifiHistoryView",
+        "rel": ("bin", "WifiHistoryView", "WifiHistoryView.exe"),
+        "which": "WifiHistoryView.exe",
+        "cmd": '"{path}" /scomma wifi.csv',
+        "keywords": ["wifi", "无线", "接入点", "地理位置", "移动痕迹"],
+        "usage": '/scomma out.csv (连接过的 AP 与时间)',
+        "when": "无线接入历史（设备移动轨迹）",
+    },
+    {
+        "name": "Sysmon",
+        "rel": ("bin", "Sysmon", "Sysmon64.exe"),
+        "which": "Sysmon64.exe",
+        "cmd": '"{path}" -accepteula -i <config.xml>',
+        "keywords": ["sysmon", "进程创建", "审计", "监控", "遥测", "日志采集"],
+        "usage": '-accepteula -i config.xml (安装；进程/网络/文件/注册表遥测进事件日志)',
+        "when": "主机遥测采集（需要更细粒度的执行证据时）",
+    },
+    {
+        "name": "volatility3",
+        "rel": ("bin", "vol.cmd"),
+        "which": "vol",
+        "cmd": '"{path}" -f <memory.dmp> <plugin>',
+        "keywords": ["内存镜像", "内存取证", "memory", "dump", "进程列表", "malfind", "pslist", "内核"],
+        "usage": '-f <dmp> windows.pslist|windows.malfind|windows.netscan (内存镜像分析)',
+        "when": "内存镜像取证（进程/注入/网络连接）",
+    },
+    {
+        "name": "D盾_Web查杀",
+        "rel": ("bin", "D盾_Web查杀", "D_Safe_Manage.exe"),
+        "which": "D_Safe_Manage.exe",
+        "cmd": '"{path}"',
+        "keywords": ["webshell", "查杀", "木马", "后门", "网页后门", "web目录", "一句话"],
+        "usage": 'GUI：指定 web 根目录做 webshell 特征查杀与可疑文件定位',
+        "when": "Web 目录 webshell 查杀（国内环境特征库强）",
+    },
 ]
 
 
@@ -239,7 +390,14 @@ def _match(goal_lower: str, keywords: list[str]) -> bool:
 
 
 def build_tool_card(goal: str) -> str:
-    """Build the capability card for this goal. Returns empty string if no tools match."""
+    """Build the capability card for this goal. Returns empty string if no tools match.
+
+    Both registries are consulted. ``_IR_REGISTRY`` was previously defined and
+    documented but never read anywhere in the module, so IR-only tools (WinSCP)
+    could be detected and keyword-matched yet never appear in the card: an agent
+    doing 应急响应 was told nothing about them. IR matches are rendered in their
+    own section so the two purposes stay visually distinct.
+    """
     goal_lower = (goal or "").lower()
     lines: list[str] = []
 
@@ -251,12 +409,28 @@ def build_tool_card(goal: str) -> str:
             continue
         lines.append(f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})")
 
-    if not lines:
+    ir_lines: list[str] = []
+    for entry in _IR_REGISTRY:
+        cmd = _detect(entry)
+        if not cmd:
+            continue
+        if not _match(goal_lower, entry.get("keywords", [])):
+            continue
+        ir_lines.append(
+            f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})"
+        )
+
+    if not lines and not ir_lines:
         return ""
 
     card = "\n\n# External tools available on this host\n"
     card += "These are installed and verified. Use shell_command to invoke them.\n"
-    card += "\n".join(lines)
+    if lines:
+        card += "\n".join(lines)
+    if ir_lines:
+        card += "\n\n## Incident-response / evidence-handling tools\n"
+        card += "These are installed and verified. Use shell_command to invoke them.\n"
+        card += "\n".join(ir_lines)
 
     # bg_launch hint when cracking tools are relevant
     if any(k in goal_lower for k in ["hash", "crack", "破解", "密码", "爆破"]):
