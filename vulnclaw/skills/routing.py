@@ -233,9 +233,25 @@ def keyword_present(keyword: str, text: str) -> bool:
     boundaries so ``rce`` doesn't fire inside ``source`` nor ``java`` inside
     ``javascript``. Non-ASCII phrases (Chinese) keep plain substring matching,
     where word boundaries do not apply.
+
+    ⚠️ The keyword is lowercased before matching, deliberately. ``text`` is
+    lowercased upstream (``SkillQuery.from_input`` → ``matched_text()``) but
+    SKILL_INTENT_MAP keywords are hand-written prose and several contain
+    uppercase ASCII -- ``DDoS``, ``CC攻击``, and even mixed tokens like
+    ``webshell查杀``. Measured before this fix:
+
+        keyword_present("DDoS",       "服务器被ddos打挂了")  -> False
+        keyword_present("ddos",       "服务器被ddos打挂了")  -> True
+        keyword_present("webshell查杀", "网站被植入webshell，帮我查杀") -> False
+
+    So every keyword containing an uppercase ASCII letter was silently dead:
+    the group scored 0 and the phrasing fell through to a fallback skill or to
+    nothing. Normalizing here fixes all of them at once instead of asking every
+    future keyword author to remember to type lowercase.
     """
     if not keyword:
         return False
+    keyword = keyword.lower()
     if keyword.isascii():
         return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text) is not None
     return keyword in text

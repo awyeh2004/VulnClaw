@@ -31,7 +31,14 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "认证漏洞|逻辑漏洞|越权|idor|支付逻辑|文件上传|路径穿越|authentication flaw|logic flaw|authorization bypass|payment logic|file upload|path traversal": ["web-security-advanced"],
     "ai安全|mcp安全|prompt注入|工具滥用|agent安全|模型安全": ["ai-mcp-security"],
     "ai渗透|大模型安全|llm安全|prompt injection|tool abuse": ["ai-mcp-security"],
-    "mcp投毒|skills供应链|角色逃逸|数据泄露|prompt泄漏": ["ai-mcp-security"],
+    # NOTE: this line used to contain a bare "数据泄露", which stole real
+    # incident-response queries -- measured: "客户数据泄露了" resolved to
+    # ai-mcp-security (conf 0.17) instead of incident-response, because a bare
+    # 4-char alternative inside a SHORT pattern scores higher than the same word
+    # inside a longer one. In THIS group's context the intent is AI-specific
+    # (leaking from a model / an agent / an MCP skill), so qualify it and leave
+    # the generic term to incident-response.
+    "mcp投毒|skills供应链|角色逃逸|模型数据泄露|prompt泄漏|提示词泄漏": ["ai-mcp-security"],
     "内网渗透|横向移动|提权|持久化|隧道|代理|域渗透|ad攻击": ["intranet-pentest-advanced"],
     "adcs|exchange|sharepoint|mimikatz|kerberoasting|dcsync|pth": ["intranet-pentest-advanced"],
     "凭据窃取|bloodhound|frp|chisel|ligolo|amsi绕过": ["intranet-pentest-advanced"],
@@ -75,12 +82,37 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "quiz|multiple choice|trivia|true or false": ["knowledge-quiz"],
     # ── incident-response: 主机应急响应与入侵痕迹排查 ────────────────
     "应急响应|应急排查|入侵排查|被入侵|失陷主机|被植入|恶意程序|恶意行为痕迹": ["incident-response"],
-    "webshell查杀|查马|查杀木马|后门排查|隐藏后门|持久化排查|权限维持": ["incident-response"],
+    # NOTE on "webshell查杀": it used to be ONE keyword, which can never match a
+    # real sentence -- measured: "网站被植入webshell，帮我查杀" has a comma between
+    # the two words, so a contiguous-substring match fails. Split into the two
+    # words it is actually made of (keeping the glued form for when it IS written
+    # together). This is a per-keyword design bug, distinct from the
+    # case-sensitivity bug fixed in keyword_present.
+    "webshell|查马|查杀木马|后门排查|隐藏后门|持久化排查|权限维持": ["incident-response"],
+    "webshell查杀|木马查杀": ["incident-response"],
     "挖矿木马|勒索病毒|勒索信|网页篡改|挂黑链|暗链|网页被改": ["incident-response"],
     "克隆账号|隐藏账号|隐藏用户|异常账号|账号被篡改": ["incident-response"],
     "日志分析|日志排查|攻击溯源|溯源分析|应急取证|主机取证|内存取证|痕迹分析": ["incident-response"],
     "incident response|dfir|forensic|compromise assessment|threat triage": ["incident-response"],
     "登录类型|事件ID|事件日志|evtx|prefetch|amcache": ["incident-response"],
+    # DDoS / CC：这类事件**不在本机留文件**，"被入侵/被植入/恶意程序"等全不匹配，
+    # 实测 "服务器被DDoS打挂了" 直接落到 None、"流量异常，怀疑被攻击" 落到泛化的
+    # pentest-flow。
+    #
+    # ⚠️ 分组要短！关键词得分 ≈ 命中长度 / 该组模式总长度（实测：把一长串塞进
+    # 一组会把分数从 0.3 摊薄到 0.09）。所以这里按语义拆成 4 个短组，而不是
+    # 一个大 alternation —— 拆开之后每组的"浓度"才够。
+    "DDoS|拒绝服务|流量攻击": ["incident-response"],
+    "CC攻击|SYN洪水|UDP洪水|ICMP洪水": ["incident-response"],
+    "反射攻击|放大攻击|流量清洗|抗D": ["incident-response"],
+    "流量异常|带宽被打满|服务不可用": ["incident-response"],
+    "denial of service|flood attack|amplification attack": ["incident-response"],
+    # 数据泄露 / 拖库：实测 "客户数据泄露了" 会被 ai-mcp-security 抢走，
+    # "敏感信息出现在网上"/"数据库被拖库了" 直接 None。同样按语义拆短组。
+    "数据泄露|数据泄漏|信息泄露|隐私泄露": ["incident-response"],
+    "拖库|撞库|数据被窃取|数据外泄|数据出现在网上": ["incident-response"],
+    "敏感信息出现在|敏感数据泄露|泄露事件": ["incident-response"],
+    "data breach|data leak|data exfiltration|information disclosure": ["incident-response"],
     # ── OSINT specialized skill — refined routing ───────────────────
     # osint-recon: Full-dimension recon (OSINT + social engineering)
     # Triggered only when user explicitly mentions social engineering / OSINT / author tracking
