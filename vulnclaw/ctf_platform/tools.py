@@ -38,8 +38,39 @@ CTF_READ_TOOLS: set[str] = {
 }
 
 
+def ctf2_tools_enabled() -> bool:
+    """Whether the LEGACY ``ctf2_*`` tool names are exposed to the model.
+
+    OFF by default. The platform-neutral ``platform_*`` face covers the same verbs,
+    and while both were exposed the schema carried 17 platform tools instead of 7
+    (measured: 2187 -> 978 tokens per request) whose names differ only by which
+    platform they belong to -- the very redundancy that once made an agent call
+    ``gcs_submit_flag`` for a CTF2 challenge.
+
+    Only the model's VIEW changes: the handlers stay in ``CTF_TOOL_NAMES`` and stay
+    dispatchable, so the CLI, saved playbooks and programmatic callers keep working,
+    and this switch restores the old names exactly as they were.
+
+    Fails CLOSED on a config error -- not being able to read the switch is not a
+    reason to spend the tokens, and the neutral face is always available.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return bool(getattr(load_config().competition, "expose_legacy_tool_names", False))
+    except Exception:
+        return False
+
+
 def ctf2_tool_schemas() -> list[dict[str, Any]]:
-    """OpenAI function schemas for all CTF2 platform tools."""
+    """OpenAI function schemas for the CTF2 platform tools.
+
+    Returns an EMPTY list unless the legacy names are switched on; see
+    :func:`ctf2_tools_enabled`. Callers register whatever this returns, so an empty
+    list means the tools never enter the schema at all.
+    """
+    if not ctf2_tools_enabled():
+        return []
     return [
         {
             "type": "function",
@@ -285,9 +316,18 @@ def ctf2_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
-CTF_TOOL_NAMES_BY_SCHEMA: list[str] = [
-    s["function"]["name"] for s in ctf2_tool_schemas()
-]
+CTF_TOOL_NAMES_BY_SCHEMA: list[str] = list(CTF_TOOL_NAMES)
+"""Dispatch accepts every tool the module implements, INDEPENDENT of exposure.
+
+This used to be derived from ``ctf2_tool_schemas()``. Once that function learned to
+return [] when the legacy face is hidden, the derivation made dispatch reject every
+call with "unknown CTF2 tool" -- coupling two things that must stay separate:
+
+* ``ctf2_tool_schemas()`` decides what the MODEL can see;
+* this decides what the CODE can execute.
+
+The same trap is documented in ``gcs_platform/tools.py``, where it was hit first.
+"""
 
 
 def _format(payload: dict | list | str) -> str:

@@ -14,6 +14,24 @@ from vulnclaw.ctf_platform.client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_face_on(monkeypatch):
+    """This module is ABOUT the legacy ctf2_* face, so turn it on.
+
+    The face is hidden from the model by default (competition.expose_legacy_tool_names
+    is false: the neutral platform_* tools cover the same verbs and the duplicate
+    names cost ~1.2k schema tokens per request). Tests of the legacy schemas must
+    therefore opt in explicitly rather than rely on the old always-exposed default.
+
+    tests/ctf_platform/test_legacy_tool_face_gate.py covers the default-off behaviour
+    itself, including the trap that dispatch must keep working while the schema is
+    hidden.
+    """
+    import vulnclaw.ctf_platform.tools as _tools
+
+    monkeypatch.setattr(_tools, "ctf2_tools_enabled", lambda: True)
+
+
 def test_schemas_expose_submit_flag():
     names = {s["function"]["name"] for s in ctf2_tool_schemas()}
     assert "ctf2_submit_flag" in names

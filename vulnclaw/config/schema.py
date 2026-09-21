@@ -772,6 +772,25 @@ class CompetitionConfig(BaseModel):
         default=True,
         description="At match start, download all challenge attachments so a slow backend never blocks analysis.",
     )
+    # The platform-neutral `platform_*` tools cover the same verbs as the legacy
+    # per-platform names (`ctf2_*`, `gcs_*`). Exposing both cost 17 platform tools
+    # where 7 suffice (measured: 2187 -> 978 tokens per request), and the duplicate
+    # names are exactly what once led an agent to call gcs_submit_flag for a CTF2
+    # challenge. So the legacy NAMES are hidden from the model by default.
+    #
+    # This gates only the agent's view. The handlers stay registered and
+    # dispatchable, so `vulnclaw ctf2` / `vulnclaw gcs`, saved playbooks and any
+    # programmatic caller keep working, and setting this true restores the old
+    # names to the schema unchanged.
+    expose_legacy_tool_names: bool = Field(
+        default=False,
+        description=(
+            "Expose the legacy per-platform tool names (ctf2_*) to the agent. OFF by "
+            "default: the platform_* tools cover the same verbs, and the duplicate "
+            "names cost ~1.2k schema tokens per request while inviting wrong-platform "
+            "calls."
+        ),
+    )
     # Flag submission is a STATE-CHANGING action on the scoring platform, and the
     # competition handbook treats "非有效操作" (invalid operations) as grounds for
     # disqualification. A guessed or exploratory submission is exactly that, so
