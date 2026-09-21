@@ -904,3 +904,87 @@ class TestInferAllowedToolsQuiz:
         tools = _infer_allowed_tools("解密这段 base64 密文")
         assert tools is not None
         assert "fetch" not in tools
+
+
+class TestSolveScratchWorkdir:
+    """session.solve_work_root: solve tools run in <root>/<run_id>/, not the repo."""
+
+    def _agent(self, root, run_id="20260921T101010Z-solve-x"):
+        from types import SimpleNamespace
+
+        agent = DummyAgent()
+        agent.config = SimpleNamespace(session=SimpleNamespace(solve_work_root=str(root)))
+        agent.runtime = SimpleNamespace(run_id=run_id)
+        return agent
+
+    def test_scratch_dir_created_per_run(self, tmp_path):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = self._agent(tmp_path)
+        d = builtin_tools._default_workdir(agent)
+        assert d == (tmp_path / "20260921T101010Z-solve-x").resolve()
+        assert d.is_dir()
+
+    def test_empty_root_keeps_process_cwd(self):
+        import os
+        from pathlib import Path
+
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = self._agent("")
+        assert builtin_tools._default_workdir(agent) == Path(os.getcwd()).resolve()
+
+    def test_unsafe_run_id_chars_sanitized(self, tmp_path):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        agent = self._agent(tmp_path, run_id='a<b>:c?d|e"f')
+        d = builtin_tools._default_workdir(agent)
+        assert d.parent == tmp_path.resolve()
+        assert not any(ch in d.name for ch in '<>:"/\|?*')
+
+    def test_unusable_root_falls_back_to_cwd(self, tmp_path):
+        import os
+        from pathlib import Path
+
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        # a plain FILE as the root: mkdir under it must fail on every platform
+        blocked = tmp_path / "blocked"
+        blocked.write_text("i am a file", encoding="utf-8")
+        agent = self._agent(blocked)
+        assert builtin_tools._default_workdir(agent) == Path(os.getcwd()).resolve()
+
+    async def test_shell_command_gates_with_scratch_cwd(self, tmp_path, monkeypatch):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        gate, channel = _install_auto_approve()
+        monkeypatch.setattr(
+            builtin_tools,
+            "_spawn_captured",
+            lambda *a, **k: (0, "ok", "", False),
+        )
+        agent = self._agent(tmp_path)
+        result = await builtin_tools.execute_shell_command(agent, {"command": "echo hi"})
+        assert "ok" in result
+        assert channel.views, "gate saw no approval request"
+        cwd = str(getattr(channel.views[-1], "cwd", ""))
+        assert "20260921T101010Z-solve-x" in cwd
+        assert str(tmp_path) in cwd
+
+    async def test_explicit_workdir_still_wins(self, tmp_path, monkeypatch):
+        import os
+
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        gate, channel = _install_auto_approve()
+        monkeypatch.setattr(
+            builtin_tools,
+            "_spawn_captured",
+            lambda *a, **k: (0, "ok", "", False),
+        )
+        agent = self._agent(tmp_path)
+        await builtin_tools.execute_shell_command(
+            agent, {"command": "echo hi", "workdir": os.getcwd()}
+        )
+        cwd = str(getattr(channel.views[-1], "cwd", ""))
+        assert "20260921T101010Z-solve-x" not in cwd

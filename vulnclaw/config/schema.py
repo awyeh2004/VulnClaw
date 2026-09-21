@@ -498,6 +498,16 @@ class SessionConfig(BaseModel):
             "exceeded — auto-captured run notes still persist the findings."
         ),
     )
+    solve_work_root: str = Field(
+        default="",
+        description=(
+            "Root directory for per-solve scratch: when the model passes no "
+            "explicit workdir, shell_command/python_execute run inside "
+            "<solve_work_root>/<run_id>/ instead of the process cwd, so payload "
+            "and probe files never litter the repo checkout. Empty keeps the "
+            "process cwd (old behavior)."
+        ),
+    )
     solve_max_directions: int = Field(
         default=3,
         description="Deprecated compatibility field; model-led solve no longer plans research directions",

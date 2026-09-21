@@ -358,6 +358,31 @@ def _resolve_workdir(raw_workdir: Any) -> Path:
     return workdir.resolve()
 
 
+def _default_workdir(agent: AgentContext) -> Path:
+    """Process cwd, or the per-run scratch dir when session.solve_work_root is set.
+
+    Solve runs used to drop every payload/probe/response file straight into the
+    process cwd — the repo root when launched from the checkout — leaving a
+    hundred stray files behind. When solve_work_root is configured, each run
+    instead gets its own subdir named by run_id. Any failure falls back to the
+    process cwd so a bad path can never take the tools down.
+    """
+    try:
+        raw = str(getattr(agent.config.session, "solve_work_root", "") or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return Path(os.getcwd()).resolve()
+    run_id = str(getattr(getattr(agent, "runtime", None), "run_id", "") or "").strip()
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", run_id)[:120] or "manual"
+    try:
+        scratch = (Path(raw).expanduser() / safe).resolve()
+        scratch.mkdir(parents=True, exist_ok=True)
+        return scratch
+    except Exception:
+        return Path(os.getcwd()).resolve()
+
+
 def _validate_command_url_scope(agent: AgentContext, command: str) -> str | None:
     for match in re.finditer(r"https?://[^\s'\"<>]+", command):
         parsed = urlparse(match.group(0))
@@ -672,7 +697,7 @@ async def execute_shell_command(agent: AgentContext, args: dict[str, Any]) -> st
         return scope_violation
 
     try:
-        workdir = _resolve_workdir(args.get("workdir"))
+        workdir = _resolve_workdir(args.get("workdir") or _default_workdir(agent))
     except OSError as exc:
         return f"[!] shell_command invalid workdir: {exc}"
     if not workdir.exists() or not workdir.is_dir():
@@ -3275,7 +3300,7 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
             env = sanitized_exec_env(base_env)
 
         try:
-            workdir = _resolve_workdir(workdir_arg)
+            workdir = _resolve_workdir(workdir_arg or _default_workdir(agent))
         except Exception:
             workdir = Path(os.getcwd()).resolve()
         if not workdir.exists() or not workdir.is_dir():
