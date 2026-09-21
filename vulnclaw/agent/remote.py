@@ -354,11 +354,18 @@ def _connect(host: Any, connect_timeout: float):
         client.load_system_host_keys()
         _load_our_host_keys(client)
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    else:
-        # Load what we already recorded: with AutoAddPolicy paramiko only
-        # consults the policy for a MISSING key, so a host we have seen before
-        # is still verified and a changed key raises.
+    elif policy == "accept_new":
+        # TOFU with memory: verify against what we already recorded and add what
+        # is new. With AutoAddPolicy paramiko consults the policy for a MISSING
+        # key only, so a host seen before is still verified and a changed key
+        # raises instead of being silently accepted.
         _load_our_host_keys(client)
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        # insecure: nothing loaded and nothing recorded, so paramiko has no key to
+        # compare against — which is exactly what "no check" promises. Loading our
+        # record here (as the first version did) made a *changed* key fail the
+        # connection even in this mode, so the mode silently was not insecure.
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     kwargs: dict[str, Any] = {

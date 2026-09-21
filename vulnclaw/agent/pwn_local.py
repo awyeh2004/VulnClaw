@@ -246,6 +246,25 @@ def _resource_limit_flags() -> list[str]:
     ]
 
 
+def limit_override_warnings() -> list[str]:
+    """Overrides that were refused, so the fallback is not silent.
+
+    A rejected ``VULNCLAW_PWN_*`` value quietly reverts to the default cap; the
+    operator who set it should be told, otherwise the only signal is a container
+    that behaves differently from what they configured.
+    """
+    out: list[str] = []
+    for var, default in (
+        ("VULNCLAW_PWN_MEMORY", _DEFAULT_MEMORY_LIMIT),
+        ("VULNCLAW_PWN_CPUS", _DEFAULT_CPU_LIMIT),
+        ("VULNCLAW_PWN_PIDS", _DEFAULT_PIDS_LIMIT),
+    ):
+        raw = (os.environ.get(var) or "").strip()
+        if raw and _positive_number(raw) is None:
+            out.append(f"{var}={raw!r} is not a positive number; using {default}")
+    return out
+
+
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -434,13 +453,17 @@ def start_replay(binary_path: str, port: int | None = None) -> str:
             f"[pwn_local] container started ({name}) but port {port} never came "
             "up — check the binary's runtime deps (docker logs " + name + ")"
         )
-    return (
+    limit_notes = limit_override_warnings()
+    summary = (
         f"[pwn_local] local replay ready: 127.0.0.1:{port} "
         f"(container {name}, image {helper_image_name(tag)}, arch {info['arch']}, "
         f"glibc {info['max_glibc'] or 'static'}, sha256 {digest[:16]}). Develop and "
         "verify the exploit here; fire the real remote only once it works. "
         "Release with pwn_local_stop when done."
     )
+    if limit_notes:
+        summary += "\n[!] resource limit override(s) rejected: " + "; ".join(limit_notes)
+    return summary
 
 
 def stop_replay(binary_path: str) -> str:
