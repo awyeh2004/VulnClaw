@@ -195,17 +195,27 @@ def normalize_target_payload(payload: Any, ref: ChallengeRef) -> EnvInfo:
 # ── list payload tolerance ────────────────────────────────────────────────
 
 _ROW_ID_KEYS = ("id", "challenge_id", "challengeId", "practice_id", "practiceId")
+# Daily rows WRAP the challenge: {"id": <daily entry id>, "challenge_id": ...,
+# "challenge": {...}}. The challenge id must win there, or the ref addresses the
+# daily-entry row instead of the challenge.
+_CHALLENGE_ROW_ID_KEYS = ("challenge_id", "challengeId")
 _ROW_NAME_KEYS = ("name", "title", "challenge_name")
 _CHILD_LIST_KEYS = ("challenges", "challenge_list", "corpus", "children", "list")
 
 
 def extract_rows(payload: Any) -> list[dict]:
-    """Best-effort extraction of a list of rows from a CTF2 list response."""
+    """Best-effort extraction of a list of rows from a CTF2 list response.
+
+    The real envelope, confirmed against the live platform, is
+    ``{"data": {"items": [...], "total": int}, "success": bool}``; the other keys
+    are tolerated so a future envelope change degrades to an empty list rather
+    than a crash.
+    """
     data = payload.get("data") if isinstance(payload, Mapping) else payload
     if isinstance(data, list):
         return [row for row in data if isinstance(row, dict)]
     if isinstance(data, Mapping):
-        for key in ("list", "results", "items", "rows"):
+        for key in ("items", "list", "results", "rows"):
             value = data.get(key)
             if isinstance(value, list):
                 return [row for row in value if isinstance(row, dict)]
@@ -220,12 +230,33 @@ def _row_id(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def challenge_row_id(row: Mapping[str, Any]) -> str:
+    """The challenge id of a list row, preferring the wrapped ``challenge``."""
+    for key in _CHALLENGE_ROW_ID_KEYS:
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    nested = row.get("challenge")
+    if isinstance(nested, Mapping):
+        for key in ("id", "challenge_id"):
+            value = nested.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return _row_id(row)
+
+
 def _row_name(row: Mapping[str, Any]) -> str:
     for key in _ROW_NAME_KEYS:
         value = row.get(key)
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _nested_name(row: Mapping[str, Any]) -> str:
+    """Names for wrapped rows (daily/submissions nest the challenge object)."""
+    nested = row.get("challenge")
+    return _row_name(nested) if isinstance(nested, Mapping) else ""
 
 
 def _embedded_children(row: Mapping[str, Any]) -> list[dict]:
@@ -320,12 +351,15 @@ class CTF2Adapter:
             if not practice_id:
                 continue
             children = _embedded_children(row)
+            count = row.get("challenge_count")
             corpora.append(
                 Corpus(
                     ref=CorpusRef(self.name, KIND_PRACTICE, practice_id),
                     name=_row_name(row) or practice_id,
-                    count=len(children) or None,
-                    note=f"{len(children)} challenge(s) embedded" if children else "",
+                    count=count if isinstance(count, int) else (len(children) or None),
+                    note="challenge list is NOT enumerable via the API"
+                    if count
+                    else "",
                 )
             )
 
@@ -352,12 +386,12 @@ class CTF2Adapter:
             rows = extract_rows(await self.client.list_daily(limit=50))
             return [
                 Challenge(
-                    ref=ChallengeRef(self.name, KIND_DAILY, "", _row_id(row)),
-                    name=_row_name(row) or _row_id(row),
+                    ref=ChallengeRef(self.name, KIND_DAILY, "", challenge_row_id(row)),
+                    name=_row_name(row) or _nested_name(row) or challenge_row_id(row),
                     raw=row,
                 )
                 for row in rows
-                if _row_id(row)
+                if challenge_row_id(row)
             ]
 
         if corpus.kind == KIND_STAGE:
@@ -375,10 +409,12 @@ class CTF2Adapter:
             ]
 
         if corpus.kind == KIND_PRACTICE:
-            # Best effort: some practice payloads embed their challenge list. If
-            # this one does not, say so plainly -- the CTF2 client exposes no
-            # "challenges of a practice ground" route, and inventing one (or
-            # silently returning nothing) would be worse than an error.
+            # Verified against the live platform: `GET /api/open/v1/user/practice/
+            # <pid>/challenges/` is 404 route-not-found, and a practice row carries
+            # only `challenge_count` -- no embedded challenge list. So there is no
+            # way to enumerate a practice ground's challenges through the routes
+            # this client implements, and inventing one (or silently returning an
+            # empty list) would be worse than saying so.
             for row in extract_rows(await self.client.list_practice(limit=50)):
                 if _row_id(row) != corpus.id:
                     continue
@@ -395,12 +431,13 @@ class CTF2Adapter:
                         for child in children
                         if _row_id(child)
                     ]
+                break
             raise CTF2Error(
-                f"CTF2 does not expose 'list the challenges of practice {corpus.id}' "
-                f"through the routes this client implements (only practice listing, "
-                f"daily listing, competitions and stage->challenges). Pass the two "
-                f"ids directly (vulnclaw ctf2 <challenge_id> <practice_id>) or read "
-                f"the practice payload for embedded challenges."
+                f"CTF2 exposes no route to list the challenges of practice "
+                f"{corpus.id}: '/practice/<pid>/challenges/' returns 404 and the "
+                f"practice payload carries only a challenge_count. Pass the two ids "
+                f"directly (vulnclaw ctf2 <challenge_id> <practice_id>, or a "
+                f"ctf2:practice:<pid>:<cid> ref)."
             )
 
         raise CTF2Error(f"cannot list challenges for CTF2 corpus kind {corpus.kind!r}")
@@ -412,14 +449,17 @@ class CTF2Adapter:
         payload = await self.client.read_challenge(practice_id, challenge_id)
         data = payload.get("data") if isinstance(payload, Mapping) else None
         data = data if isinstance(data, Mapping) else {}
+        # Field names confirmed against the live platform: `is_solved`, `points`
+        # and `has_container`. (`hasSolved` / `score` are GCS's names -- using
+        # them here silently produced solved=False and an empty score.)
         return Challenge(
             ref=ref,
             name=str(data.get("name") or challenge_id),
             category=str(data.get("category") or ""),
             difficulty=str(data.get("difficulty") or ""),
-            score=str(data.get("score") or ""),
+            score=str(data.get("points") if data.get("points") is not None else ""),
             description=str(data.get("description") or ""),
-            solved=bool(data.get("hasSolved")),
+            solved=bool(data.get("is_solved")),
             needs_env=bool(data.get("has_container")),
             attachments=extract_attachments(data),
             raw=payload if isinstance(payload, Mapping) else {"raw": payload},
@@ -491,9 +531,12 @@ class CTF2Adapter:
 def extract_attachments(data: Mapping[str, Any]) -> tuple[Attachment, ...]:
     """Pull attachments out of a challenge payload.
 
-    Field names are matched defensively (several candidates): the recorded runs
-    cover challenges whose description was typed into the goal text by hand, so
-    the attachment envelope was never captured directly.
+    Field names confirmed against the live platform: a row carries
+    ``download_url`` / ``file_url`` / ``url``, and the bytes' metadata is nested
+    under ``file`` (``original_name``, ``size``, ``mime_type``) -- so a flat
+    ``row["name"]`` / ``row["size"]`` lookup silently yields nothing. No md5 is
+    published, which is why the download path must verify whatever the platform
+    does give rather than assume a hash exists.
     """
     rows = data.get("files") or data.get("attachments") or []
     if not isinstance(rows, list):
@@ -502,31 +545,41 @@ def extract_attachments(data: Mapping[str, Any]) -> tuple[Attachment, ...]:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        inner = row.get("file") if isinstance(row.get("file"), Mapping) else {}
+
         url = ""
-        for key in ("download_url", "url", "downloadUrl", "file_url"):
+        for key in ("download_url", "file_url", "url", "downloadUrl"):
             value = row.get(key)
             if isinstance(value, str) and value:
                 url = value
                 break
+
         name = ""
-        for key in ("name", "filename", "file_name"):
-            value = row.get(key)
+        for key in ("original_name", "name", "filename", "file_name"):
+            value = inner.get(key) if key == "original_name" else row.get(key)
             if isinstance(value, str) and value:
                 name = value
                 break
+        if not name:
+            inner_name = inner.get("original_name")
+            if isinstance(inner_name, str):
+                name = inner_name
+
         md5 = ""
         for key in ("file_md5", "md5", "hash"):
             value = row.get(key)
             if isinstance(value, str) and value:
                 md5 = value
                 break
-        size = row.get("size")
+
+        size = inner.get("size", row.get("size"))
         attachments.append(
             Attachment(
                 name=name or url.rsplit("/", 1)[-1] or "attachment",
                 url=url,
                 md5=md5,
                 size=size if isinstance(size, int) else None,
+                note=str(inner.get("mime_type") or ""),
             )
         )
     return tuple(attachments)
