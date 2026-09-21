@@ -88,19 +88,36 @@ class TestGeneratedScriptIsParseable:
         path.write_text(script, encoding="utf-8", newline="\n")
         try:
             proc = subprocess.run(
-                [*shell, str(path)], capture_output=True, text=True, timeout=30
+                [*shell, str(path)], capture_output=True, timeout=30
             )
         except FileNotFoundError:
             pytest.skip(f"{shell[0]} not available")
 
-        blob = (proc.stdout or "") + (proc.stderr or "")
+        # Decode BOTH ways before deciding anything. On Windows ``bash`` is the
+        # WSL relay (C:\windows\system32\bash.exe) and its "cannot create
+        # instance" error is UTF-16LE: a UTF-8 decode yields NUL-laced garbage, the
+        # markers below never match, and an *unavailable* shell turns into a
+        # spurious "the generated script is broken" failure — the exact false
+        # failure this helper exists to avoid, and one that would hide a real
+        # syntax defect later.
+        raw = (proc.stdout or b"") + (proc.stderr or b"")
+        blob = raw.decode("utf-8", "replace")
+        if "\x00" in blob:
+            blob = raw.decode("utf-16-le", "replace")
+        blob = blob.replace("\x00", "")
+
         unavailable_markers = (
             "execvpe",
             "No such file or directory",
             "WSL",
             "is not recognized",
+            "CreateInstance",
+            "E_ACCESSDENIED",
+            "Bash/Service",
         )
-        if proc.returncode != 0 and any(m in blob for m in unavailable_markers):
+        if proc.returncode != 0 and (
+            not blob.strip() or any(m in blob for m in unavailable_markers)
+        ):
             pytest.skip(f"{shell[0]} could not be executed here: {blob.strip()[:120]}")
 
         assert proc.returncode == 0, (
@@ -149,7 +166,7 @@ class TestCleanupConfirmationReadsStdout:
     def _result():
         return remote.CollectorResult(alias="a", hostname="h")
 
-    async def test_cleanup_success_is_recognised(self, monkeypatch):
+    async def test_cleanup_success_is_recognised(self, monkeypatch, tmp_path):
         """stdout='CLEANED\\n', stderr='' must count as confirmed."""
         monkeypatch.setattr(
             remote, "_collector_script", lambda *a, **k: "#!/bin/sh\ntrue\n"
@@ -175,12 +192,12 @@ class TestCleanupConfirmationReadsStdout:
         host, alias = remote.resolve_host(cfg, "drill")
         out = await remote._do_collect(
             _agent(cfg), cfg, host, alias,
-            {"local_dir": str(_tmpdir())}, 10.0,
+            {"local_dir": str(_tmpdir(tmp_path))}, 10.0,
         )
         assert "may still exist on the target" not in out, out
         assert "left clean" in out or "Target left clean" in out, out
 
-    async def test_cleanup_missing_marker_is_reported(self, monkeypatch):
+    async def test_cleanup_missing_marker_is_reported(self, monkeypatch, tmp_path):
         """Negative case: if CLEANED never appears, we MUST warn."""
         monkeypatch.setattr(remote, "_collector_script", lambda *a, **k: "#!/bin/sh\ntrue\n")
         monkeypatch.setattr(remote, "validate_collector_commands", lambda: [])
@@ -198,7 +215,7 @@ class TestCleanupConfirmationReadsStdout:
         cfg = _cfg()
         host, alias = remote.resolve_host(cfg, "drill")
         out = await remote._do_collect(
-            _agent(cfg), cfg, host, alias, {"local_dir": str(_tmpdir())}, 10.0
+            _agent(cfg), cfg, host, alias, {"local_dir": str(_tmpdir(tmp_path))}, 10.0
         )
         assert "cleanup did not confirm" in out, out
 
@@ -219,7 +236,18 @@ def _make_tar() -> bytes:
     return buf.getvalue()
 
 
-def _tmpdir():
+def _tmpdir(tmp_path: Path | None = None) -> Path:
+    """A fresh local directory for the unpack.
+
+    Prefers pytest's ``tmp_path``: ``tempfile.mkdtemp`` lands under the harness
+    TEMP (redirected to ``.test-tmp`` here), and this sandbox denies creating a
+    *subdirectory* inside such a directory — which failed these tests for a reason
+    that has nothing to do with the cleanup logic they check.
+    """
+    if tmp_path is not None:
+        target = tmp_path / "unpack"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
     import tempfile
 
     return Path(tempfile.mkdtemp(prefix="b3reg-"))
