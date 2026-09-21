@@ -21,6 +21,7 @@ Token sources, in order of precedence:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -32,19 +33,42 @@ SESSION_PREFIX = "/api/v1"
 
 # Shared module-level client so connection pools are reused across calls
 # instead of opening a fresh connection per endpoint (standard httpx practice).
+#
+# ⚠️ It is also bound to the event loop it was created on, so the loop is
+# remembered beside it: reusing the client from a *different* loop raises
+# "Event loop is closed" (and then 30s PoolTimeout on every later call, because
+# the pool's loop is dead). That is not hypothetical -- it took the whole CTF2
+# platform path offline inside the agent loop, where tool calls run on a
+# different loop than an earlier asyncio.run() in the same process. Recreating
+# the client when the running loop changes is what keeps the pool honest.
 _client: httpx.AsyncClient | None = None
+_client_loop: object | None = None
+
+
+def _running_loop() -> object | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Return the module-level shared AsyncClient, creating it lazily.
+    """Return the shared AsyncClient for the CURRENT event loop, creating it lazily.
 
-    httpx.AsyncClient is thread-safe and reuses TCP/TLS connections, so a single
-    instance for all endpoint calls avoids the per-call handshake overhead of the
-    old ``async with httpx.AsyncClient(...)`` pattern.
+    httpx.AsyncClient is thread-safe and reuses TCP/TLS connections, so one
+    instance per event loop avoids the per-call handshake overhead of the old
+    ``async with httpx.AsyncClient(...)`` pattern -- while never handing a caller
+    a client whose loop is gone.
     """
-    global _client
-    if _client is None or _client.is_closed:
+    global _client, _client_loop
+    loop = _running_loop()
+    if (
+        _client is None
+        or _client.is_closed
+        or (_client_loop is not None and loop is not None and _client_loop is not loop)
+    ):
         _client = httpx.AsyncClient(timeout=timeout)
+        _client_loop = loop
     return _client
 
 
