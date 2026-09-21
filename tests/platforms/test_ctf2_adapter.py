@@ -20,6 +20,7 @@ from vulnclaw.platforms import base
 from vulnclaw.platforms.ctf2 import (
     CTF2Adapter,
     CTF2Error,
+    challenge_row_id,
     extract_attachments,
     extract_endpoints,
     extract_rows,
@@ -29,6 +30,8 @@ from vulnclaw.platforms.ctf2 import (
 )
 from vulnclaw.platforms.refs import ChallengeRef, CorpusRef, RefError
 from vulnclaw.platforms.render import render_env_info
+
+import tests.platforms.ctf2_payloads as ctf2_payloads
 
 PRACTICE_REF = ChallengeRef("ctf2", "practice", fx.PRACTICE_ID, fx.CHALLENGE_ID)
 
@@ -499,12 +502,13 @@ class TestAdapterListing:
         assert challenges[0].ref.token() == "ctf2:stage:s1:c9"
 
     async def test_practice_listing_failure_is_honest_not_silent(self):
-        """No CTF2 route lists a practice ground's challenges; do not invent one."""
+        """Verified live: '/practice/<pid>/challenges/' is 404, so do not invent it."""
         client = FakeClient(list_practice={"data": [{"id": "p1", "name": "ground one"}]})
         with pytest.raises(CTF2Error) as excinfo:
             await CTF2Adapter(client).list_challenges(CorpusRef("ctf2", "practice", "p1"))
         message = str(excinfo.value)
-        assert "does not expose" in message
+        assert "exposes no route" in message
+        assert "404" in message
         assert "vulnclaw ctf2" in message
 
     async def test_embedded_practice_challenges_are_used_when_present(self):
@@ -547,3 +551,102 @@ class TestAdapterListing:
         assert adapter.name == "ctf2"
         assert adapter.capabilities == frozenset({base.CAP_SUBMISSIONS})
         assert adapter.enabled_by_default is True
+
+
+# ── field names verified against the live platform ────────────────────────
+#
+# Every assertion here failed (or would have failed) against an inferred field
+# name. They exist so the names cannot silently drift back to guesses.
+
+
+class TestVerifiedFieldNames:
+    def test_list_envelope_is_items_and_total(self):
+        """All four list endpoints use {"data": {"items": [...], "total": n}}."""
+        assert ctf2_payloads.LIST_ENVELOPE_KEYS == ("items", "total")
+        assert extract_rows(ctf2_payloads.DAILY_LIST_PAYLOAD) != []
+        assert extract_rows(ctf2_payloads.COMPETITION_LIST_PAYLOAD) != []
+
+    async def test_read_challenge_reads_is_solved_not_has_solved(self):
+        client = FakeClient(read_challenge=ctf2_payloads.CHALLENGE_DETAIL_PAYLOAD)
+        challenge = await CTF2Adapter(client).read_challenge(PRACTICE_REF)
+        assert challenge.solved is False
+        assert "hasSolved" not in ctf2_payloads.CHALLENGE_DETAIL_KEYS
+        assert "is_solved" in ctf2_payloads.CHALLENGE_DETAIL_KEYS
+
+    async def test_read_challenge_reads_points_not_score(self):
+        client = FakeClient(read_challenge=ctf2_payloads.CHALLENGE_DETAIL_PAYLOAD)
+        challenge = await CTF2Adapter(client).read_challenge(PRACTICE_REF)
+        assert challenge.score == "1"
+        assert "score" not in ctf2_payloads.CHALLENGE_DETAIL_KEYS
+        assert "points" in ctf2_payloads.CHALLENGE_DETAIL_KEYS
+
+    async def test_read_challenge_reads_the_real_name_and_category(self):
+        client = FakeClient(read_challenge=ctf2_payloads.CHALLENGE_DETAIL_PAYLOAD)
+        challenge = await CTF2Adapter(client).read_challenge(PRACTICE_REF)
+        assert challenge.name == "stack"
+        assert challenge.needs_env is True
+
+    def test_attachment_name_and_size_come_from_the_nested_file_object(self):
+        """A flat row['name'] / row['size'] lookup silently yields nothing."""
+        (attachment,) = extract_attachments(ctf2_payloads.CHALLENGE_DETAIL_PAYLOAD["data"])
+        assert attachment.name == "libc-2.27.so"
+        assert attachment.size == 2030544
+        assert attachment.note == "application/octet-stream"
+        assert attachment.url.startswith("https://ctf2-files.dasctf.com/")
+
+    def test_attachment_md5_is_absent_and_must_not_be_invented(self):
+        (attachment,) = extract_attachments(ctf2_payloads.CHALLENGE_DETAIL_PAYLOAD["data"])
+        assert attachment.md5 == ""
+        assert "md5" not in ctf2_payloads.FILE_ROW_KEYS
+
+    def test_daily_row_id_prefers_the_challenge_over_the_wrapper(self):
+        """Daily rows wrap the challenge; row['id'] is the daily ENTRY id."""
+        row = ctf2_payloads.DAILY_LIST_PAYLOAD["data"]["items"][0]
+        assert row["id"] != row["challenge_id"]
+        assert challenge_row_id(row) == row["challenge_id"]
+
+    async def test_daily_listing_addresses_the_challenge_not_the_entry(self):
+        adapter = CTF2Adapter(FakeClient(list_daily=ctf2_payloads.DAILY_LIST_PAYLOAD))
+        (challenge,) = await adapter.list_challenges(CorpusRef("ctf2", "daily"))
+        row = ctf2_payloads.DAILY_LIST_PAYLOAD["data"]["items"][0]
+        assert challenge.ref.token() == f"ctf2:daily:{row['challenge_id']}"
+        assert challenge.name == "vault"
+
+
+class TestVerifiedRouteLimits:
+    async def test_competition_rows_carry_no_stages(self):
+        """Verified: nothing in the competition payload enumerates stage ids."""
+        assert "stages" not in ctf2_payloads.COMPETITION_ROW_KEYS
+        adapter = CTF2Adapter(
+            FakeClient(
+                list_practice={"data": {"items": [], "total": 0}},
+                list_competitions=ctf2_payloads.COMPETITION_LIST_PAYLOAD,
+            )
+        )
+        tokens = [corpus.ref.token() for corpus in await adapter.list_corpora()]
+        assert not any(token.startswith("ctf2:stage") for token in tokens)
+
+    async def test_practice_count_comes_from_challenge_count(self):
+        adapter = CTF2Adapter(
+            FakeClient(
+                list_practice={
+                    "data": {
+                        "items": [
+                            {"id": "p1", "name": "ground", "challenge_count": 3}
+                        ],
+                        "total": 1,
+                    }
+                },
+                list_competitions={"data": {"items": [], "total": 0}},
+            )
+        )
+        corpora = await adapter.list_corpora()
+        corpus = next(c for c in corpora if c.ref.token() == "ctf2:practice:p1")
+        assert corpus.count == 3
+        assert "NOT enumerable" in corpus.note
+
+    def test_target_route_is_not_on_the_open_api(self):
+        """The adapter's session-token requirement for read_env is load-bearing."""
+        assert ctf2_payloads.OPEN_API_ROUTE_OUTCOMES[
+            "/practice/<pid>/challenges/<cid>/target/"
+        ] == 404
