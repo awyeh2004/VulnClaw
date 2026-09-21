@@ -19,6 +19,25 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "verify_execution_boundary.py"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_execution_gate():
+    """Reset the process-wide execution gate around every test in this file.
+
+    Round-5 review N10: ``test_main_agent_passes_guard_into_execution_path``
+    installs an ``AutoApproveChannel`` on the singleton returned by
+    ``get_execution_gate()`` and never removed it, so "approve everything" leaked
+    into every later test in the same process — the very failure mode that test's
+    own docstring describes (a test that only passed because an earlier test had
+    left a pre-armed approval behind). Resetting on both sides makes each test
+    measure the guard rather than the ambient state.
+    """
+    from vulnclaw.agent.exec_gate import reset_execution_gate
+
+    reset_execution_gate()
+    yield
+    reset_execution_gate()
+
+
 def _run_script(*extra: str) -> subprocess.CompletedProcess[str]:
     """Run the verifier and decode its output as UTF-8.
 
@@ -218,3 +237,16 @@ class TestSubagentDangerousToolRefusal:
 
         assert is_subagent(self._make_agent(depth=0)) is False
         assert is_subagent(self._make_agent(depth=2)) is True
+
+
+def test_auto_approve_channel_does_not_leak_into_later_tests():
+    """Guards the autouse fixture above (N10).
+
+    Runs after the channel-installing test in file order; also passes on its own,
+    because a freshly created gate has no channel.
+    """
+    from vulnclaw.agent.exec_gate import get_execution_gate
+
+    assert get_execution_gate().channel is None, (
+        "an AutoApproveChannel from an earlier test is still installed"
+    )
