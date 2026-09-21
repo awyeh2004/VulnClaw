@@ -195,14 +195,13 @@ def normalize_exercise_env(payload: Any, ref: ChallengeRef) -> EnvInfo:
     data = data if isinstance(data, Mapping) else {}
 
     if not data:
+        # No guidance tuple here: the renderer already emits the start->poll
+        # instruction for STATE_NONE, and supplying it here printed a second,
+        # near-identical sentence the model had to reconcile.
         return EnvInfo(
             ref=ref,
             state=base.STATE_NONE,
             complete=False,
-            guidance=(
-                f"Start one with {TOOL_START_ENV}, then poll {TOOL_READ_ENV} until the "
-                f"endpoints appear.",
-            ),
             raw=raw,
         )
 
