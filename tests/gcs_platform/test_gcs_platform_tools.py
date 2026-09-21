@@ -99,10 +99,43 @@ async def test_dispatch_routes_to_registered_handler(monkeypatch):
     assert out == "ROUTED:flag{abc}"
 
 
+def _FreshGuard():
+    """A real, empty ref-keyed guard: the policy uses one guard for all platforms."""
+    from vulnclaw.platforms.submit_guard import SubmitGuard
+
+    return SubmitGuard()
+
+
+@pytest.mark.asyncio
+async def test_gcs_submit_is_blocked_when_the_gate_is_off(monkeypatch):
+    """⭐ The security regression, measured.
+
+    `allow_flag_submission` used to live only on the CTF2 handler, so this path
+    could submit a flag with the gate OFF -- the one irreversible action against
+    the scoring platform, ungated. Now both entry points share one policy.
+    """
+    monkeypatch.setenv("VULNCLAW_GCS_ACCESS_KEY", "ak_test")
+    monkeypatch.setattr("vulnclaw.platforms.tools._flag_submission_enabled", lambda: False)
+    called = {"submit": 0}
+
+    async def fake_submit(exercise_id, flag):
+        called["submit"] += 1
+        return {"code": "00000", "data": {"isCorrect": True}}
+
+    monkeypatch.setattr(gcs_client, "submit_answer", fake_submit)
+    out = await dispatch_gcs_tool(
+        "gcs_submit_flag", {"exercise_id": 1001, "flag": "flag{abc}"}
+    )
+    assert "platform_submit_disabled" in out
+    assert "allow_flag_submission" in out
+    assert called["submit"] == 0, "a blocked submission must not reach the platform"
+
+
 @pytest.mark.asyncio
 async def test_submit_flag_records_accepted(monkeypatch):
-    monkeypatch.setattr(gcs_tools, "_get_submit_guard", _FakeGuard)
     monkeypatch.setenv("VULNCLAW_GCS_ACCESS_KEY", "ak_test")
+    monkeypatch.setattr("vulnclaw.platforms.tools._flag_submission_enabled", lambda: True)
+    monkeypatch.setattr("vulnclaw.platforms.tools.get_guard", _FreshGuard)
     calls = {}
 
     async def fake_submit(exercise_id, flag):
@@ -114,7 +147,7 @@ async def test_submit_flag_records_accepted(monkeypatch):
         "gcs_submit_flag", {"exercise_id": 1001, "flag": "flag{abc}"}
     )
     assert calls["submitted"] == (1001, "flag{abc}")
-    assert _FakeGuard.records[-1][2] is True
+    assert "ACCEPTED" in out
     assert '"isCorrect": true' in out
 
 
@@ -122,20 +155,27 @@ async def test_submit_flag_records_accepted(monkeypatch):
 async def test_submit_flag_escalates_to_confirmation(monkeypatch):
     class DenyGuard:
         @staticmethod
-        def allow(ex, cid, flag):
+        def allow(key, flag):
             return False, "after automatic attempts this challenge requires human confirmation"
 
         @staticmethod
-        def record(ex, cid, accepted, flag):
+        def record(key, accepted, flag):
             pass
 
-    monkeypatch.setattr(gcs_tools, "_get_submit_guard", lambda: DenyGuard())
+        @staticmethod
+        def record_error(key):
+            pass
+
     monkeypatch.setenv("VULNCLAW_GCS_ACCESS_KEY", "ak_test")
+    monkeypatch.setattr("vulnclaw.platforms.tools._flag_submission_enabled", lambda: True)
+    monkeypatch.setattr("vulnclaw.platforms.tools.get_guard", lambda: DenyGuard())
     out = await dispatch_gcs_tool(
         "gcs_submit_flag", {"exercise_id": 1001, "flag": "flag{abc}"}
     )
-    assert "[gcs_confirm]" not in out
-    assert "[ctf2_confirm]" in out
+    # Platform-neutral now: the old text hardcoded [ctf2_confirm] even for GCS.
+    assert "[ctf2_confirm]" not in out
+    assert "[submit_blocked]" in out
+    assert "human confirmation" in out
 
 
 @pytest.mark.asyncio

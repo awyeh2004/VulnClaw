@@ -389,28 +389,27 @@ def _submit_accepted(payload: dict | list | str) -> bool:
 
 
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
-    blocking = await _guard_config()
-    if blocking:
-        return blocking
-    exercise_id = int(args["exercise_id"])
-    flag = args["flag"]
+    """Thin delegate to the shared submit policy.
 
-    guard = _get_submit_guard()
-    allowed, reason = guard.allow(str(exercise_id), str(exercise_id), flag)
-    if not allowed:
-        return _guard_message(exercise_id, reason)
+    This is the security fix, not a tidy-up: the ``allow_flag_submission`` gate
+    lived only on the CTF2 handler, so this path could submit a flag with the gate
+    OFF -- the one irreversible action against the scoring platform, ungated. Its
+    guard was also keyed with the exercise id duplicated into both slots, which is
+    exactly the shape that let CTF2 and GCS counters collide.
 
+    Both now come from :func:`vulnclaw.platforms.tools.submit_flag_via`, so the
+    old tool name behaves identically to ``platform_submit``.
+    """
+    from vulnclaw.platforms.refs import ChallengeRef
+    from vulnclaw.platforms.tools import adapter_for_platform, submit_flag_via
+
+    exercise_id = str(args["exercise_id"])
+    ref = ChallengeRef("gcs", "exercise", "", exercise_id)
     try:
-        payload = await _client.submit_answer(exercise_id, flag)
-    except Exception as exc:
-        # Infrastructure failure (network / platform error): the flag was not
-        # judged, so do not consume an attempt or dedup-block future retries.
-        guard.record_error(str(exercise_id), str(exercise_id))
+        adapter = adapter_for_platform("gcs")
+    except Exception as exc:  # noqa: BLE001
         return f"[gcs_error] submit flag failed: {exc}"
-
-    accepted = _submit_accepted(payload)
-    guard.record(str(exercise_id), str(exercise_id), accepted=accepted, flag=flag)
-    return _format(payload)
+    return await submit_flag_via(adapter, ref, args.get("flag"))
 
 
 def _get_submit_guard():
