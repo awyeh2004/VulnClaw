@@ -529,6 +529,15 @@ def _completion_lock_gate(agent: AgentState, state: AgentState) -> bool:
     return True
 
 
+# Names that mean "a live environment was started". A set, not one string: this
+# reminder is keyed off the tool name, so pointing the model at the
+# platform-neutral `platform_start_env` would silently turn the whole discipline
+# into dead code -- no error, no warning, it simply never fires again.
+_START_ENV_TOOL_NAMES = frozenset(
+    {"ctf2_start_environment", "gcs_build_env", "platform_start_env"}
+)
+
+
 def _pwn_local_first_reminder(agent: AgentState, state: AgentState, origin: str) -> Optional[str]:
     """One-shot correction when the model starts a REMOTE pwn instance while a
     local binary sits unused — the local-first discipline enforced by code.
@@ -540,8 +549,8 @@ def _pwn_local_first_reminder(agent: AgentState, state: AgentState, origin: str)
         return None
     if getattr(state, "pwn_local_reminded", False):
         return None
-    calls = [getattr(tc, "tool", "") for tc in getattr(state, "tool_calls", [])]
-    if "ctf2_start_environment" not in calls:
+    calls = {getattr(tc, "tool", "") for tc in getattr(state, "tool_calls", [])}
+    if not (_START_ENV_TOOL_NAMES & calls):
         return None
     if "pwn_local_replay" in calls:
         return None
