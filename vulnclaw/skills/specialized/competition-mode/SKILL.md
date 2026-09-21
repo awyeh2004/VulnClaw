@@ -1,10 +1,10 @@
 ---
 name: competition-mode
-description: 比赛模式策略 — CTF 竞赛(西湖论剑/DASCTF)下抢分策略：赛前探 LLM 延迟决定单/多 agent、易题优先排序、赛初批量下载附件作保险、fail-fast 停滞弃题换题、按平台 flag 格式提交。适用于限时多人竞赛环境，追求单位时间得分最大化而非单题深度。
+description: 比赛模式策略 — CTF 竞赛(西湖论剑/DASCTF)下抢分策略 + 应急响应实战赛答题制策略。CTF: 赛前探 LLM 延迟决定单/多 agent、易题优先排序、fail-fast 停滞弃题换题、按平台 flag 格式提交。IR赛: 快速分型→按面排查→答案格式化→逐题提交。适用于限时多人竞赛环境，追求单位时间得分最大化。
 requires_target: false
 routing:
-  task_types: [ctf]
-  target_types: [ctf]
+  task_types: [ctf, triage, audit]
+  target_types: [ctf, host, web]
 ---
 
 # 比赛模式 Skill
@@ -63,6 +63,8 @@ routing:
 ## 参考
 
 - `references/competition-strategy.md` — 比赛抢分策略具体操作细节
+- `references/ir-competition-strategy.md` — **应急响应赛答题制策略**（IR 赛必读）
 - `knowledge-quiz` — 知识竞赛/理论题批量作答策略，开局抢分首选
 - `ctf-web` / `ctf-crypto` / `ctf-misc` / `crypto-toolkit` — 具体题型的攻击知识
+- `incident-response` — 应急响应完整方法论 + 出题方教材 14 案例知识库
 - solve playbook（`lookup_playbook`/`save_playbook` 工具）— 同题新靶机复用已解路径，比赛换实例时尤其省时间
