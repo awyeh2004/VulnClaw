@@ -13,7 +13,9 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -993,6 +995,26 @@ def _thinking_repetition_hint(state: AgentState, text: str, threshold: float = 0
     )
 
 
+def _win_kernel32() -> Any:
+    """kernel32 loaded with ``use_last_error=True``.
+
+    ``ctypes.windll.kernel32`` does not capture the thread's last error, so
+    reading it afterwards via ``GetLastError()`` is unreliable — any intervening
+    ctypes call can clobber the value, which made the ACCESS_DENIED check in
+    :func:`_pid_alive` silently collapse into "process is dead". Loading the DLL
+    with ``use_last_error=True`` lets ctypes snapshot the error atomically.
+    """
+    global _WIN_KERNEL32
+    if _WIN_KERNEL32 is None:
+        import ctypes
+
+        _WIN_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    return _WIN_KERNEL32
+
+
+_WIN_KERNEL32: Any = None
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -1002,7 +1024,7 @@ def _pid_alive(pid: int) -> bool:
 
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             ERROR_ACCESS_DENIED = 5
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = _win_kernel32()
             handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
@@ -1012,7 +1034,7 @@ def _pid_alive(pid: int) -> bool:
             # OpenProcess failing without an error code means "no such pid";
             # ACCESS_DENIED means the pid exists but is elevated. Treating the
             # latter as dead would let a run overwrite a live lock.
-            if kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+            if ctypes.get_last_error() == ERROR_ACCESS_DENIED:
                 return True
             return False
         except Exception:
@@ -1043,7 +1065,7 @@ def _process_start_token(pid: int) -> Optional[str]:
             from ctypes import wintypes
 
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = _win_kernel32()
             handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION, False, pid
             )
@@ -1083,25 +1105,123 @@ def _process_start_token(pid: int) -> Optional[str]:
 
 
 def _read_solve_lock(path: Path) -> Optional[dict[str, Any]]:
-    """Read a lock file, tolerating the create→write window of a racer.
+    """Read the lock file. None when absent, unreadable or malformed."""
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return info if isinstance(info, dict) else None
 
-    The creator holds the file for a few microseconds between O_EXCL creation
-    and the payload write; a reader landing in that window would see an empty
-    file and could mistake a brand-new lock for a stale one. Retrying briefly
-    closes that window in practice.
+
+def _new_lock_payload(target: str) -> dict[str, Any]:
+    return {
+        "pid": os.getpid(),
+        "start": _process_start_token(os.getpid()) or "",
+        "target": target,
+        "started": time.strftime("%H:%M:%S"),
+    }
+
+
+def _write_solve_lock(path: Path, payload: dict[str, Any]) -> None:
+    """Replace the lock file atomically (write a temp sibling, then rename).
+
+    Because the rename is atomic a reader can never observe a half-written lock,
+    which is what previously made a freshly created lock look "corrupt" and
+    eligible for deletion by a concurrent instance.
     """
-    for attempt in range(3):
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".solve-lock-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, str(path))
+    except BaseException:
         try:
-            info = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+class _GuardUnavailable(RuntimeError):
+    """The lock mutex could not be taken within its timeout."""
+
+
+def _take_os_lock(fd: int, timeout_s: float) -> None:
+    """Exclusive advisory lock on one byte of ``fd``, with a timeout."""
+    deadline = time.monotonic() + max(0.1, timeout_s)
+    while True:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() > deadline:
+                raise TimeoutError("guard busy") from None
+            time.sleep(0.02)
+
+
+def _drop_os_lock(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _lock_guard(path: Path, timeout_s: float = 10.0):
+    """Serialize the read/steal/write sequence across processes.
+
+    The previous implementation *decided* a lock was stale and then unlinked it —
+    a check-then-act that two instances could interleave, each deleting the
+    other's freshly created lock and both concluding they owned the target, which
+    broke the single-instance invariant this lock exists to provide. Holding an OS
+    advisory lock on a sibling file for the whole sequence makes it atomic.
+
+    The guard lives in its own file and is never deleted, so its identity is
+    never in question; the OS releases it if the holder dies.
+    """
+    guard = path.with_name(path.name + ".guard")
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        # Windows byte-range locks need a byte to lock.
+        try:
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+        except OSError:
+            pass
+        _take_os_lock(fd, timeout_s)
+    except Exception as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise _GuardUnavailable(f"could not lock {guard}: {exc}") from exc
+    try:
+        yield
+    finally:
+        try:
+            _drop_os_lock(fd)
         except Exception:
-            if attempt < 2:
-                time.sleep(0.05)
-                continue
-            return None
-        return info if isinstance(info, dict) else None
-    return None
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _lock_is_stale(info: dict[str, Any]) -> bool:
@@ -1131,68 +1251,81 @@ def _solve_lock_path(target: str) -> Path:
 
 def _acquire_solve_lock(target: str) -> Optional[dict[str, Any]]:
     """Return the ACTIVE holder's info if another solve owns this target, else
-    acquire the lock and return None. Stale locks (dead or recycled pid) are
-    replaced.
+    acquire the lock and return None.
 
-    The lock file is created with O_EXCL so two processes that race past the
-    staleness check cannot both acquire it; the loser re-reads and reports the
-    winner instead.
+    Staleness (dead pid, or a live pid whose creation time differs from the
+    recorded one) is judged *inside* :func:`_lock_guard`, so the decide-and-take
+    sequence is atomic and two instances cannot both take the lock.
     """
     path = _solve_lock_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    for _ in range(3):
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+    try:
+        with _lock_guard(path):
             info = _read_solve_lock(path)
             if info is not None and int(info.get("pid", 0) or 0) != os.getpid():
                 if not _lock_is_stale(info):
                     holder = dict(info)
                     holder["lock_path"] = str(path)
                     return holder
-            # Stale, corrupt, or ours: drop it and retry the atomic create.
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            continue
-        except OSError:
-            # Cannot even create the lock file (unwritable config dir). Surface
-            # it rather than silently running a second concurrent solve on the
-            # same target — the previous write_text() raised here too.
-            raise
-        try:
-            payload = json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "start": _process_start_token(os.getpid()) or "",
-                    "target": target,
-                    "started": time.strftime("%H:%M:%S"),
-                }
-            )
-            os.write(fd, payload.encode("utf-8"))
-        finally:
-            os.close(fd)
-        return None
+                # Provably stale (dead or recycled pid): safe to replace.
+            _write_solve_lock(path, _new_lock_payload(target))
+            return None
+    except _GuardUnavailable:
+        pass
 
-    # Three consecutive races: another process keeps recreating this lock. We
-    # could not prove it is stale, so report it as held instead of starting a
-    # concurrent run (the safe direction — the caller just retries later).
+    # Could not serialize. Never steal without the guard: an O_EXCL create is
+    # still atomic, and if the file exists we report it as held (the safe
+    # direction — the caller retries later rather than double-running).
     info = _read_solve_lock(path)
-    if info is None:
-        info = {"pid": 0, "target": target, "started": "unknown (lock contended)"}
-    holder = dict(info)
-    holder["lock_path"] = str(path)
-    return holder
+    if info is not None:
+        if int(info.get("pid", 0) or 0) == os.getpid():
+            _write_solve_lock(path, _new_lock_payload(target))
+            return None
+        holder = dict(info)
+        holder["lock_path"] = str(path)
+        return holder
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        info = _read_solve_lock(path) or {
+            "pid": 0,
+            "target": target,
+            "started": "unknown (lock contended)",
+        }
+        holder = dict(info)
+        holder["lock_path"] = str(path)
+        return holder
+    # An unwritable config dir surfaces here rather than silently running two
+    # concurrent solves on one target (the old write_text raised the same way).
+    try:
+        os.write(fd, json.dumps(_new_lock_payload(target)).encode("utf-8"))
+    finally:
+        os.close(fd)
+    return None
 
 
 def _release_solve_lock(target: str) -> None:
     path = _solve_lock_path(target)
-    try:
-        info = _read_solve_lock(path)
+
+    def _remove_if_ours(info: Optional[dict[str, Any]]) -> None:
         if info is None or int(info.get("pid", 0) or 0) == os.getpid():
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    try:
+        with _lock_guard(path):
+            _remove_if_ours(_read_solve_lock(path))
+    except _GuardUnavailable:
+        # Without the guard, only ever remove a lock that is provably ours.
+        info = _read_solve_lock(path)
+        if info is not None and int(info.get("pid", 0) or 0) == os.getpid():
+            try:
+                path.unlink()
+            except OSError:
+                pass
     except Exception:
         pass
 
