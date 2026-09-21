@@ -107,3 +107,49 @@ def test_real_skill_traversal_is_blocked():
     """Regression against a shipped skill: the escape must fail end-to-end."""
     assert loader.load_skill_reference("client-reverse", "../../../pyproject.toml") is None
     assert loader.load_skill_reference("client-reverse", "..\\..\\..\\pyproject.toml") is None
+
+
+# ── skill_name is a path component, not a path ──────────────────────────
+# These deliberately do NOT monkeypatch the loading chain: the containment check
+# in resolve_skill_reference only means something if the anchor it compares
+# against is a real skill directory.
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../client-reverse",
+        "../../specialized/client-reverse",
+        "..\\client-reverse",
+        "/etc",
+        "C:/Windows",
+        "client-reverse/../client-reverse",
+        ".",
+        "..",
+        "",
+        "nul\x00name",
+        "client-reverse\x00",
+    ],
+)
+def test_traversal_style_skill_names_are_rejected(name):
+    assert loader.is_valid_skill_name(name) is False
+    assert loader.load_skill_by_name(name) is None
+    assert loader.load_skill_reference(name, "top.md") is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["client-reverse", "incident-response", "ctf-web", "osint-recon", "recon", "waf-bypass"],
+)
+def test_real_skill_names_still_load(name):
+    """The validator must not reject anything the repo actually ships."""
+    assert loader.is_valid_skill_name(name) is True
+    assert loader.load_skill_by_name(name) is not None
+
+
+def test_escape_via_sibling_skill_directory_is_rejected():
+    """A name that resolves to a real directory must still be refused."""
+    assert loader.load_skill_by_name("../specialized/client-reverse") is None
+    # Sanity: the directory it would have reached really does exist.
+    sibling = loader._SPECIALIZED_SKILLS_DIR / "client-reverse"
+    assert (sibling / "SKILL.md").is_file()

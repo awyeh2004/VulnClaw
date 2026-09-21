@@ -7,6 +7,7 @@ Supports two Skill formats:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,6 +17,22 @@ from vulnclaw.config.settings import SKILLS_DIR
 
 _CORE_SKILLS_DIR = Path(__file__).parent / "core"
 _SPECIALIZED_SKILLS_DIR = Path(__file__).parent / "specialized"
+
+# A skill name is a single directory entry, never a path. ``skill_name`` reaches
+# this module straight from the model (the ``load_skill_reference`` tool), and
+# ``skills/<name>/SKILL.md`` with an unvalidated name is a path-traversal
+# primitive: ``skill_name="../../../tmp/evil"`` would anchor the references
+# directory to any directory on disk that happens to contain SKILL.md +
+# references/, which would also defeat the containment check in
+# :func:`resolve_skill_reference` (it would be checking against an
+# attacker-chosen root).
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_valid_skill_name(name: str) -> bool:
+    """True when ``name`` is a plausible single-component skill name."""
+    value = str(name or "").strip()
+    return bool(value) and _SKILL_NAME_RE.match(value) is not None
 
 
 def _is_directory_skill(path: Path) -> bool:
@@ -38,6 +55,8 @@ def load_core_skill(name: str) -> Optional[dict[str, Any]]:
         Dict with keys: name, description, content, path, references
         Or None if not found.
     """
+    if not is_valid_skill_name(name):
+        return None
     # Try directory format first
     skill_dir = _CORE_SKILLS_DIR / name
     if _is_directory_skill(skill_dir):
@@ -53,6 +72,8 @@ def load_core_skill(name: str) -> Optional[dict[str, Any]]:
 
 def load_specialized_skill(name: str) -> Optional[dict[str, Any]]:
     """Load a specialized skill by name."""
+    if not is_valid_skill_name(name):
+        return None
     # Try directory format first
     skill_dir = _SPECIALIZED_SKILLS_DIR / name
     if _is_directory_skill(skill_dir):
@@ -68,6 +89,8 @@ def load_specialized_skill(name: str) -> Optional[dict[str, Any]]:
 
 def load_custom_skill(name: str) -> Optional[dict[str, Any]]:
     """Load a user custom skill by name."""
+    if not is_valid_skill_name(name):
+        return None
     # Try directory format first
     skill_dir = SKILLS_DIR / name
     if _is_directory_skill(skill_dir):
