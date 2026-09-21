@@ -312,33 +312,6 @@ async def _guard_config() -> str | None:
     return None
 
 
-def _guard() -> "SubmitGuard":
-    from vulnclaw.ctf_platform.submit_guard import get_guard
-
-    return get_guard()
-
-
-def _guard_message(practice_id: str, challenge_id: str, reason: str) -> str:
-    from vulnclaw.ctf_platform.submit_guard import guard_reason_to_message
-
-    return guard_reason_to_message(practice_id, challenge_id, reason)
-
-
-def _submit_accepted(payload: dict | list | str) -> bool:
-    """Best-effort check whether a submit payload reports an accepted flag."""
-    try:
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if isinstance(data, dict) and "accepted" in data:
-            return bool(data["accepted"])
-        if isinstance(payload, dict) and "accepted" in payload:
-            return bool(payload["accepted"])
-        if isinstance(payload, dict) and "success" in payload:
-            return bool(payload["success"])
-    except (AttributeError, TypeError):
-        pass
-    return False
-
-
 async def _named(practice_id: str, challenge_id: str) -> tuple[str, str]:
     return practice_id, challenge_id
 
@@ -522,23 +495,6 @@ def _flag_submission_enabled() -> bool:
         return bool(getattr(load_config().competition, "allow_flag_submission", False))
     except Exception:
         return False
-
-
-async def _guard_submit_enabled() -> str | None:
-    """Block ctf2_submit_flag unless flag submission is explicitly enabled."""
-    if _flag_submission_enabled():
-        return None
-    return (
-        "[ctf2_flag_submission_disabled] Flag submission is OFF by default.\n"
-        "Submitting a flag is irreversible and the competition handbook treats an "
-        "invalid operation (including a wrong guess) as grounds for disqualification, "
-        "so this tool must be enabled deliberately.\n"
-        "Enable it with either:\n"
-        "  - config.yaml:  competition:\\n                    allow_flag_submission: true\\n"
-        "  - env:          VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION=true\n"
-        "Everything else still works without it: list challenges, start the "
-        "environment, read the challenge, and analyse the target."
-    )
 
 
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
