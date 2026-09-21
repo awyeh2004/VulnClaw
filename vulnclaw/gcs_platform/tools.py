@@ -373,21 +373,6 @@ async def _handle_recover_env(args: dict[str, Any]) -> str:
     return _format(payload)
 
 
-def _submit_accepted(payload: dict | list | str) -> bool:
-    """Best-effort check whether a submit payload reports a correct flag."""
-    try:
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if isinstance(data, dict) and "isCorrect" in data:
-            return bool(data["isCorrect"])
-        if isinstance(payload, dict) and "isCorrect" in payload:
-            return bool(payload["isCorrect"])
-        if isinstance(payload, dict) and "success" in payload:
-            return bool(payload["success"])
-    except (AttributeError, TypeError):
-        pass
-    return False
-
-
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
     """Thin delegate to the shared submit policy.
 
@@ -410,18 +395,6 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"[gcs_error] submit flag failed: {exc}"
     return await submit_flag_via(adapter, ref, args.get("flag"))
-
-
-def _get_submit_guard():
-    from vulnclaw.ctf_platform.submit_guard import get_guard
-
-    return get_guard()
-
-
-def _guard_message(exercise_id: int, reason: str) -> str:
-    from vulnclaw.ctf_platform.submit_guard import guard_reason_to_message
-
-    return guard_reason_to_message(str(exercise_id), str(exercise_id), reason)
 
 
 def _build_handlers() -> dict[str, Callable[[dict[str, Any]], Awaitable[str]]]:

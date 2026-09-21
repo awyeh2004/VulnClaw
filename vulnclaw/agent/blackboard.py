@@ -501,26 +501,108 @@ class Blackboard:
         return node
 
 
+_MIN_SEGMENT_CHARS = 24
+
+# High-signal literals that only a witness could reproduce: a flag-shaped value, a
+# long hex run, or a UUID. If the fact and the evidence share one, the fact's
+# observation was genuinely seen -- and a fabricated claim cannot contain one.
+_FINGERPRINT_PATTERNS = (
+    r"[A-Za-z0-9_]{2,32}\{[^}\s]{8,}\}",
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    r"\b[0-9a-fA-F]{16,}\b",
+)
+
+
+def _fingerprints(text: str) -> set[str]:
+    import re as _re
+
+    found: set[str] = set()
+    for pattern in _FINGERPRINT_PATTERNS:
+        found |= {m.group(0).lower() for m in _re.finditer(pattern, str(text or ""))}
+    return found
+
+
+def _unescape_evidence(chunk: str) -> str:
+    """Undo escape sequences so a quoted observation can match verbatim.
+
+    Measured: tool results are frequently stored as a JSON-escaped string, so a
+    fact that quoted the response body verbatim still failed to match -- ``\\n``
+    and ``\\"`` sat between the two strings. That made verification fail for a
+    reason that had nothing to do with whether the fact was witnessed.
+    """
+    text = str(chunk or "")
+    if "\\" not in text:
+        return text
+    import re as _re
+
+    # \uXXXX first: a JSON producer with ensure_ascii=True escapes non-ASCII this
+    # way, and leaving it encoded would keep the same false negative for CJK text.
+    text = _re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    return (
+        text.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _fact_segments(fact_text: str) -> list[str]:
+    """Substantive clauses of a fact description.
+
+    A fact is normally written as narration plus a quoted observation
+    ("Submitting the form returned body \"...\" -- flag CTF2{...}"). The narration
+    is the agent's own words and is *by construction* absent from the evidence, so
+    requiring the whole sentence to be witnessed rejected facts that plainly were.
+    Matching a long enough clause instead keeps the guard's purpose -- a fabricated
+    claim shares no substantive clause with the evidence -- without demanding that
+    the agent's prose appear in the tool output.
+    """
+    import re as _re
+
+    parts = _re.split(r"[\n\r|;—–]", str(fact_text or ""))
+    return [p.strip() for p in parts if len(p.strip()) >= _MIN_SEGMENT_CHARS]
+
+
 def _witnessed_in_evidence(fact_text: str, chunk: str) -> bool:
     """True if the fact text is backed by real tool output (ported from Muteki's
     ``_fact_witnessed_in_chunk``): either a normalized substring match, or a
-    dominant overlap of the fact's salient tokens within the output."""
+    dominant overlap of the fact's salient tokens within the output.
+
+    Checked against the whole description first (unchanged behaviour), then against
+    each substantive clause of it, against both the raw and the unescaped evidence.
+    """
     import re as _re
 
-    norm_fact = _norm_text(fact_text)
-    norm_chunk = _norm_text(chunk)
-    if not norm_fact or not norm_chunk:
+    evidence = _unescape_evidence(chunk)
+    if not evidence:
         return False
-    if norm_fact in norm_chunk:
-        return True
     stop = {"http", "https", "true", "false", "from", "with", "this", "that", "the"}
-    tokens = {
-        t for t in _re.findall(r"[a-z0-9_]{4,}", fact_text.lower()) if t not in stop
-    }
-    if not tokens:
-        return False
-    hit = sum(1 for t in tokens if t in chunk.lower())
-    return hit / len(tokens) >= 0.8
+    lowered = evidence.lower()
+
+    # Strongest signal first: a shared flag-shaped literal / long hex run / UUID.
+    # This is what actually has to be witnessed, and it is the case the whole-string
+    # and clause tests both missed -- measured, a fact quoting the flag mid-sentence
+    # was rejected even though the evidence contained that exact flag.
+    if _fingerprints(fact_text) & _fingerprints(evidence):
+        return True
+
+    for candidate in [fact_text, *_fact_segments(fact_text)]:
+        norm_fact = _norm_text(candidate)
+        norm_chunk = _norm_text(evidence)
+        if not norm_fact or not norm_chunk:
+            continue
+        if norm_fact in norm_chunk:
+            return True
+        tokens = {
+            t for t in _re.findall(r"[a-z0-9_]{4,}", str(candidate).lower()) if t not in stop
+        }
+        if not tokens:
+            continue
+        hit = sum(1 for t in tokens if t in lowered)
+        if hit / len(tokens) >= 0.8:
+            return True
+    return False
 
 
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
