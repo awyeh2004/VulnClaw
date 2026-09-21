@@ -140,14 +140,12 @@ def normalize_target_payload(payload: Any, ref: ChallengeRef) -> EnvInfo:
     data = payload.get("data") if isinstance(payload, Mapping) else None
 
     if not isinstance(data, Mapping):
+        # No guidance tuple here: the renderer already emits the start->poll
+        # instruction for STATE_NONE, and supplying it here printed it twice.
         return EnvInfo(
             ref=ref,
             state=base.STATE_NONE,
             complete=False,
-            guidance=(
-                f"Start one with {TOOL_START_ENV}, then poll {TOOL_READ_ENV} until "
-                f"status={base.STATE_RUNNING} before touching the service.",
-            ),
             raw=raw,
         )
 
