@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -125,3 +126,70 @@ def test_process_start_token_is_stable_for_self():
     second = solver._process_start_token(os.getpid())
     assert first == second
     assert solver._process_start_token(0) is None
+
+
+# ── the actual invariant: two instances cannot both hold one target ──────
+#
+# The previous implementation decided a lock was stale and then unlinked it, a
+# check-then-act two instances could interleave (each deleting the other's
+# freshly created lock). This runs the real thing across real processes, because
+# threads share a pid and would be re-acquirable by design.
+
+_RACE_WORKER = r"""
+import json, os, sys, time
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from vulnclaw.agent import solver
+
+lock_dir = Path(sys.argv[2])
+barrier = Path(sys.argv[3])
+solver._solve_lock_path = lambda target: lock_dir / "race.lock"
+
+deadline = time.monotonic() + 30
+while not barrier.exists():
+    if time.monotonic() > deadline:
+        (lock_dir / f"result-{os.getpid()}.txt").write_text("timeout")
+        raise SystemExit(3)
+    time.sleep(0.005)
+
+holder = solver._acquire_solve_lock("race-target")
+if holder is None:
+    # Hold long enough that every other racer must have observed us.
+    time.sleep(2.0)
+    (lock_dir / f"result-{os.getpid()}.txt").write_text("acquired")
+    solver._release_solve_lock("race-target")
+else:
+    (lock_dir / f"result-{os.getpid()}.txt").write_text("blocked")
+"""
+
+
+def test_concurrent_instances_cannot_both_acquire(tmp_path):
+    import subprocess
+    import sys
+
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    barrier = tmp_path / "go"
+    root = Path(__file__).resolve().parents[2]
+    racers = 6
+
+    procs = [
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell, no pipes
+            [sys.executable, "-c", _RACE_WORKER, str(root), str(lock_dir), str(barrier)],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(racers)
+    ]
+    barrier.write_text("go", encoding="utf-8")
+    for proc in procs:
+        proc.wait(timeout=90)
+
+    results = [p.read_text(encoding="utf-8") for p in lock_dir.glob("result-*.txt")]
+    assert len(results) == racers, f"only {len(results)}/{racers} racers reported: {results}"
+    assert results.count("acquired") == 1, (
+        f"single-instance invariant broken: {results.count('acquired')} holders "
+        f"({results})"
+    )
+    assert results.count("blocked") == racers - 1
