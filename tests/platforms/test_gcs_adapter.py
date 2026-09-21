@@ -86,9 +86,17 @@ REF = ChallengeRef("gcs", "exercise", "", "10662")
 
 
 class TestReadinessMapping:
+    """Fixtures pass the BODY: what ``gcs_platform.client`` actually returns.
+
+    ``client._request`` unwraps the ``{code, message, data}`` envelope itself, so
+    an adapter sees ``data``. These tests used to wrap every fixture in
+    ``{"data": ...}`` — the envelope shape the real client never returns — which
+    is exactly why the adapter's own double-unwrap went unnoticed.
+    """
+
     def test_still_initializing(self):
         info = normalize_exercise_env(
-            {"data": {"name": "x", "isNeedCheck": True, "exposeIps": ["h:1"]}}, REF
+            {"name": "x", "isNeedCheck": True, "exposeIps": ["h:1"]}, REF
         )
         assert info.state == base.STATE_STARTING
         assert info.complete is False
@@ -96,30 +104,44 @@ class TestReadinessMapping:
 
     def test_ready_with_endpoints(self):
         info = normalize_exercise_env(
-            {"data": {"name": "x", "isNeedCheck": False, "exposeIps": ["h:1337"]}}, REF
+            {"name": "x", "isNeedCheck": False, "exposeIps": ["h:1337"]}, REF
         )
         assert info.state == base.STATE_RUNNING
         assert info.complete is True
         assert info.transports() == frozenset({base.TRANSPORT_UNKNOWN})
 
     def test_check_finished_but_no_endpoint_is_not_usable(self):
-        info = normalize_exercise_env({"data": {"name": "x", "isNeedCheck": False}}, REF)
+        info = normalize_exercise_env({"name": "x", "isNeedCheck": False}, REF)
         assert info.complete is False
 
     def test_challenge_needs_no_environment(self):
-        info = normalize_exercise_env({"data": {"name": "x", "isNeedInit": False}}, REF)
+        info = normalize_exercise_env({"name": "x", "isNeedInit": False}, REF)
         assert info.state == base.STATE_NOT_REQUIRED
         assert info.complete is True
 
     def test_empty_payload_means_no_target(self):
-        info = normalize_exercise_env({"data": None}, REF)
+        info = normalize_exercise_env({}, REF)
         assert info.state == base.STATE_NONE
         assert info.complete is False
+
+    def test_envelope_shaped_payload_is_not_dug_into(self):
+        """A body that happens to carry a ``data`` member is not replaced by it.
+
+        Tolerance would reintroduce the same silent-wrong-shape failure as the
+        double-unwrap, so the accessor is deliberately strict; such a payload
+        degrades to "no target", which is loud and fail-safe.
+        """
+        info = normalize_exercise_env(
+            {"name": "x", "isNeedCheck": False, "exposeIps": ["h:1"],
+             "data": {"isNeedCheck": True}},
+            REF,
+        )
+        assert info.state == base.STATE_RUNNING  # the outer body wins
 
     def test_transport_is_never_assumed_to_be_tcp(self):
         """GCS publishes no TLS flag; guessing tcp is the CTF2 20-minute mistake."""
         info = normalize_exercise_env(
-            {"data": {"isNeedCheck": False, "exposeIps": ["h:1"]}}, REF
+            {"isNeedCheck": False, "exposeIps": ["h:1"]}, REF
         )
         assert base.TRANSPORT_TCP not in info.transports()
         text = _head(render_env_info(info))
@@ -128,12 +150,12 @@ class TestReadinessMapping:
 
     def test_running_guidance_warns_that_transport_is_unknown(self):
         info = normalize_exercise_env(
-            {"data": {"isNeedCheck": False, "exposeIps": ["h:1"]}}, REF
+            {"isNeedCheck": False, "exposeIps": ["h:1"]}, REF
         )
         assert any("transport is unknown" in line for line in info.guidance)
 
     def test_not_required_guidance_explains_the_challenge(self):
-        info = normalize_exercise_env({"data": {"isNeedInit": False}}, REF)
+        info = normalize_exercise_env({"isNeedInit": False}, REF)
         assert any("needs no" in line for line in info.guidance)
 
 
@@ -176,29 +198,37 @@ class TestEndpointExtraction:
 
 class TestExerciseTree:
     def test_category_tree_is_flattened(self):
-        payload = {
-            "data": [
-                {"id": 1, "name": "Web", "corpus": [{"id": 11, "name": "w1"}]},
-                {"id": 2, "name": "Pwn", "corpus": [{"id": 21, "name": "p1"}, {"id": 22}]},
-            ]
-        }
+        payload = [
+            {"id": 1, "name": "Web", "corpus": [{"id": 11, "name": "w1"}]},
+            {"id": 2, "name": "Pwn", "corpus": [{"id": 21, "name": "p1"}, {"id": 22}]},
+        ]
         tree = exercise_tree(payload)
         assert [name for name, _ in tree] == ["Web", "Pwn"]
         assert len(tree[1][1]) == 2
 
-    @pytest.mark.parametrize("payload", [{"data": None}, {}, {"data": "x"}, {"data": {"a": 1}}])
+    def test_mapping_body_nesting_the_rows_under_list(self):
+        """Some list endpoints put the rows under ``list``/``items`` in the body."""
+        tree = exercise_tree({"list": [{"id": 1, "name": "Web", "corpus": []}]})
+        assert [name for name, _ in tree] == ["Web"]
+
+    @pytest.mark.parametrize("payload", [None, {}, "x", {"a": 1}, []])
     def test_degenerate_payloads(self, payload):
         assert exercise_tree(payload) == []
 
     def test_non_mapping_categories_are_skipped(self):
-        assert exercise_tree({"data": ["junk", {"name": "Web", "corpus": []}]})[0][0] == "Web"
+        assert exercise_tree(["junk", {"name": "Web", "corpus": []}])[0][0] == "Web"
 
 
 # ── adapter behaviour with a fake client ──────────────────────────────────
 
 
 class FakeClient:
-    """Shaped like gcs_platform.client: single surface, envelope already unwrapped."""
+    """Shaped like gcs_platform.client: one surface, envelope already unwrapped.
+
+    Keep every fixture in ``payloads`` in the *unwrapped* shape — that is what
+    ``client._request`` returns. Wrapping fixtures in ``{"data": ...}`` is how the
+    adapter's double-unwrap survived this suite.
+    """
 
     def __init__(self, *, configured: bool = True, **payloads):
         self._configured = configured
@@ -210,7 +240,7 @@ class FakeClient:
 
     async def _get(self, name, *args):
         self.calls.append((name, args))
-        return self.payloads.get(name, {"data": {}})
+        return self.payloads.get(name, {})
 
     async def exercise_list(self):
         return await self._get("exercise_list")
@@ -226,7 +256,7 @@ class FakeClient:
 
     async def submit_answer(self, exercise_id, flag):
         self.calls.append(("submit_answer", (exercise_id, flag)))
-        return self.payloads.get("submit_answer", {"data": {"isCorrect": True}})
+        return self.payloads.get("submit_answer", {"isCorrect": True})
 
     async def match_info(self):
         return await self._get("match_info")
@@ -241,12 +271,10 @@ class FakeClient:
         return await self._get("overview")
 
 
-TREE = {
-    "data": [
-        {"name": "Web", "corpus": [{"id": 11, "name": "w1", "hasSolved": True}]},
-        {"name": "Pwn", "corpus": [{"id": 21, "name": "p1", "isNeedInit": True}]},
-    ]
-}
+TREE = [
+    {"name": "Web", "corpus": [{"id": 11, "name": "w1", "hasSolved": True}]},
+    {"name": "Pwn", "corpus": [{"id": 21, "name": "p1", "isNeedInit": True}]},
+]
 
 
 class TestAdapterBehaviour:
@@ -274,7 +302,7 @@ class TestAdapterBehaviour:
 
     async def test_read_challenge_uses_the_numeric_exercise_id(self):
         client = FakeClient(
-            exercise={"data": {"name": "p1", "difficulty": "Easy", "isNeedInit": True}}
+            exercise={"name": "p1", "difficulty": "Easy", "isNeedInit": True}
         )
         challenge = await GCSAdapter(client).read_challenge(REF)
         assert challenge.name == "p1"
@@ -283,7 +311,7 @@ class TestAdapterBehaviour:
 
     async def test_start_env_polls_rather_than_trusting_the_ack(self):
         """build-exercise-env is async: an acknowledgement is not the target."""
-        client = FakeClient(build_environment={"data": {"name": "p1"}})
+        client = FakeClient(build_environment={"name": "p1"})
         info = await GCSAdapter(client).start_env(REF)
         assert info.state == base.STATE_STARTING
         assert info.complete is False
@@ -291,14 +319,14 @@ class TestAdapterBehaviour:
 
     async def test_start_env_passes_through_a_ready_payload(self):
         client = FakeClient(
-            build_environment={"data": {"isNeedCheck": False, "exposeIps": ["h:1"]}}
+            build_environment={"isNeedCheck": False, "exposeIps": ["h:1"]}
         )
         assert (await GCSAdapter(client).start_env(REF)).usable is True
 
     async def test_read_env_hits_the_same_upstream_as_read_challenge(self):
         """GCS has no separate target resource; both read the exercise detail."""
         client = FakeClient(
-            exercise={"data": {"isNeedCheck": False, "exposeIps": ["h:1"]}}
+            exercise={"isNeedCheck": False, "exposeIps": ["h:1"]}
         )
         adapter = GCSAdapter(client)
         await adapter.read_env(REF)
@@ -311,7 +339,7 @@ class TestAdapterBehaviour:
         assert client.calls == [("recover_environment", (10662,))]
 
     async def test_submit_reads_is_correct(self):
-        client = FakeClient(submit_answer={"data": {"isCorrect": False}})
+        client = FakeClient(submit_answer={"isCorrect": False})
         result = await GCSAdapter(client).submit_flag(REF, "flag{x}")
         assert result.judged is True
         assert result.accepted is False
@@ -323,18 +351,18 @@ class TestAdapterBehaviour:
 
 class TestFacets:
     async def test_event_info_joins_note_and_rule(self):
-        client = FakeClient(match_info={"data": {"note": "N", "rule": "R"}})
+        client = FakeClient(match_info={"note": "N", "rule": "R"})
         assert await GCSAdapter(client).event_info() == "N\nR"
 
     async def test_event_info_falls_back_to_the_raw_payload(self):
-        client = FakeClient(match_info={"data": {}, "success": True})
+        client = FakeClient(match_info={"success": True})
         text = await GCSAdapter(client).event_info()
         assert isinstance(text, str) and text
 
     async def test_notices_lists_or_reads_one(self):
         client = FakeClient(
-            notice_list={"data": [{"id": 1, "title": "t"}]},
-            notice_detail={"data": {"id": 2, "title": "d"}},
+            notice_list=[{"id": 1, "title": "t"}],
+            notice_detail={"id": 2, "title": "d"},
         )
         adapter = GCSAdapter(client)
         assert await adapter.notices() == [{"id": 1, "title": "t"}]
@@ -346,7 +374,7 @@ class TestFacets:
             await GCSAdapter(FakeClient()).notices("abc")
 
     async def test_overview(self):
-        client = FakeClient(overview={"data": {"stageRank": "3"}})
+        client = FakeClient(overview={"stageRank": "3"})
         assert await GCSAdapter(client).overview() == {"stageRank": "3"}
 
     def test_notice_from_row(self):
