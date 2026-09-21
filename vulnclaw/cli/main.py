@@ -1901,18 +1901,28 @@ def ctf2(
     difficulty = chall_data.get("difficulty") or ""
     description = str(chall_data.get("description") or "").strip()
     requires_env = bool(chall_data.get("has_container"))
+    # The platform-neutral ref for this challenge. Code constructs it; the model
+    # only ever echoes it back, which is what makes picking the wrong platform
+    # inexpressible.
+    ref_token = f"ctf2:practice:{practice_id}:{challenge_id}"
     goal = (
         f"Solve CTF2 challenge '{name}' (category {category}, difficulty "
-        f"{difficulty}) on practice {practice_id}. Achieve the flag and submit it "
-        f"with ctf2_submit_flag (practice_id {practice_id}, challenge_id "
-        f"{challenge_id}). "
-        f"challenge_id is {challenge_id}. Challenge description follows:\n{description}\n"
-        f"CTF2 open API cannot download attachments; do not attempt to fetch files "
-        f"or attack ctf2*.dasctf.com hosts. "
+        f"{difficulty}) on practice {practice_id}.\n"
+        f"Its ref is {ref_token} -- pass that exact string as `ref` when calling "
+        f"the platform_* tools; the platform is taken from the ref, so there is no "
+        f"separate platform id to choose.\n"
+        f"Achieve the flag, then submit it with platform_submit(ref=\"{ref_token}\", "
+        f"flag=...). Challenge description follows:\n{description}\n"
+        f"Do not attempt to fetch files from or attack ctf2*.dasctf.com hosts. "
         f"Solve from the description "
-        + ("and, if a dynamic target is required, start it with ctf2_start_environment and inspect the authored target, then submit the flag."
+        + (
+            f"and, if a dynamic target is required, start it with "
+            f"platform_start_env(ref=\"{ref_token}\"), then poll "
+            f"platform_read_env until it reports the target as usable, and inspect "
+            f"the authored target before attacking it."
             if requires_env
-            else "(this challenge needs no running environment).")
+            else "(this challenge needs no running environment)."
+        )
     )
     console.print(
         f"[*] CTF2 challenge [bold]{name}[/] | category [bold]{category}[/] | "
@@ -1998,6 +2008,8 @@ def gcs(
     description = str(chall_data.get("description") or "").strip()
     has_solved = bool(chall_data.get("hasSolved"))
     needs_init = bool(chall_data.get("isNeedInit"))
+    # Platform-neutral ref, built by code so the model only echoes it.
+    gcs_ref = f"gcs:exercise:{exercise_id}"
     if has_solved:
         err_console.print(f"[*] Exercise [bold]{name}[/] already solved — skipping.")
         return
@@ -2019,24 +2031,27 @@ def gcs(
             "after free, exposing main_arena pointer), then tcache-poison __free_hook "
             "with system(), write '/bin/sh' or '/bin/cat /flag' into a freed chunk, and "
             "trigger system(). Do NOT get stuck re-analyzing the binary; write the "
-            "exploit and attack the target directly, then gcs_submit_flag."
+            "exploit and attack the target directly, then submit the flag."
         )
     goal = (
         f"Solve the West Lake Sword Competition challenge '{name}' "
-        f"(difficulty {difficulty}; score: {score_text} points). Achieve the flag and "
-        f"submit it with gcs_submit_flag (exercise_id {exercise_id}). "
-        f"exercise_id is {exercise_id}. Challenge description follows:\n{description}\n{hint}\n"
-        f"Use gcs_exercise_list / gcs_read_exercise to fetch attachments and target "
-        f"endpoints. "
+        f"(difficulty {difficulty}; score: {score_text} points).\n"
+        f"Its ref is {gcs_ref} -- pass that exact string as `ref` when calling the "
+        f"platform_* tools.\n"
+        f"Achieve the flag, then submit it with "
+        f"platform_submit(ref=\"{gcs_ref}\", flag=...). Challenge description "
+        f"follows:\n{description}\n{hint}\n"
+        f"Use platform_read(ref=\"{gcs_ref}\") to fetch the description and "
+        f"attachment links, then platform_read_env for the target endpoints. "
         + (
-            "The environment needs initialization: call gcs_build_env then poll "
-            "gcs_read_exercise until isNeedCheck is false and endpoints are "
-            "available, attack the target endpoints, submit the flag, then call "
-            "gcs_recover_env to release quota."
+            f"The environment needs initialization: call "
+            f"platform_start_env(ref=\"{gcs_ref}\"), then poll platform_read_env "
+            f"until the endpoints are published, attack them, submit the flag, then "
+            f"call platform_stop_env(ref=\"{gcs_ref}\") to release quota."
             if needs_init
             else "No environment initialization required; attack the provided endpoints directly, then submit the flag."
         )
-        + " Note the flag format from gcs_match_info; follow the competition rules."
+        + " Follow the competition rules for the flag format."
     )
     console.print(
         f"[*] GCS exercise [bold]{name}[/] | difficulty [bold]{difficulty}[/] | "
