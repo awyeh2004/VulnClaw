@@ -44,6 +44,10 @@ from vulnclaw.agent.roles import role_tool_violation, tool_allowed_for_role
 from vulnclaw.agent.solver import _looks_like_quiz
 from vulnclaw.agent.tool_result_overrides import set_raw_tool_output_override
 from vulnclaw.agent.tool_schemas import append_builtin_tool_schemas
+from vulnclaw.utils.http_client import (
+    async_http_client as make_async_http_client,
+    http_client as make_http_client,
+)
 from vulnclaw.config.source_render import (
     render_highlighted_source_block,
     strip_highlighted_source,
@@ -2698,7 +2702,13 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
 
     def _run() -> str:
         results: list[dict[str, Any]] = []
-        with httpx.Client(
+        # targets= keeps the system proxy out of the way for loopback/private
+        # targets: httpx defaults to trust_env=True and ignores the Windows
+        # ProxyOverride bypass list, so a running proxy tool would send the whole
+        # probe batch at the wrong source address (and internal targets would look
+        # unreachable). Public targets still honour the environment proxy.
+        with make_http_client(
+            targets=base_url,
             follow_redirects=follow_redirects,
             timeout=timeout,
             verify=verify_tls,
@@ -3482,7 +3492,8 @@ async def execute_brute_force(agent: AgentContext, args: dict[str, Any]) -> str:
     # back to the shared _fetch_cookies jar after a successful login.
     session_cookies: list[tuple[str, str, str, str]] = []  # name, value, domain, path
 
-    async with httpx.AsyncClient(
+    async with make_async_http_client(
+        targets=url,
         verify=False,
         timeout=30.0,
         follow_redirects=True,
