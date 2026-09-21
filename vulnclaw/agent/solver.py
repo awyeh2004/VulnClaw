@@ -700,6 +700,13 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
     runtime = getattr(agent, "runtime", None)
     prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
+    # Deterministic capability card: goal-relevant external tools this host has.
+    try:
+        from vulnclaw.agent.tool_registry import build_tool_card
+
+        tool_card = build_tool_card(state.goal or "") or ""
+    except Exception:
+        tool_card = ""
     pwn_local_instruction = ""
     if "pwn" in (state.goal or "").lower() or _looks_like_binary_target(state.origin or ""):
         pwn_local_instruction = (
@@ -766,6 +773,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"{bb_instruction}"
         f"{playbook_instruction}{prior_playbook_brief}"
         f"{pwn_local_instruction}"
+        f"{tool_card}"
     )
 
 
