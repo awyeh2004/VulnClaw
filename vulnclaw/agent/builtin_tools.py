@@ -687,6 +687,18 @@ async def execute_shell_command(agent: AgentContext, args: dict[str, Any]) -> st
         model_risk = ""  # omitted/unknown: local classifier stays the authority
     model_reason = str(args.get("assessment_reason") or "").strip()[:300]
 
+    # cmd.exe has no POSIX single-quote quoting, so a read-only verdict from the
+    # POSIX-oriented classifier is unsound for such commands. Escalate them to
+    # the human path (model_risk="review" is one-way: it can only force review).
+    from vulnclaw.agent.command_classifier import windows_shell_quoting_hazard
+
+    quoting_hazard = windows_shell_quoting_hazard(command, shell_name)
+    if quoting_hazard:
+        model_risk = "review"
+        model_reason = (
+            quoting_hazard if not model_reason else f"{model_reason} | {quoting_hazard}"
+        )[:300]
+
     gate = get_execution_gate(getattr(agent, "config", None))
     outcome = await gate.authorize(
         GateRequest(

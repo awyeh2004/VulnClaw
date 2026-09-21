@@ -79,25 +79,26 @@ ALLOWED_SPAWN_SITES: dict[str, str] = {
     # a spawn site re-keys it and the audit reports it as "new". That is what
     # happened when the remote (SSH) tool dispatch was added to builtin_tools.py
     # (~+25 lines near the top and +10 lower down): four pre-existing nmap sites
-    # shifted and had to be re-registered here. The churn is cheap and the audit
-    # is still doing its job (it forces a look at every shifted site), but if
-    # this ever gets noisy, key on the enclosing function name instead.
+    # shifted and had to be re-registered here, and again for the cmd.exe quoting
+    # guard (+12 near line 690). The churn is cheap and the audit is still doing
+    # its job (it forces a look at every shifted site), but if this ever gets
+    # noisy, key on the enclosing function name instead.
     "vulnclaw/agent/builtin_tools.py:451:subprocess.Popen": (
         "shared gated process runner for shell/python/PHP execution"
     ),
     "vulnclaw/agent/builtin_tools.py:636:subprocess.run": (
         "fixed Windows taskkill fallback for the gated process runner"
     ),
-    "vulnclaw/agent/builtin_tools.py:2400:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2412:subprocess.run": (
         "fixed Windows nmap path lookup"
     ),
-    "vulnclaw/agent/builtin_tools.py:2479:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2491:subprocess.run": (
         "structured argv nmap execution constrained by the nmap tool schema"
     ),
-    "vulnclaw/agent/builtin_tools.py:2487:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:2499:subprocess.run": (
         "structured argv non-privileged nmap retry"
     ),
-    "vulnclaw/agent/builtin_tools.py:4138:subprocess.run": (
+    "vulnclaw/agent/builtin_tools.py:4150:subprocess.run": (
         "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)"
     ),
     "vulnclaw/report/verifier.py:487:subprocess.run": (
