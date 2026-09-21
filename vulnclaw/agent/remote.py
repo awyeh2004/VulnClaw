@@ -604,6 +604,36 @@ def fetch_file(
 
 # ── batch collection ─────────────────────────────────────────────────────
 
+def validate_collector_commands() -> list[str]:
+    """Return a list of problems with :func:`collector_commands`, empty when clean.
+
+    These are build-time invariants of the generated script, not style preferences:
+      * commands must be SINGLE-LINE, because the script records each approved
+        command as a ``#`` comment and a comment ends at the physical newline --
+        a multi-line command would spill into executable code.
+      * names must be unique (they become file names).
+      * a name must be a safe file-name fragment (it is interpolated into
+        ``"$OUT/NN-name.txt"``).
+
+    Called by remote_collect before shipping the script, and by the unit tests, so
+    a future command that breaks an invariant fails loudly instead of producing a
+    collector that silently collects nothing.
+    """
+    problems: list[str] = []
+    seen: set[str] = set()
+    for name, cmd in collector_commands():
+        if not name or not cmd:
+            problems.append(f"empty name or command: {name!r}")
+        if "\n" in cmd or "\r" in cmd:
+            problems.append(f"{name!r}: command spans multiple lines")
+        if name in seen:
+            problems.append(f"duplicate section name: {name!r}")
+        seen.add(name)
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            problems.append(f"{name!r}: section name must be [A-Za-z0-9_]+")
+    return problems
+
+
 # Every step is (name, command). These commands are what gets APPROVED, so this
 # tuple is the single source of truth: the approval display and the executed
 # script are both generated from it and cannot drift.
@@ -829,6 +859,27 @@ def _collector_script(out_dir: str, *, keep_remote: bool = False) -> str:
     NOT ``tar czf archive.tar.gz /`` (nor archive into a directory it is
     scanning), which is how "collect everything" scripts end up either recursing
     into their own output or silently including it.
+
+    ⚠️ QUOTING LESSON (this was a shipped, silent defect)
+    ----------------------------------------------------
+    This used to record the command with::
+
+        echo "### command: {cmd}"
+
+    which is a nested-quote syntax error the moment ``cmd`` itself contains a
+    double quote. Measured on 11 of the 33 commands, e.g. ``authkeys``::
+
+        echo "### command: find ... | while read f; do echo "=== $f ==="; ..."
+
+    The inner ``"`` closes the outer string, the shell never finishes parsing the
+    script, and it aborts with exit 2 -- after only the first 4 sections. So 11 of
+    33 sections silently produced nothing, on every target, and the failure
+    surfaced only as the useless "no archive produced" message.
+
+    A ``#`` comment is used instead: shell comments are terminated by the physical
+    newline, so they cannot be broken by quotes, ``$``, or backticks from the
+    command text. Commands here are single-line by construction (enforced by
+    ``collector_commands``).
     """
     lines = [
         "#!/bin/sh",
@@ -843,7 +894,7 @@ def _collector_script(out_dir: str, *, keep_remote: bool = False) -> str:
         lines += [
             f"# ---- {name} ----",
             "{",
-            f'  echo "### command: {cmd}"',
+            f"  # approved command: {cmd}",
             f"  {cmd}",
             f'}} > "$OUT/{idx:02d}-{name}.txt" 2>&1',
         ]
@@ -1207,11 +1258,38 @@ async def _do_collect(
     )
 
     # 1) ship the collector via stdin (no scp/rsync needed on the target) and run
+    #
+    # Fail loudly BEFORE touching the target if the generated script cannot work.
+    # The nested-quote defect (see _collector_script) shipped for a while and its
+    # only symptom was "no archive produced" -- an invariant check here turns that
+    # into an actionable message instead of a mysterious empty collection.
+    problems = validate_collector_commands()
+    if problems:
+        result.errors.append(
+            "collector command set violates its own invariants: " + "; ".join(problems)
+        )
+        result.duration_s = time.perf_counter() - started
+        return result.render()
+
     script = _collector_script(out_dir, keep_remote=keep_remote)
+    if "__VULNCLAW_COLLECTOR__" in script:
+        # The script is delivered inside a here-doc with this delimiter; if the
+        # script itself contained it the here-doc would end early and the rest
+        # would execute as shell.
+        result.errors.append(
+            "collector script contains the transport here-doc delimiter; refusing to ship"
+        )
+        result.duration_s = time.perf_counter() - started
+        return result.render()
+
     bootstrap = (
         f"cat > {shlex.quote(out_dir + '.sh')} <<'__VULNCLAW_COLLECTOR__'\n"
         f"{script}"
         f"__VULNCLAW_COLLECTOR__\n"
+        # Syntax-check the shipped script before running it. `sh -n` catches the
+        # class of defect that produced a silently empty collection.
+        f"sh -n {shlex.quote(out_dir + '.sh')} || {{ "
+        f"echo 'SYNTAX_ERROR_IN_COLLECTOR' >&2; exit 90; }}\n"
         f"sh {shlex.quote(out_dir + '.sh')}\n"
     )
     stdout_b, stderr, err = await asyncio.to_thread(
@@ -1286,14 +1364,23 @@ async def _do_collect(
             f"rm -f {shlex.quote(archive)} {shlex.quote(out_dir + '.sh')} 2>/dev/null; "
             f"rm -rf {shlex.quote(out_dir)} 2>/dev/null; echo CLEANED"
         )
-        _c_out, cleanup_err, cleanup_txt = await asyncio.to_thread(
+        cleanup_out, cleanup_err_txt, cleanup_err = await asyncio.to_thread(
             run_command_capture, host, alias, cleanup,
             connect_timeout=connect_timeout, timeout_s=60.0,
         )
-        if cleanup_err or "CLEANED" not in cleanup_txt:
+        # ⚠️ The marker arrives on STDOUT. This check previously looked only at
+        # stderr (``run_command_capture`` returns (stdout_bytes, stderr_text,
+        # error)), so `"CLEANED" not in cleanup_txt` was ALWAYS true and every
+        # collection reported "remote cleanup did not confirm ... may still exist
+        # on the target" even when the target was verified clean. Measured:
+        #     stdout = b'CLEANED\n'   stderr = ''   -> false alarm
+        # A permanent false alarm is worse than no check: it trains the operator
+        # to ignore the line, so a REAL leftover would be ignored too.
+        cleanup_stdout = cleanup_out.decode("utf-8", "replace")
+        if cleanup_err or "CLEANED" not in cleanup_stdout:
             result.errors.append(
                 "remote cleanup did not confirm: "
-                f"{cleanup_err or cleanup_txt.strip()[:200]} — "
+                f"{(cleanup_err or cleanup_err_txt or cleanup_stdout).strip()[:200]} — "
                 f"{archive}, {out_dir}.sh and {out_dir} may still exist on the target"
             )
         else:
