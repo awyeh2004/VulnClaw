@@ -217,7 +217,41 @@ LogParser.exe -i:EVT "SELECT TOP 20 EXTRACT_TOKEN(Strings,19,'|') AS User, EXTRA
 
 ---
 
-## 六、速查
+## 六、⚠️ 连接目标前先确认传输方式（踩过的坑）
+
+**`[实测]` 一个真实教训**：CTF2 的 Pwn 靶机是 **TLS 包装**的，不是裸 socket。
+
+用 `socket.create_connection()` 裸连时：**TCP 握手成功**、发 payload 后立刻 EOF、
+零输出 —— 这个现象和"exploit 失败"**完全一样**，会把人骗去怀疑偏移、对齐、
+payload 字节，浪费大量时间（我在这上面耗了几小时，本地远程反复试了十几种变体）。
+
+**正确做法**：
+
+```python
+# ❌ 裸连 —— 对 TLS 包装的目标，payload 根本到不了应用
+s = socket.create_connection((host, port), timeout=8)
+
+# ✅ 先确认再连。CTF2 的 target 信息里就有这个字段：
+#      data.access_urls[].nc_ssl == true   →  需要 TLS
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+raw = socket.create_connection((host, port), timeout=8)
+s = ctx.wrap_socket(raw, server_hostname=host)
+```
+
+⭐ **通用判据**：拿到靶机地址后，**先看平台返回结构里有没有 SSL/TLS 标志**
+（CTF2: `nc_ssl`；其他平台可能是 `tls` / `secure` / `scheme: https`）。
+不要假设"给了 host:port 就是裸 TCP"。
+
+**另一个同源教训**：靶机**过期**时，TLS 握手可能仍然成功，而应用层返回
+`[ TARGET NOT FOUND ] This address has no running target.`
+—— 看到这种**有内容的报错**就说明"不是 exploit 问题，是靶机问题"，
+该做的是**重新启动靶机**，不是继续调 payload。
+
+---
+
+## 七、速查
 
 ```powershell
 # 证据登记（分析前）
