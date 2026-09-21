@@ -577,6 +577,58 @@ def _no_path_open_angles(agent: AgentState) -> int:
     return len(bb.open_angles())
 
 
+def _stall_turns(agent: AgentState) -> int:
+    """Turns without path progress before the stall guard speaks.
+
+    Reuses ``competition.stall_turns`` instead of adding a second convention: the
+    number is already documented in the config schema, and one knob is easier to
+    reason about mid-competition than two. Calibration from live runs: both
+    successful solves finished in 3 and 6 steps with progress on every one of them,
+    so a limit of 8 sits comfortably above any productive stretch observed.
+    """
+    config = getattr(agent, "config", None)
+    competition = getattr(config, "competition", None)
+    raw = getattr(competition, "stall_turns", 8)
+    try:
+        return max(2, int(raw))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _path_progress_fingerprint(agent: AgentState) -> tuple:
+    """A cheap fingerprint of whether the CURRENT PATH has advanced.
+
+    Deliberately not "did anything happen". Measured: a live run probed BUU SSRF
+    COURSE 1 for about an hour and produced evidence on essentially every turn
+    while making no progress at all -- so any activity-based signal (new evidence,
+    new nodes) stayed quiet, and the existing observation-only guard never fired
+    because the agent was actively probing rather than rereading saved evidence.
+
+    What counts as progress is a change of theory or of coverage:
+
+    * a newly CONFIRMED fact (knowledge advanced),
+    * a newly decided angle -- HIT or MISS (the path was actually resolved),
+    * a newly OPEN angle (a genuinely different surface is being explored),
+    * a different LOCK (the working theory changed).
+
+    Proposed-but-unconfirmed facts, intents and one-off probes therefore do NOT
+    count, which is precisely the "busy but stuck" pattern.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return ()
+    from vulnclaw.agent.blackboard import NodeStatus, NodeType
+
+    nodes = bb.all_nodes()
+    angle_type = getattr(NodeType, "ANGLE", None)
+    lock_type = getattr(NodeType, "LOCK", None)
+    proposed = getattr(NodeStatus, "PROPOSED", None)
+    angles = [n for n in nodes if angle_type is not None and n.type == angle_type]
+    decided = sum(1 for n in angles if n.status != proposed)
+    locks = [n.id for n in nodes if lock_type is not None and n.type == lock_type]
+    return (len(bb.confirmed_facts()), len(angles), decided, locks[-1] if locks else "")
+
+
 def _no_path_coverage_thin(agent: AgentState) -> bool:
     """True when the blackboard is too empty to support any NO_PATH claim.
 
@@ -1478,6 +1530,10 @@ async def _solve_impl(
 
     repeated_errors = 0
     observation_only_streak = 0
+    # Path-progress stall guard state (see _path_progress_fingerprint).
+    path_stall_streak = 0
+    path_stall_hint_sent = False
+    last_path_fingerprint: tuple | None = None
     needs_user = False
     reason = "runaway safety budget reached"
 
@@ -1671,6 +1727,47 @@ async def _solve_impl(
                 stop_for_stall = True
         else:
             observation_only_streak = 0
+
+        # Path-progress guard, complementary to the observation-only guard above.
+        # That one catches "rereading saved evidence"; this one catches "actively
+        # probing while the current path is not advancing" -- the pattern that let a
+        # live run churn for ~an hour without any guard firing. It never TERMINATES
+        # on its own: first it tells the agent this path is a dead end and to try a
+        # different angle; only when no untried angle is left does it hand back to
+        # the user, which is a decision the operator should own.
+        fingerprint = _path_progress_fingerprint(agent)
+        if fingerprint == last_path_fingerprint:
+            path_stall_streak += 1
+        else:
+            path_stall_streak = 0
+            path_stall_hint_sent = False
+            last_path_fingerprint = fingerprint
+
+        if path_stall_streak >= _stall_turns(agent):
+            if _no_path_open_angles(agent) == 0:
+                question = (
+                    f"The current path has not advanced for {path_stall_streak} turns "
+                    "(no confirmed fact, decided angle or new angle), and no untried angle "
+                    "remains on the blackboard. Provide a new hypothesis or scope, or confirm "
+                    "that the run should stop."
+                )
+                state.ask_user(question)
+                needs_user = True
+                reason = "stalled with no untried path remaining"
+                emit("ask_user", {"question": question, "reason": reason})
+                stop_for_stall = True
+            elif not path_stall_hint_sent:
+                hint = (
+                    f"Path stall: this path has produced no new confirmed fact, decided angle "
+                    f"or new angle for {path_stall_streak} turns. Record the current angle as a "
+                    "MISS on the blackboard and try a DIFFERENT angle rather than probing this "
+                    "surface again. If you keep repeating similar probes, also consider that a "
+                    "throttling front makes results look uninformative -- prefer one slower, "
+                    "decisive probe over many more of the same."
+                )
+                state.add_correction_hint(hint)
+                stall_guard_message = f"[path stall] {hint}"
+                path_stall_hint_sent = True
 
         # Keep normal conversational memory. Tool-call transcripts are appended
         # by llm_client as assistant/tool messages when tools run; this records
