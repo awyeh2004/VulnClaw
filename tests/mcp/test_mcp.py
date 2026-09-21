@@ -517,10 +517,35 @@ class TestMCPLifecycleManager:
         constraints = TaskConstraints(allowed_hosts=["example.com"], strict_mode=True)
         manager.set_task_constraints(constraints)
 
-        result = await manager.call_tool("fetch", {"url": "https://api.example.com/"})
+        # NOTE: the out-of-scope host must be a genuine outsider. This test used
+        # to fetch `api.example.com` and expect a violation, which enshrined the
+        # bug fixed alongside it: an allowed host is a DOMAIN SCOPE, so its
+        # subdomains are in scope (see tests/config/test_host_scope.py).
+        result = await manager.call_tool("fetch", {"url": "https://evil.test/"})
         assert result["ok"] is False
         assert result["error_type"] == "constraint_violation"
-        assert "api.example.com" in result["message"]
+        assert "evil.test" in result["message"]
+
+    async def test_fetch_allows_a_subdomain_of_an_allowed_host(self):
+        """Measured need: competition targets are subdomains of the platform domain."""
+        from vulnclaw.agent.context import TaskConstraints
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+        manager.set_task_constraints(
+            TaskConstraints(allowed_hosts=["dasctf.com"], strict_mode=True)
+        )
+
+        result = await manager.call_tool(
+            "fetch", {"url": "http://direct-ctf2.dasctf.com:26134/"}
+        )
+        assert not (
+            result.get("ok") is False
+            and result.get("error_type") == "constraint_violation"
+        ), result.get("message")
 
     @pytest.mark.asyncio
     async def test_fetch_path_constraint_violation_returns_structured_error(self):

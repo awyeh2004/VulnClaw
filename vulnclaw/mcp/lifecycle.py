@@ -20,7 +20,7 @@ from vulnclaw.config.source_render import render_highlighted_source_block
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V1 违规 — mcp/ 基础设施层不应反向依赖 agent/ 领域层，
 #          改为从 config/url_utils.py 导入纯 URL 工具函数。
-from vulnclaw.config.url_utils import infer_port_from_url
+from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url
 from vulnclaw.mcp._probe_mixin import ProbeMixin
 from vulnclaw.mcp.registry import HealthStatus, MCPRegistry
 
@@ -167,7 +167,7 @@ class MCPLifecycleManager(ProbeMixin):
         if port is None:
             port = None
 
-        if constraints.allowed_hosts and host and host not in constraints.allowed_hosts:
+        if constraints.allowed_hosts and host and not host_in_scope(host, constraints.allowed_hosts):
             allowed_hosts = ", ".join(constraints.allowed_hosts)
             return self._tool_result(
                 ok=False,
@@ -179,7 +179,7 @@ class MCPLifecycleManager(ProbeMixin):
                 suggestion="Adjust the task scope or send the request to an allowed host.",
             )
 
-        if host and host in constraints.blocked_hosts:
+        if host and host_in_scope(host, constraints.blocked_hosts):
             return self._tool_result(
                 ok=False,
                 server="fetch",
