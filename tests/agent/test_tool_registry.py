@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from vulnclaw.agent import tool_registry as tr
 
 
@@ -81,16 +83,26 @@ def test_both_registries_are_rendered_when_all_match():
 
 
 def test_ir_goal_still_reports_attack_tools_it_matches():
-    """IR goals may legitimately pull attack tools (vuln verification)."""
+    """IR goals may legitimately pull attack tools (vuln verification).
+
+    The goal below used to assert nmap's presence "via 服务/服务器 substring
+    overlap" — the false positive round-6 review F3 called out. The intent of this
+    test (general tools still show for an IR goal when the goal really asks for
+    them) is kept; the mechanism is now a keyword that means what it says.
+    """
     with patch.object(tr, "_detect", side_effect=_all_present):
         card = tr.build_tool_card("应急响应 被入侵服务器排查 webshell")
-    assert "nmap" in card  # via 服务/服务器 substring overlap
     assert "D盾_Web查杀" in card  # "webshell" is an explicit IR keyword
+    assert "nmap" not in card, "「服务」 must not match inside 「服务器」"
 
     with patch.object(tr, "_detect", side_effect=_all_present):
-        card2 = tr.build_tool_card("检查被植入的 webshell 后门文件")
-    assert "D盾_Web查杀" in card2
-    assert "Incident-response" in card2
+        card2 = tr.build_tool_card("应急响应：先扫这台失陷主机的开放端口，再查 webshell")
+    assert "nmap" in card2  # 「端口」 is an explicit nmap keyword
+
+    with patch.object(tr, "_detect", side_effect=_all_present):
+        card3 = tr.build_tool_card("检查被植入的 webshell 后门文件")
+    assert "D盾_Web查杀" in card3
+    assert "Incident-response" in card3
 
 
 def test_unrelated_goal_returns_empty():
@@ -222,3 +234,78 @@ def test_no_absolute_fragments_in_detection_data():
         for key in ("rel", "rel_glob"):
             for part in entry.get(key, ()):
                 assert ":" not in part, f"absolute path fragment {part!r} in {entry['name']}"
+
+
+# ── the IR section is intent-gated (round-6 review F3) ──────────────────
+
+IR_SECTION = "Incident-response / evidence-handling tools"
+_IR_MARKERS = ("FullEventLogView", "Sysmon", "Procmon", "Autoruns", "TCPView", "D盾")
+
+
+def _installed(entry):
+    return entry.get("cmd") or entry["name"]
+
+
+def _card(goal: str) -> str:
+    """Card text with every registered tool treated as installed."""
+    with patch.object(tr, "_detect", side_effect=_installed):
+        return tr.build_tool_card(goal)
+
+
+class TestIRSectionIsIntentGated:
+    """A single generic word must not pull host forensics into the prompt.
+
+    Measured: a web challenge description containing 「登录」 was enough to inject
+    FullEventLogView and friends, and nmap's 「服务」 had already been admitted to
+    match 「服务器」. A per-tool keyword is a weak signal; the goal's intent is the
+    strong one, so the section renders only for a goal that reads like IR at all.
+    """
+
+    @pytest.mark.parametrize(
+        "goal",
+        [
+            "登录框 SQL 注入拿管理员密码",
+            "这个页面的登录逻辑存在越权",
+            "帮我看看进程池配置与内存泄漏",
+            "数据库连接超时，缓存也没有命中",
+            "服务器上部署了一个 spring 应用",
+            "审计一下这个 API 的权限设计",
+        ],
+    )
+    def test_generic_words_do_not_inject_host_forensics(self, goal):
+        card = _card(goal)
+        assert IR_SECTION not in card
+        leaked = [name for name in _IR_MARKERS if name in card]
+        assert leaked == [], f"{goal!r} pulled IR tools: {leaked}"
+
+    def test_a_real_ir_goal_still_gets_them(self):
+        card = _card("应急响应：这台服务器被入侵，排查 webshell 与持久化后门")
+        assert IR_SECTION in card
+        assert "Autoruns" in card  # 持久化 / 自启动
+        assert "D盾" in card  # webshell / 查杀
+
+    def test_per_tool_keywords_still_refine_within_an_ir_goal(self):
+        """The gate decides WHETHER; the entry keywords decide WHICH."""
+        card = _card("应急响应排查：看事件日志，找登录失败与账号创建记录")
+        assert "FullEventLogView" in card
+        assert "Sysmon" not in card  # nothing in that goal matches its keywords
+
+    def test_forensic_english_also_opens_the_gate(self):
+        assert IR_SECTION in _card("dfir: triage this host for persistence")
+
+    def test_bare_server_no_longer_pulls_nmap(self):
+        """The admitted false positive: 「服务」 matched inside 「服务器」."""
+        assert "nmap" not in _card("服务器")
+
+    def test_an_actual_port_goal_still_pulls_nmap(self):
+        assert "nmap" in _card("扫一下这台服务器的开放端口")
+
+    def test_intent_vocabulary_covers_the_documented_ir_triggers(self):
+        """One vocabulary for "what an IR goal looks like", not two that drift.
+
+        Mirrors the incident-response skill's routing keywords
+        (vulnclaw/skills/dispatcher.py); this pins the phrasings a user is most
+        likely to type.
+        """
+        for phrase in ("应急响应", "被入侵", "webshell查杀", "挖矿", "勒索信", "日志分析"):
+            assert tr._is_ir_goal(phrase.lower()), phrase

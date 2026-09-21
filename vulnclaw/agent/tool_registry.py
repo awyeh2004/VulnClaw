@@ -173,7 +173,7 @@ _REGISTRY: list[dict] = [
         "name": "nmap",
         "which": "nmap",
         "cmd": "nmap",
-        "keywords": ["端口", "port", "扫描", "scan", "服务", "service", "网络", "network"],
+        "keywords": ["端口", "port", "扫描", "scan", "服务发现", "服务版本", "service", "网络", "network"],
         "usage": '-sV -sC <target> (服务版本); -p- <target> (全端口)',
         "when": "网络端口与服务发现",
     },
@@ -200,7 +200,7 @@ _IR_REGISTRY: list[dict] = [
         "rel": ("bin", "Autoruns", "Autoruns64.exe"),
         "which": "Autoruns64.exe",
         "cmd": '"{path}" -accepteula -a * -c -h -s -m -v > autoruns.csv',
-        "keywords": ["持久化", "自启动", "开机启动", "persistence", "autorun", "注册表启动", "计划任务", "服务"],
+        "keywords": ["持久化", "自启动", "开机启动", "persistence", "autorun", "注册表启动", "计划任务"],
         "usage": '-accepteula -a * -c -h -s -m -v > out.csv (全量含哈希, 免交互)',
         "when": "自启动/持久化项全量导出（应急响应第一优先）",
     },
@@ -209,7 +209,7 @@ _IR_REGISTRY: list[dict] = [
         "rel": ("bin", "ProcessExplorer", "procexp64.exe"),
         "which": "procexp64.exe",
         "cmd": '"{path}" /accepteula',
-        "keywords": ["进程", "process", "句柄", "handle", "dll", "父进程", "可疑进程", "内存"],
+        "keywords": ["进程", "句柄", "dll", "父进程", "可疑进程", "异常进程"],
         "usage": '/accepteula (GUI；查进程树、句柄、加载的 DLL 与数字签名)',
         "when": "可疑进程与 DLL 分析（比任务管理器深）",
     },
@@ -218,7 +218,7 @@ _IR_REGISTRY: list[dict] = [
         "rel": ("bin", "Procmon", "Procmon64.exe"),
         "which": "Procmon64.exe",
         "cmd": '"{path}" /accepteula /Quiet /Minimized /BackingFile trace.pml',
-        "keywords": ["行为", "监控", "monitor", "文件监控", "注册表监控", "behavior", "动态分析"],
+        "keywords": ["行为监控", "文件监控", "注册表监控", "动态分析", "恶意行为"],
         "usage": '/accepteula /Quiet /BackingFile t.pml (后台录制文件/注册表/进程行为)',
         "when": "动态行为监控（复现恶意样本动作）",
     },
@@ -227,7 +227,7 @@ _IR_REGISTRY: list[dict] = [
         "rel": ("bin", "TCPView", "Tcpview64.exe"),
         "which": "Tcpview64.exe",
         "cmd": '"{path}" /accepteula',
-        "keywords": ["网络连接", "tcp", "udp", "外联", "连接", "端口占用", "c2", "回连"],
+        "keywords": ["网络连接", "tcp", "udp", "外联", "回连", "端口占用", "c2", "外联地址"],
         "usage": '/accepteula (GUI；看哪个进程持有哪个连接，含已关闭连接)',
         "when": "进程↔连接归属（定位外联/C2）",
     },
@@ -290,7 +290,7 @@ _IR_REGISTRY: list[dict] = [
         "rel": ("bin", "DNSDataView", "DNSDataView.exe"),
         "which": "DNSDataView.exe",
         "cmd": '"{path}" /scomma dns.csv',
-        "keywords": ["dns", "域名解析", "缓存", "域名", "c2域名", "解析记录"],
+        "keywords": ["dns", "域名解析", "解析缓存", "c2域名", "解析记录", "dns缓存"],
         "usage": '/scomma out.csv (DNS 客户端缓存解析记录)',
         "when": "DNS 缓存取证（C2 域名解析痕迹）",
     },
@@ -389,6 +389,42 @@ def _match(goal_lower: str, keywords: list[str]) -> bool:
     return any(k in goal_lower for k in keywords)
 
 
+# The IR section is gated as a WHOLE, not only per tool.
+#
+# Round-6 review F3: per-tool keywords alone let a web challenge description
+# containing 「登录」 inject FullEventLogView and friends into the system prompt,
+# and the same shape had already been admitted for nmap's 「服务」 matching
+# 「服务器」. A keyword is a weak signal; the *intent* of the goal is a strong one.
+# So the section renders only when the goal reads like incident response at all,
+# and the per-tool keywords then refine WHICH tools show.
+#
+# The vocabulary deliberately mirrors the incident-response skill's routing
+# keywords (vulnclaw/skills/dispatcher.py) so "what an IR goal looks like" has one
+# answer in the codebase instead of two drifting ones.
+IR_INTENT_KEYWORDS: tuple[str, ...] = (
+    # Qualified phrases mirroring the incident-response skill's routing keywords
+    # (vulnclaw/skills/dispatcher.py) — one vocabulary, not two that drift.
+    "应急响应", "应急排查", "应急取证", "入侵排查", "被入侵", "失陷主机", "失陷",
+    "被植入", "恶意程序", "恶意行为", "恶意样本", "webshell", "webshell查杀",
+    "查马", "查杀木马", "后门排查", "隐藏后门", "持久化排查", "权限维持",
+    "挖矿木马", "挖矿", "勒索病毒", "勒索信", "勒索", "网页篡改", "挂黑链",
+    "暗链", "黑链", "网页被改", "克隆账号", "隐藏账号", "隐藏用户", "异常账号",
+    "账号被篡改", "日志分析", "日志排查", "攻击溯源", "溯源分析", "主机取证",
+    "内存取证", "内存马", "痕迹分析", "事件日志", "事件id", "登录类型",
+    "incident response", "dfir", "forensic", "compromise assessment",
+    "threat triage", "triage", "ioc", "evtx", "prefetch", "amcache",
+    # Bare host-malware / evidence-handling terms: specific enough on their own.
+    # (Deliberately NOT here: 排查 / 响应 / 审计 alone — a pentest goal like
+    # "排查一下这个接口的越权" would open the gate for no reason.)
+    "木马", "后门", "查杀", "痕迹", "取证",
+)
+
+
+def _is_ir_goal(goal_lower: str) -> bool:
+    """Whether the goal is an incident-response / forensics task at all."""
+    return _match(goal_lower, list(IR_INTENT_KEYWORDS))
+
+
 def build_tool_card(goal: str) -> str:
     """Build the capability card for this goal. Returns empty string if no tools match.
 
@@ -410,15 +446,16 @@ def build_tool_card(goal: str) -> str:
         lines.append(f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})")
 
     ir_lines: list[str] = []
-    for entry in _IR_REGISTRY:
-        cmd = _detect(entry)
-        if not cmd:
-            continue
-        if not _match(goal_lower, entry.get("keywords", [])):
-            continue
-        ir_lines.append(
-            f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})"
-        )
+    if _is_ir_goal(goal_lower):
+        for entry in _IR_REGISTRY:
+            cmd = _detect(entry)
+            if not cmd:
+                continue
+            if not _match(goal_lower, entry.get("keywords", [])):
+                continue
+            ir_lines.append(
+                f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})"
+            )
 
     if not lines and not ir_lines:
         return ""
