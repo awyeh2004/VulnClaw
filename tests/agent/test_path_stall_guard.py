@@ -18,7 +18,12 @@ from __future__ import annotations
 import pytest
 
 from vulnclaw.agent.blackboard import Blackboard, NodeStatus, NodeType
-from vulnclaw.agent.solver import _path_progress_fingerprint, _stall_turns
+from vulnclaw.agent.solver import (
+    _no_path_coverage_thin,
+    _path_progress_fingerprint,
+    _stall_guard_decision,
+    _stall_turns,
+)
 
 
 class FakeRuntime:
@@ -110,3 +115,77 @@ class TestStallLimit:
             competition = Competition()
 
         assert _stall_turns(FakeAgent(config=Config())) >= 2
+
+
+class TestStallGuardDecision:
+    """An EMPTY blackboard must never be read as "every path has been tried".
+
+    Measured failure mode: while an environment provisions, the model polls
+    platform_read_env — a tool call, so the observation-only guard stays quiet —
+    and nothing is on the blackboard yet. Zero open ANGLES is then true for the
+    trivial reason that there are no angles at all, and the first version asked
+    "no untried angle remains": a false premise, followed by stopping the solve.
+    """
+
+    def test_below_the_limit_it_says_nothing(self):
+        action, message = _stall_guard_decision(
+            FakeAgent(_bb()), streak=3, hint_sent=False, thin_windows=0
+        )
+        assert (action, message) == ("silent", "")
+
+    def test_empty_board_gets_a_hint_instead_of_a_handback(self):
+        action, message = _stall_guard_decision(
+            FakeAgent(_bb()), streak=8, hint_sent=False, thin_windows=0
+        )
+        assert action == "hint"
+        assert "EMPTY" in message and "ANGLE" in message
+        assert "no untried angle remains" not in message
+
+    def test_empty_board_only_asks_after_the_hint_was_ignored(self):
+        action, message = _stall_guard_decision(
+            FakeAgent(_bb()), streak=16, hint_sent=True, thin_windows=1
+        )
+        assert action == "ask"
+        # The premise has to be the true one: nothing recorded, not "all tried".
+        assert "no ANGLE node has been recorded" in message
+        assert "no untried angle remains" not in message
+
+    def test_a_board_with_confirmed_facts_is_not_thin(self):
+        bb = _bb()
+        for index in range(2):
+            bb.create_fact(f"confirmed observation {index}", verified=True)
+        assert _no_path_coverage_thin(FakeAgent(bb)) is False
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=9, hint_sent=False, thin_windows=0
+        )
+        assert action == "ask"
+        assert "no untried angle remains" in message
+
+    def test_an_open_angle_means_a_path_is_left(self):
+        bb = _bb()
+        bb.create_angle("SSRF to loopback on internal web ports")
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=8, hint_sent=False, thin_windows=0
+        )
+        assert action == "hint"
+        assert "DIFFERENT angle" in message
+        # ...and it does not repeat itself every turn.
+        again = _stall_guard_decision(
+            FakeAgent(bb), streak=9, hint_sent=True, thin_windows=0
+        )
+        assert again == ("silent", "")
+
+    def test_a_resolved_angle_with_none_open_does_ask(self):
+        """This is the case the guard exists for: the path was tried and exhausted."""
+        bb = _bb()
+        angle = bb.create_angle("file:// wrappers to read /flag")
+        bb.miss_angle(angle.id)
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=8, hint_sent=True, thin_windows=0
+        )
+        assert action == "ask"
+        assert "no untried angle remains" in message
+
+    def test_no_blackboard_is_not_treated_as_thin(self):
+        """Without a blackboard there is nothing to judge, so do not block."""
+        assert _no_path_coverage_thin(FakeAgent()) is False

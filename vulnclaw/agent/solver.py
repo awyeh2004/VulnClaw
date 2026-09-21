@@ -646,6 +646,75 @@ def _no_path_coverage_thin(agent: AgentState) -> bool:
     return angles == 0 and facts < 2
 
 
+def _stall_guard_decision(
+    agent: AgentState,
+    *,
+    streak: int,
+    hint_sent: bool,
+    thin_windows: int,
+) -> tuple[str, str]:
+    """What the path-stall guard does now: ``("silent"|"hint"|"ask", message)``.
+
+    Two failure modes bracket this guard and both are real:
+
+    * a run that keeps probing one surface while nothing gets decided (measured
+      live: ~an hour of SSRF probing, with evidence arriving on every turn) has to
+      be interrupted;
+    * a run that is still *ramping up* — waiting on an environment, polling it,
+      with nothing recorded on the blackboard yet — has to be left alone.
+
+    The first version got the second one wrong: an empty blackboard has zero open
+    ANGLES, which is indistinguishable from "every angle has been tried" if you
+    only count them. It then asked a question whose premise ("no untried angle
+    remains") was simply false, and a false premise is worse than no guard at all:
+    the operator is told the search space is exhausted when nothing was ever
+    recorded. NO_PATH already had this escape (:func:`_no_path_coverage_thin`);
+    the stall guard now shares it.
+
+    A thin board therefore never goes straight to the user: it gets one window of
+    "record what you have already probed as ANGLES" (the coverage gate cannot work
+    without them), and only if that is ignored does it ask — with wording that says
+    the board is empty instead of claiming the paths are used up.
+    """
+    if streak < _stall_turns(agent):
+        return "silent", ""
+
+    if _no_path_coverage_thin(agent):
+        if thin_windows == 0:
+            return "hint", (
+                f"Path stall: {streak} turns with no new confirmed fact, decided angle or "
+                "new angle, and the blackboard is still EMPTY — no ANGLE has been recorded, "
+                "so nothing distinguishes a path you have tried from one you have not. "
+                "Record the surfaces already probed as ANGLE nodes (mark them HIT/MISS) "
+                "before drawing any conclusion about the search space."
+            )
+        return "ask", (
+            f"The current path has not advanced for {streak} turns and the blackboard is "
+            "still empty: no ANGLE node has been recorded, so I cannot tell you whether an "
+            "untried path remains. Give a hypothesis or scope, record the angles already "
+            "tried, or confirm that the run should stop."
+        )
+
+    if _no_path_open_angles(agent) == 0:
+        return "ask", (
+            f"The current path has not advanced for {streak} turns "
+            "(no confirmed fact, decided angle or new angle), and no untried angle "
+            "remains on the blackboard. Provide a new hypothesis or scope, or confirm "
+            "that the run should stop."
+        )
+
+    if not hint_sent:
+        return "hint", (
+            f"Path stall: this path has produced no new confirmed fact, decided angle "
+            f"or new angle for {streak} turns. Record the current angle as a "
+            "MISS on the blackboard and try a DIFFERENT angle rather than probing this "
+            "surface again. If you keep repeating similar probes, also consider that a "
+            "throttling front makes results look uninformative -- prefer one slower, "
+            "decisive probe over many more of the same."
+        )
+    return "silent", ""
+
+
 def _auto_review_blackboard(agent: AgentState, state: AgentState) -> list[str]:
     """Run the Review-Arbiter over the blackboard unconditionally.
 
@@ -1533,6 +1602,7 @@ async def _solve_impl(
     # Path-progress stall guard state (see _path_progress_fingerprint).
     path_stall_streak = 0
     path_stall_hint_sent = False
+    path_stall_thin_windows = 0
     last_path_fingerprint: tuple | None = None
     needs_user = False
     reason = "runaway safety budget reached"
@@ -1733,41 +1803,44 @@ async def _solve_impl(
         # probing while the current path is not advancing" -- the pattern that let a
         # live run churn for ~an hour without any guard firing. It never TERMINATES
         # on its own: first it tells the agent this path is a dead end and to try a
-        # different angle; only when no untried angle is left does it hand back to
-        # the user, which is a decision the operator should own.
+        # different angle; only then does it hand back to the user, which is a
+        # decision the operator should own. An empty blackboard cannot support "no
+        # untried angle left" -- see _stall_guard_decision. In the loop the two
+        # guards are mutually exclusive (observation-only turns have no tool call);
+        # `stop_for_stall` below is what turns the ask into an exit for this run.
         fingerprint = _path_progress_fingerprint(agent)
         if fingerprint == last_path_fingerprint:
             path_stall_streak += 1
         else:
             path_stall_streak = 0
             path_stall_hint_sent = False
+            path_stall_thin_windows = 0
             last_path_fingerprint = fingerprint
 
-        if path_stall_streak >= _stall_turns(agent):
-            if _no_path_open_angles(agent) == 0:
-                question = (
-                    f"The current path has not advanced for {path_stall_streak} turns "
-                    "(no confirmed fact, decided angle or new angle), and no untried angle "
-                    "remains on the blackboard. Provide a new hypothesis or scope, or confirm "
-                    "that the run should stop."
-                )
-                state.ask_user(question)
-                needs_user = True
-                reason = "stalled with no untried path remaining"
-                emit("ask_user", {"question": question, "reason": reason})
-                stop_for_stall = True
-            elif not path_stall_hint_sent:
-                hint = (
-                    f"Path stall: this path has produced no new confirmed fact, decided angle "
-                    f"or new angle for {path_stall_streak} turns. Record the current angle as a "
-                    "MISS on the blackboard and try a DIFFERENT angle rather than probing this "
-                    "surface again. If you keep repeating similar probes, also consider that a "
-                    "throttling front makes results look uninformative -- prefer one slower, "
-                    "decisive probe over many more of the same."
-                )
-                state.add_correction_hint(hint)
-                stall_guard_message = f"[path stall] {hint}"
-                path_stall_hint_sent = True
+        stall_action, stall_message = _stall_guard_decision(
+            agent,
+            streak=path_stall_streak,
+            hint_sent=path_stall_hint_sent,
+            thin_windows=path_stall_thin_windows,
+        )
+        if stall_action == "hint":
+            state.add_correction_hint(stall_message)
+            stall_guard_message = f"[path stall] {stall_message}"
+            path_stall_hint_sent = True
+            if _no_path_coverage_thin(agent):
+                path_stall_thin_windows += 1
+        elif stall_action == "ask":
+            state.ask_user(stall_message)
+            needs_user = True
+            # The reason must match what is actually known: an empty blackboard is
+            # "nothing recorded", never "everything tried".
+            reason = (
+                "stalled with an empty blackboard"
+                if _no_path_coverage_thin(agent)
+                else "stalled with no untried path remaining"
+            )
+            emit("ask_user", {"question": stall_message, "reason": reason})
+            stop_for_stall = True
 
         # Keep normal conversational memory. Tool-call transcripts are appended
         # by llm_client as assistant/tool messages when tools run; this records
