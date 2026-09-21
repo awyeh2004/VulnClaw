@@ -542,31 +542,25 @@ async def _guard_submit_enabled() -> str | None:
 
 
 async def _handle_submit_flag(args: dict[str, Any]) -> str:
-    blocking = await _guard_config()
-    if blocking:
-        return blocking
-    disabled = await _guard_submit_enabled()
-    if disabled:
-        return disabled
-    usage, challenge = await _named(args["practice_id"], args["challenge_id"])
-    flag = args["flag"]
+    """Thin delegate to the shared submit policy.
 
-    guard = _guard()
-    allowed, reason = guard.allow(usage, challenge, flag)
-    if not allowed:
-        return _guard_message(usage, challenge, reason)
+    This handler used to carry its own copy of the gate/guard/accounting logic.
+    That copy differed from the same logic on the GCS side in three measured ways
+    (gate present only here, guard keyed by two ids, `[ctf2_confirm]` prefix), so
+    the policy now lives in one place and both entry points call it -- the tool
+    name can differ, the behaviour cannot.
+    """
+    from vulnclaw.platforms.refs import ChallengeRef
+    from vulnclaw.platforms.tools import adapter_for_platform, submit_flag_via
 
+    ref = ChallengeRef(
+        "ctf2", "practice", str(args["practice_id"]), str(args["challenge_id"])
+    )
     try:
-        payload = await _client.submit_flag(usage, challenge, flag)
-    except Exception as exc:
-        # Infrastructure failure: the flag was not judged, so do not consume an
-        # attempt or dedup-block future retries of the same flag.
-        guard.record_error(usage, challenge)
+        adapter = adapter_for_platform("ctf2")
+    except Exception as exc:  # noqa: BLE001
         return f"[ctf2_error] submit flag failed: {exc}"
-
-    accepted = _submit_accepted(payload)
-    guard.record(usage, challenge, accepted=accepted, flag=flag)
-    return _format(payload)
+    return await submit_flag_via(adapter, ref, args.get("flag"))
 
 
 async def _handle_list_competitions(args: dict[str, Any]) -> str:

@@ -468,36 +468,72 @@ async def _handle_stop_env(args: dict[str, Any]) -> str:
     return f"[platform] environment released for {ref.token()}."
 
 
-async def _handle_submit(args: dict[str, Any]) -> str:
-    resolved = _resolve(args)
-    if isinstance(resolved, str):
-        return resolved
-    adapter, ref = resolved
+def adapter_for_platform(name: str) -> Any:
+    """Fetch a registered adapter by name, **without** the exposure check.
 
+    The legacy per-platform tools have their own switch (``gcs.tools_enabled``), so
+    they must keep working even when the platform is not exposed to the model.
+    Routing them through :func:`registry.adapter_for` would make an old tool fail
+    for a reason that has nothing to do with its own switch.
+    """
+    from vulnclaw.platforms.bootstrap import ensure_adapters
+
+    ensure_adapters()
+    adapter = registry.all_adapters().get(name)
+    if adapter is None:
+        raise registry.UnknownPlatform(f"no adapter is registered for {name!r}")
+    return adapter
+
+
+async def submit_flag_via(adapter: Any, ref: ChallengeRef, flag: Any) -> str:
+    """The single flag-submission policy, shared by EVERY submit entry point.
+
+    Order: irreversible-action gate -> ref-keyed attempt guard -> adapter ->
+    accounting. Extracted so the legacy per-platform tools cannot drift from it
+    again. Measured, before this existed:
+
+    * the ``allow_flag_submission`` gate lived **only** on the CTF2 handler, so
+      ``gcs_submit_flag`` could submit with the gate off -- the one irreversible
+      action against the scoring platform, ungated;
+    * the guard was keyed ``f"{practice_id}/{challenge_id}"``, so a CTF2 key and a
+      GCS key could collide and silently block a legitimate submit;
+    * the denial text hardcoded ``[ctf2_confirm]`` even when GCS triggered it.
+
+    All three are properties of the *policy*, not of a platform, which is why the
+    policy lives here and every entry point calls it.
+    """
     if not _flag_submission_enabled():
         return _submission_disabled_message()
 
-    flag = str(args.get("flag") or "").strip()
-    if not flag:
+    text = str(flag or "").strip()
+    if not text:
         return "[platform] `flag` is required and must be the full flag value."
 
     guard = get_guard()
-    allowed, reason = guard.allow(ref.key, flag)
+    allowed, reason = guard.allow(ref.key, text)
     if not allowed:
         return guard_reason_to_message(ref.key, reason)
 
     try:
-        result = await adapter.submit_flag(ref, flag)
+        result = await adapter.submit_flag(ref, text)
     except Exception as exc:  # noqa: BLE001
         # The platform never judged the flag, so consume no attempt and do not
         # dedup-block a retry of the same flag.
         guard.record_error(ref.key)
         return f"[platform] submitting to {ref.token()} failed: {type(exc).__name__}: {exc}"
 
-    guard.record(ref.key, accepted=result.accepted, flag=flag)
+    guard.record(ref.key, accepted=result.accepted, flag=text)
     verdict = "ACCEPTED" if result.accepted else "not accepted"
     message = f" ({result.message})" if result.message else ""
     return f"[platform] flag {verdict} for {ref.token()}{message}\n" + _format(result.raw)
+
+
+async def _handle_submit(args: dict[str, Any]) -> str:
+    resolved = _resolve(args)
+    if isinstance(resolved, str):
+        return resolved
+    adapter, ref = resolved
+    return await submit_flag_via(adapter, ref, args.get("flag"))
 
 
 async def _handle_submissions(args: dict[str, Any]) -> str:

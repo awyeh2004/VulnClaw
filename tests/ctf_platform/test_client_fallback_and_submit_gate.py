@@ -190,7 +190,11 @@ class TestFlagSubmissionGate:
         platform at all."""
         from vulnclaw.ctf_platform import tools
 
-        monkeypatch.setattr(tools, "_flag_submission_enabled", lambda: False)
+        # The gate moved to the shared submit policy, which every entry point now
+        # calls; patching the old module-local copy would be inert.
+        monkeypatch.setattr(
+            "vulnclaw.platforms.tools._flag_submission_enabled", lambda: False
+        )
 
         called = {"submit": 0}
 
@@ -204,13 +208,15 @@ class TestFlagSubmissionGate:
         out = await tools._handle_submit_flag(
             {"practice_id": "p", "challenge_id": "c", "flag": "flag{nope}"}
         )
-        assert "ctf2_flag_submission_disabled" in out
+        assert "platform_submit_disabled" in out
         assert called["submit"] == 0, "a blocked submission must not hit the API"
 
     async def test_block_message_tells_the_operator_how_to_enable(self, monkeypatch):
         from vulnclaw.ctf_platform import tools
 
-        monkeypatch.setattr(tools, "_flag_submission_enabled", lambda: False)
+        monkeypatch.setattr(
+            "vulnclaw.platforms.tools._flag_submission_enabled", lambda: False
+        )
         out = await tools.dispatch_ctf2_tool(
             "ctf2_submit_flag",
             {"practice_id": "p", "challenge_id": "c", "flag": "flag{x}"},
@@ -223,7 +229,9 @@ class TestFlagSubmissionGate:
         the gate would make the platform unusable rather than safe."""
         from vulnclaw.ctf_platform import tools
 
-        monkeypatch.setattr(tools, "_flag_submission_enabled", lambda: False)
+        monkeypatch.setattr(
+            "vulnclaw.platforms.tools._flag_submission_enabled", lambda: False
+        )
         monkeypatch.setattr(tools, "_guard_config", lambda: _noop())
 
         async def _fake_list(limit=20):
@@ -231,7 +239,7 @@ class TestFlagSubmissionGate:
 
         monkeypatch.setattr(tools._client, "list_practice", _fake_list)
         out = await tools.dispatch_ctf2_tool("ctf2_list_practice", {"limit": 3})
-        assert "ctf2_flag_submission_disabled" not in out
+        assert "platform_submit_disabled" not in out
 
 
 async def _noop():
