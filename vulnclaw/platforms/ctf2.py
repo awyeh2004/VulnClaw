@@ -206,16 +206,21 @@ _CHILD_LIST_KEYS = ("challenges", "challenge_list", "corpus", "children", "list"
 def extract_rows(payload: Any) -> list[dict]:
     """Best-effort extraction of a list of rows from a CTF2 list response.
 
-    The real envelope, confirmed against the live platform, is
-    ``{"data": {"items": [...], "total": int}, "success": bool}``; the other keys
-    are tolerated so a future envelope change degrades to an empty list rather
-    than a crash.
+    Two envelopes exist and both are measured:
+
+    * Open API lists: ``{"data": {"items": [...], "total": n}}``
+    * session-API practice challenge list:
+      ``{"data": {"data": [...], "pagination": {...}}}`` -- the rows are nested
+      one level deeper, so an ``items``-only reader sees nothing.
+
+    Other keys are tolerated so a future envelope change degrades to an empty list
+    rather than a crash.
     """
     data = payload.get("data") if isinstance(payload, Mapping) else payload
     if isinstance(data, list):
         return [row for row in data if isinstance(row, dict)]
     if isinstance(data, Mapping):
-        for key in ("items", "list", "results", "rows"):
+        for key in ("items", "data", "list", "results", "rows"):
             value = data.get(key)
             if isinstance(value, list):
                 return [row for row in value if isinstance(row, dict)]
@@ -357,9 +362,6 @@ class CTF2Adapter:
                     ref=CorpusRef(self.name, KIND_PRACTICE, practice_id),
                     name=_row_name(row) or practice_id,
                     count=count if isinstance(count, int) else (len(children) or None),
-                    note="challenge list is NOT enumerable via the API"
-                    if count
-                    else "",
                 )
             )
 
@@ -409,36 +411,26 @@ class CTF2Adapter:
             ]
 
         if corpus.kind == KIND_PRACTICE:
-            # Verified against the live platform: `GET /api/open/v1/user/practice/
-            # <pid>/challenges/` is 404 route-not-found, and a practice row carries
-            # only `challenge_count` -- no embedded challenge list. So there is no
-            # way to enumerate a practice ground's challenges through the routes
-            # this client implements, and inventing one (or silently returning an
-            # empty list) would be worse than saying so.
-            for row in extract_rows(await self.client.list_practice(limit=50)):
-                if _row_id(row) != corpus.id:
-                    continue
-                children = _embedded_children(row)
-                if children:
-                    return [
-                        Challenge(
-                            ref=ChallengeRef(
-                                self.name, KIND_PRACTICE, corpus.id, _row_id(child)
-                            ),
-                            name=_row_name(child) or _row_id(child),
-                            raw=child,
-                        )
-                        for child in children
-                        if _row_id(child)
-                    ]
-                break
-            raise CTF2Error(
-                f"CTF2 exposes no route to list the challenges of practice "
-                f"{corpus.id}: '/practice/<pid>/challenges/' returns 404 and the "
-                f"practice payload carries only a challenge_count. Pass the two ids "
-                f"directly (vulnclaw ctf2 <challenge_id> <practice_id>, or a "
-                f"ctf2:practice:<pid>:<cid> ref)."
-            )
+            # The Open API has no challenge-list route for a practice ground
+            # (`/api/open/v1/user/practice/<pid>/challenges/` is a hard 404), so
+            # this goes through the session API, which does have it. Until that
+            # was found, a practice ground's challenges were simply not
+            # enumerable -- which is why `platform_list` used to say so.
+            payload = await self.client.list_practice_challenges(corpus.id)
+            return [
+                Challenge(
+                    ref=ChallengeRef(self.name, KIND_PRACTICE, corpus.id, _row_id(row)),
+                    name=_row_name(row) or _row_id(row),
+                    category=str(row.get("category") or ""),
+                    difficulty=str(row.get("difficulty") or ""),
+                    score=str(row.get("points")) if row.get("points") is not None else "",
+                    solved=bool(row.get("is_solved")),
+                    needs_env=bool(row.get("has_container")),
+                    raw=row,
+                )
+                for row in extract_rows(payload)
+                if _row_id(row)
+            ]
 
         raise CTF2Error(f"cannot list challenges for CTF2 corpus kind {corpus.kind!r}")
 
