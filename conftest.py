@@ -18,6 +18,31 @@ os.environ["TMP"] = str(TEST_ROOT)
 tempfile.tempdir = str(TEST_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def _restore_global_translator():
+    """Undo any global i18n change a test made, whatever it was.
+
+    ``vulnclaw.i18n`` keeps a process-wide ``_translator``, and tests across the
+    suite pin the language by calling ``init_i18n`` (170+ call sites). Several
+    never restore it, so the active language leaked into unrelated tests: the
+    full suite failed *non-deterministically* -- a different handful of
+    language-sensitive tests (KB language gate, report headings, agent graph)
+    broke on each run depending on which test ran last.
+
+    Snapshotting and restoring the actual translator object (rather than a
+    language code) preserves any other state a test configured and needs no
+    cooperation from the test itself. Tests that already restore language in a
+    ``finally`` are unaffected: this simply runs after them.
+    """
+    from vulnclaw import i18n as _i18n
+
+    previous = getattr(_i18n, "_translator", None)
+    try:
+        yield
+    finally:
+        _i18n._translator = previous
+
+
 @pytest.fixture
 def tmp_path() -> Path:
     """Project-local writable tmp_path replacement for this workspace."""
