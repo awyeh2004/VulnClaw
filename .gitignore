@@ -122,19 +122,22 @@ tui/target/
 
 # IR 演练靶机（本地教学脚手架，含故意的"后门"痕迹样本与"答案卡"，不应入库）
 #
-# 注意：整个 demo/ 都要忽略，不只是 drill 子目录。
-#
 # drill 的 setup 脚本 / README / ANSWER-KEY 本身就是答案：agent 若从工作目录
 # 读到它们会直接抄答案而不做取证（实测发生过 —— shell_command 的 cwd 是仓库根，
 # agent 的 `ls` 就会撞上这些文件）。
 #
-# 因此演练现已整体移出仓库，放在 D:\ir-drill\（见 demo/README.md）。
-# 这里保留 demo/ 是为了防止将来有人又把演练脚手架放回仓库。
+# 因此演练现已整体移出仓库，放在 D:\ir-drill\（见 /demo/README.md）。
+# 这里保留忽略规则，是为了防止将来有人又把演练脚手架放回 demo/ 下。
 #
-# 同一条教训在靶机内部也成立：setup 脚本拷进容器 /tmp 后忘记删除，
-# `docker commit` 会把它们烘进镜像，agent 一条 `ls -al /tmp` 就能读到答案。
-# setup.ps1 已用 finally 删除脚本 + commit 前后双重校验 /tmp。
-demo/
+# 注意两点（审计 round-4）：
+#   1) 必须**根锚定**：写 `/demo/*` 而不是 `demo/`。后者会连任意深度的
+#      `xxx/demo/` 一起忽略（将来某个 skill 自带的 demo 目录会被静默吞掉）。
+#   2) 不能用 `demo/` 忽略整个目录 —— demo/README.md 是指向 D:\ir-drill\ 的
+#      说明，被忽略后这条注释就成了死指针；demo/unsafe-ai-sample.ts 更是
+#      tests/cli/test_task_service_codescan.py 依赖的样例，必须保留。
+/demo/*
+!/demo/README.md
+!/demo/unsafe-ai-sample.ts
 
 
 # TSecBench 跑分本地产物 (审计 B1: 含 token/会话 cookie/内网 IP, 严禁入库)
