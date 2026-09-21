@@ -57,7 +57,6 @@ from vulnclaw.platforms.normalize import (
     transport_from_url,
 )
 from vulnclaw.platforms.refs import ChallengeRef, CorpusRef, RefError, parse_fields
-from vulnclaw.platforms.render import TOOL_READ_ENV, TOOL_START_ENV
 
 KIND_EXERCISE = "exercise"
 KIND_CATEGORY = "category"
@@ -259,11 +258,23 @@ def normalize_exercise_env(payload: Any, ref: ChallengeRef) -> EnvInfo:
 
     guidance: list[str] = []
     if state == base.STATE_RUNNING:
-        guidance.append(
-            "platform note: GCS does not report a transport flag, so the transport "
-            "is unknown here -- try plain TCP first; if the handshake succeeds but "
-            "the service never responds, try TLS."
-        )
+        # Only the endpoints whose transport is genuinely unknown get the note.
+        # extract_endpoints now derives the transport from the URL scheme
+        # (http:// = plain, https:// = TLS), and the renderer already prints each
+        # endpoint's transport plus the TLS-wrapping procedure. Emitting the old
+        # "transport is unknown, try plain TCP first" note unconditionally put the
+        # two statements in direct opposition on an https endpoint -- on exactly
+        # the side this note was rewritten to stop misleading.
+        unknown = [ep for ep in endpoints if ep.transport == base.TRANSPORT_UNKNOWN]
+        if unknown:
+            guidance.append(
+                "platform note: GCS published no transport flag for "
+                + ", ".join(ep.display() for ep in unknown)
+                + " (a bare host:port), so the transport is unknown there -- try plain "
+                "TCP first; if the handshake succeeds but the service never responds, "
+                "try TLS. Endpoints published as an http:// or https:// URL already "
+                "state their transport."
+            )
     elif state == base.STATE_NOT_REQUIRED:
         guidance.append(
             "platform note: GCS reports isNeedInit=false, so this challenge needs no "
@@ -529,14 +540,16 @@ class GCSAdapter:
             return info
         # build-exercise-env is asynchronous by design: the acknowledgement is not
         # the target. Poll instead of treating a partial payload as usable.
+        #
+        # No guidance tuple: `_render_incomplete` (the renderer's STATE_STARTING
+        # branch) already says "poll platform_read_env in ~10s until status=running"
+        # and that the connection details are absent. Supplying a second,
+        # near-identical sentence here is the same duplication that was removed from
+        # the STATE_NONE path; `raw` is still carried.
         return EnvInfo(
             ref=ref,
             state=base.STATE_STARTING,
             complete=False,
-            guidance=(
-                f"the environment is being created; poll {TOOL_READ_ENV} until "
-                f"isNeedCheck is false and endpoints are published.",
-            ),
             raw=info.raw,
         )
 
