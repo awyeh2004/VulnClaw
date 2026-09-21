@@ -167,6 +167,33 @@ async def read_challenge(practice_id: str, challenge_id: str) -> dict:
     )
 
 
+async def list_practice_challenges(
+    practice_id: str, page: int = 1, page_size: int = 100
+) -> dict:
+    """List a practice ground's challenges.
+
+    Session API only, and that asymmetry is measured, not assumed: the Open API
+    route is a hard 404
+    (``/api/open/v1/user/practice/<pid>/challenges/`` -> ``{"code": "NOT_FOUND",
+    "key": "errors.common.not_found", "params": {"resource": "route"}}``), while
+    ``/api/v1/practice/<pid>/challenges/`` returns 200 with
+
+        {"data": {"data": [<challenge rows>], "pagination": {...},
+                  "categories": [...], "knowledge_facets": ...}, "success": true}
+
+    Note the nesting: the rows live in ``data.data``, not ``data.items`` like the
+    Open API lists. Without this, a practice ground's challenges cannot be
+    enumerated at all -- there is no Open API equivalent to fall back on.
+    """
+    client = get_client(timeout=60.0)
+    return await _session_request(
+        client,
+        "GET",
+        f"/practice/{practice_id}/challenges/",
+        params={"page": page, "page_size": page_size},
+    )
+
+
 async def start_environment(practice_id: str, challenge_id: str) -> dict:
     """Start (or reuse) a practice environment, returning its connection info.
 
