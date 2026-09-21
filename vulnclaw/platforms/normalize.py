@@ -116,6 +116,25 @@ def normalize_transport(value: Any) -> str:
     return TRANSPORT_UNKNOWN
 
 
+def transport_from_url(url: Any) -> str:
+    """Derive the transport from a URL's scheme, or ``unknown`` without one.
+
+    A scheme is trustworthy transport evidence: ``http://`` really is plain and
+    ``https://`` really is TLS. It is only a FALLBACK though -- when a platform
+    publishes an explicit flag that flag wins, because CTF2 can report
+    ``access_type: "tcp"`` alongside ``nc_ssl: true`` (the measured trap).
+
+    Measured motivation: CTF2's HTTP targets publish ``http://host:80`` with no
+    ``nc_ssl``, so the transport came out ``unknown`` and every poll told the
+    caller "transport not reported -- try plain TCP first; if ... try TLS" for an
+    endpoint that plainly was plain HTTP.
+    """
+    text = str(url or "").strip()
+    if "://" not in text:
+        return TRANSPORT_UNKNOWN
+    return normalize_transport(text.split("://", 1)[0])
+
+
 # ── environment state ─────────────────────────────────────────────────────
 
 _STARTING_ALIASES = {

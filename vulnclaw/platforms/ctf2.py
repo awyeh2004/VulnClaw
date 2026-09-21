@@ -58,6 +58,7 @@ from vulnclaw.platforms.normalize import (
     normalize_status,
     normalize_transport,
     split_host_port,
+    transport_from_url,
 )
 from vulnclaw.platforms.refs import ChallengeRef, CorpusRef, RefError, parse_fields
 from vulnclaw.platforms.render import TOOL_READ_ENV, TOOL_START_ENV
@@ -78,6 +79,21 @@ IGNORED_TRANSPORT_FIELD = "access_type"
 
 
 # ── target payload normalization ──────────────────────────────────────────
+
+
+def _resolve_transport(marker: Any, url: str) -> str:
+    """An explicit flag first, then the URL scheme, then ``unknown``.
+
+    Order is the measured lesson, not a preference: a real CTF2 payload carries
+    ``access_type: "tcp"`` *and* ``nc_ssl: true``, so whenever a flag is present it
+    decides. The scheme is only a fallback -- sound (``http://`` is plain) and it
+    stops the renderer from hedging about an endpoint the platform published as an
+    http URL.
+    """
+    explicit = normalize_transport(marker)
+    if explicit != base.TRANSPORT_UNKNOWN:
+        return explicit
+    return transport_from_url(url)
 
 
 def extract_endpoints(data: Mapping[str, Any]) -> tuple[EnvEndpoint, ...]:
@@ -107,7 +123,7 @@ def extract_endpoints(data: Mapping[str, Any]) -> tuple[EnvEndpoint, ...]:
                     host=host,
                     port=port,
                     url=url,
-                    transport=normalize_transport(marker),
+                    transport=_resolve_transport(marker, url),
                     user=str(entry.get("user") or ""),
                     note=str(entry.get("type") or ""),
                 )
@@ -122,7 +138,7 @@ def extract_endpoints(data: Mapping[str, Any]) -> tuple[EnvEndpoint, ...]:
                     host=host,
                     port=port,
                     url=url,
-                    transport=normalize_transport(top_level),
+                    transport=_resolve_transport(top_level, url),
                     note=str(data.get("access_type") or ""),
                 )
             )
