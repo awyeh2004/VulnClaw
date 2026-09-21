@@ -2140,8 +2140,13 @@ def competition(
     mode: str = typer.Argument(
         ..., help="Action: latency (probe LLM delay) | plan (easy-first order) | solve <eid>"
     ),
-    exercise_id: int = typer.Argument(
-        None, help="Challenge id for 'solve' mode (optional)"
+    ref: str = typer.Argument(
+        None,
+        help=(
+            "Challenge ref for 'solve' mode, e.g. ctf2:practice:<pid>:<cid> or "
+            "gcs:exercise:<id>. A bare numeric id is read as gcs:exercise:<id> "
+            "(the old form)."
+        ),
     ),
 ) -> None:
     """Competition-mode strategy helpers (西湖论剑/DASCTF).
@@ -2171,10 +2176,13 @@ def competition(
         _competition_download(cfg)
         return
     if mode == "solve":
-        if exercise_id is None:
-            err_console.print("[!] 'competition solve' requires an exercise_id argument.")
+        if not ref:
+            err_console.print(
+                "[!] 'competition solve' requires a challenge ref, e.g. "
+                "ctf2:practice:<practice_id>:<challenge_id>"
+            )
             raise typer.Exit(1)
-        _competition_solve(cfg, exercise_id)
+        _competition_solve(cfg, str(ref))
         return
     err_console.print(
         f"[!] unknown competition mode: {mode} (use: latency | plan | download | solve <eid>)"
@@ -2421,18 +2429,87 @@ def _competition_download(cfg: Any) -> None:
         )
 
 
-def _competition_solve(cfg: Any, exercise_id: int) -> None:
-    """Run a challenge with competition strategy (fail-fast stall detection)."""
+def _competition_solve(cfg: Any, ref: str) -> None:
+    """Run one challenge with competition strategy, addressed by platform ref.
+
+    Previously hardcoded to the GCS command with a numeric exercise id, which made
+    'competition solve' the one CLI path that only worked for a single platform.
+    The platform now comes from the ref (``ctf2:practice:<pid>:<cid>`` /
+    ``gcs:exercise:<eid>``), so any configured platform can be driven this way --
+    and the goal it hands the agent points at the same neutral ``platform_*`` tools
+    every other entry point uses.
+    """
+    import asyncio
+
+    from vulnclaw.platforms import registry
+    from vulnclaw.platforms.bootstrap import ensure_adapters
+    from vulnclaw.platforms.refs import split_token
+
+    token = str(ref).strip()
+    if token.isdigit():
+        # Backward compatibility with the old `competition solve <exercise_id>`.
+        token = f"gcs:exercise:{token}"
+
+    ensure_adapters()
+    try:
+        adapter = registry.adapter_for(token)
+        challenge_ref = adapter.parse_ref(split_token(token)[1])
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[!] cannot use ref {token!r}: {exc}")
+        raise typer.Exit(1)
+
+    try:
+        challenge = asyncio.run(adapter.read_challenge(challenge_ref))
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[!] failed to read {token}: {type(exc).__name__}: {exc}")
+        raise typer.Exit(1)
+
     comp = cfg.competition
     stall = int(getattr(comp, "stall_turns", 8))
     console.print(
-        f"[*] Competition solve: exercise {exercise_id} "
-        f"(stall-abort after {stall} unproductive turns)"
+        f"[*] Competition solve: {challenge.name} ({token}) | "
+        f"stall guard after {stall} unproductive turns"
     )
-    # Delegate to the GCS solve path, which manages env lifecycle + submit.
-    gcs(
-        exercise_id=exercise_id,
+    goal = (
+        f"Solve {challenge.name} (category {challenge.category or 'unknown'}, "
+        f"difficulty {challenge.difficulty or 'unknown'}).\n"
+        f"Its ref is {token} -- pass that exact string as `ref` to the platform_* "
+        f"tools; the platform is taken from the ref.\n"
+        f"Achieve the flag, then submit it with "
+        f"platform_submit(ref=\"{token}\", flag=...). "
+        + (
+            f"This challenge needs a running environment: start it with "
+            f"platform_start_env(ref=\"{token}\"), then poll platform_read_env until "
+            f"it reports the target as usable, and release it with "
+            f"platform_stop_env(ref=\"{token}\") when done. "
+            if challenge.needs_env
+            else "This challenge needs no running environment. "
+        )
+        + f"Challenge description follows:\n{challenge.description}"
+    )
+    # Every optional flag is passed explicitly: solve() is a Typer command, so a
+    # direct Python call leaves un-passed parameters as truthy OptionInfo sentinels.
+    solve(
+        target=token,
+        goal=goal,
         max_steps=max(60, stall * 4),
+        resume=False,
+        prompt=None,
+        max_directions=3,
+        max_tool_rounds=6,
+        snapshot=None,
+        run_name=None,
+        resume_run=None,
+        runs_dir=None,
+        additional_targets=None,
+        target_type=None,
+        mount=False,
+        repair=False,
+        force_fresh=False,
+        no_import=False,
+        stream=False,
+        writeup_dir=None,
+        model="auto",
     )
 
 
