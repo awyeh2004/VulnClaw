@@ -118,3 +118,56 @@ def test_proxy_restarts_on_new_upstream():
     finally:
         server1.shutdown()
         server2.shutdown()
+
+
+def test_proxy_error_body_does_not_leak_the_gateway_token(monkeypatch):
+    """A 502 is echoed to the SDK, so it must not carry the token-bearing URL.
+
+    httpx puts the request URL into most exception messages, and the real
+    upstream is ``https://llm-gateway.dasctf.com/llm-gateway/proxy/e/<token>``.
+    """
+    from vulnclaw.gcs_platform import gateway_proxy as gp
+
+    token = "SUPERSECRETTOKEN123456"
+    upstream = f"https://llm-gateway.dasctf.com/llm-gateway/proxy/e/{token}"
+    gp._GatewayProxyHandler.upstream = upstream
+    gp._GatewayProxyHandler.api_key = "sk-secret-key-1234"
+
+    try:
+
+        def _boom(*args, **kwargs):
+            raise httpx.ConnectError(
+                f"failed while requesting {upstream} with key sk-secret-key-1234"
+            )
+
+        monkeypatch.setattr(httpx, "Client", lambda **kwargs: _BoomClient(_boom))
+        base = gp.ensure_gateway_proxy_running(upstream=upstream, api_key="sk-secret-key-1234")
+        resp = httpx.post(
+            f"{base}/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={"model": "m", "messages": []},
+            timeout=10,
+        )
+        assert resp.status_code == 502
+        body = resp.text
+        assert token not in body
+        assert "sk-secret-key-1234" not in body
+        assert "<token>" in body or "<upstream>" in body
+    finally:
+        gp.shutdown_gateway_proxy()
+
+
+class _BoomClient:
+    """Minimal stand-in for httpx.Client whose request always raises."""
+
+    def __init__(self, boom):
+        self._boom = boom
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def request(self, *args, **kwargs):
+        return self._boom()
