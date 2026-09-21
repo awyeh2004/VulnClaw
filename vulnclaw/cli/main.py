@@ -145,18 +145,34 @@ def _resolve_team_meta_from_gcs() -> tuple[str, str]:
     import asyncio
 
     try:
-        from vulnclaw.gcs_platform import client as gcs
+        from vulnclaw.platforms import registry
+        from vulnclaw.platforms.bootstrap import ensure_adapters
+
+        ensure_adapters()
 
         async def _fetch() -> tuple[str, str]:
-            overview = await gcs.overview()
-            rank = str(overview.get("stageRank") or "")
-            solved = 0
-            tree = await gcs.exercise_list()
-            for category in tree or []:
-                for item in category.get("corpus", []):
-                    if item.get("hasSolved"):
-                        solved += 1
-            return rank, str(solved)
+            # Through the adapter layer: any configured platform that exposes a
+            # scoreboard can answer, and the CTF2-only/legacy naming no longer
+            # decides who is asked.
+            for adapter in registry.configured_adapters().values():
+                try:
+                    overview = await adapter.overview()
+                except Exception:
+                    continue
+                rank = str(overview.get("stageRank") or "")
+                solved = 0
+                try:
+                    for corpus in await adapter.list_corpora():
+                        try:
+                            challenges = await adapter.list_challenges(corpus.ref)
+                        except Exception:
+                            continue
+                        solved += sum(1 for c in challenges if c.solved)
+                except Exception:
+                    pass
+                if rank or solved:
+                    return rank, str(solved)
+            return "", ""
 
         return asyncio.run(_fetch())
     except Exception:
@@ -199,8 +215,11 @@ def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Opt
     solved_count = os.environ.get("VULNCLAW_TEAM_SOLVED", "").strip()
     # When the rank / solved-count env vars are unset, try to fetch them from
     # the competition API so the writeup header is populated automatically:
-    # rank = overview.stageRank (overall), solved_count = number of hasSolved.
-    if (not rank or not solved_count) and gcs_is_configured():
+    # rank = overview.stageRank (overall), solved_count = number of solved.
+    # Not gated on "GCS configured" any more -- that gate made a missing legacy
+    # platform look identical to "no team meta was asked for". The resolver owns
+    # the decision and now considers every configured platform.
+    if not rank or not solved_count:
         try:
             auto_rank, auto_solved = _resolve_team_meta_from_gcs()
             if not rank:
@@ -2124,6 +2143,71 @@ def _competition_latency(cfg: Any, probe) -> None:
         )
 
 
+def _platform_challenges() -> list[tuple[str, Any]]:
+    """Every challenge the configured platforms expose, as ``(ref token, Challenge)``.
+
+    Goes through the adapter registry rather than a platform client, so:
+
+    * a platform that is not configured contributes nothing instead of raising;
+    * a platform that errors contributes a readable note instead of taking the
+      whole listing down;
+    * supporting another platform needs no change here at all.
+
+    This replaced a hardcoded GCS call. The old code silently fell back to "local
+    attachments" whenever GCS was missing or unreachable, which made an
+    unconfigured platform indistinguishable from an empty challenge list.
+    """
+    import asyncio
+
+    from vulnclaw.platforms import registry
+    from vulnclaw.platforms.bootstrap import ensure_adapters
+
+    ensure_adapters()
+    adapters = registry.configured_adapters()
+    if not adapters:
+        console.print(
+            "[*] No platform is configured; skipping the platform listing. "
+            "Set a platform credential (e.g. VULNCLAW_CTF2_API_KEY) to use it."
+        )
+        return []
+
+    collected: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for adapter in adapters.values():
+
+        async def _list(adapter: Any = adapter) -> list[tuple[str, Any]]:
+            rows: list[tuple[str, Any]] = []
+            for corpus in await adapter.list_corpora():
+                try:
+                    challenges = await adapter.list_challenges(corpus.ref)
+                except Exception:
+                    # An aggregate corpus (GCS's whole-tree entry) or an
+                    # unsupported collection: skip it, the others still work.
+                    continue
+                rows += [(challenge.ref.token(), challenge) for challenge in challenges]
+            return rows
+
+        try:
+            rows = asyncio.run(_list())
+        except Exception as exc:
+            console.print(f"[*] {adapter.name}: listing failed ({type(exc).__name__}); skipping")
+            continue
+        for token, challenge in rows:
+            if token in seen:
+                continue
+            seen.add(token)
+            collected.append((token, challenge))
+    return collected
+
+
+def _challenge_sort_key(row: tuple[str, Any]) -> float:
+    """Easy/high-score first. Unparseable scores sort last, never crash the sort."""
+    try:
+        return float(row[1].score or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _competition_plan(cfg: Any) -> None:
     """Print easy-first challenge ordering (platform or local)."""
     import glob
@@ -2133,26 +2217,20 @@ def _competition_plan(cfg: Any) -> None:
     if getattr(comp, "easy_first", True):
         console.print("[*] Competition plan: easy-first ordering enabled.")
 
-    # Try to list challenges from the platform; fall back to local attachments.
-    try:
-        from vulnclaw.gcs_platform.client import exercise_list, is_configured as gcs_ok
-
-        if gcs_ok():
-            import asyncio
-
-            data = asyncio.run(exercise_list())
-            items = (data.get("data") or data or {}).get("list") or []
-            if items:
-                console.print(f"[*] {len(items)} challenges from platform:")
-                for it in sorted(items, key=lambda x: float(x.get("score") or 0), reverse=True):
-                    console.print(
-                        f"    {it.get('id')}: {it.get('name')} | score={it.get('score')} "
-                        f"| diff={it.get('difficulty')}"
-                    )
-                return
-            console.print("[*] Platform reachable but no list returned; falling back to local.")
-    except Exception as exc:
-        console.print(f"[*] Platform list unavailable ({type(exc).__name__}); using local attachments.")
+    challenges = _platform_challenges()
+    if challenges:
+        console.print(f"[*] {len(challenges)} challenges from the configured platform(s):")
+        ordered = sorted(challenges, key=_challenge_sort_key, reverse=True)
+        if getattr(comp, "easy_first", True):
+            ordered.sort(key=lambda row: str(row[1].difficulty).lower() != "easy")
+        for token, challenge in ordered:
+            console.print(
+                f"    {token}\n        {challenge.name} | score={challenge.score or '-'} "
+                f"| diff={challenge.difficulty or '-'}"
+                f"{' | SOLVED' if challenge.solved else ''}"
+            )
+        return
+    console.print("[*] No platform challenges available; using local attachments.")
 
     # Local fallback: list attachments under the work dir.
     work = os.environ.get("VULNCLAW_WORK_DIR", os.path.expandvars(r"%USERPROFILE%\vulnclaw\work"))
@@ -2168,104 +2246,109 @@ def _competition_plan(cfg: Any) -> None:
 
 
 def _competition_download(cfg: Any) -> None:
-    """Batch-download all challenge attachments at match start (insurance).
+    """Batch-download every configured platform's challenge attachments.
 
-    Only runs when the GCS platform is reachable. Field names for the download
-    link are matched defensively (several candidates) so a platform schema
-    change degrades to a warning, not a crash.
+    Attachment discovery now goes through the adapter layer's normalized
+    ``Challenge.attachments`` instead of a local field-name guessing loop
+    (``attachmentUrl`` / ``fileUrl`` / nested ``file.url`` / ...). Two things this
+    fixes:
+
+    * a platform whose payload nests attachment metadata (CTF2 puts the filename
+      and size under ``files[].file``) is no longer read as "no download link";
+    * a challenge that genuinely publishes nothing says so, instead of the same
+      warning meaning both "none published" and "we failed to parse it".
+
+    Note the old version also could not be reused for CTF2 at all, because it was
+    written against one platform's shapes.
     """
     import asyncio
     import os
-    from urllib.parse import unquote
 
-    try:
-        from vulnclaw.gcs_platform import client as gcs
-    except Exception as exc:
-        err_console.print(f"[!] gcs_platform import failed: {exc}")
-        raise typer.Exit(1)
+    from vulnclaw.platforms import registry
+    from vulnclaw.platforms.bootstrap import ensure_adapters
 
-    if not gcs.is_configured():
+    ensure_adapters()
+    rows = _platform_challenges()
+    if not rows:
         err_console.print(
-            "[!] GCS access key not configured; cannot download attachments. "
-            "Set VULNCLAW_GCS_ACCESS_KEY / config gcs.access_key and retry."
+            "[!] No configured platform returned challenges, so there is nothing to "
+            "download. Configure a platform credential (e.g. VULNCLAW_CTF2_API_KEY) "
+            "and retry."
         )
         raise typer.Exit(1)
 
     work = os.environ.get("VULNCLAW_WORK_DIR", os.path.expandvars(r"%USERPROFILE%\vulnclaw\work"))
     attach_dir = os.path.join(work, "attachments")
     os.makedirs(attach_dir, exist_ok=True)
-
-    # 1. List all challenges
-    try:
-        payload = asyncio.run(gcs.exercise_list())
-    except Exception as exc:
-        err_console.print(f"[!] exercise_list failed (platform may be closed): {exc}")
-        raise typer.Exit(1)
-    data = payload.get("data") if isinstance(payload, dict) else payload
-    items = data if isinstance(data, list) else (data or {}).get("list") or []
-    if not items:
-        err_console.print("[!] No challenges returned by platform.")
-        raise typer.Exit(1)
-
-    console.print(f"[*] Downloading attachments for {len(items)} challenges -> {attach_dir}")
+    console.print(f"[*] Downloading attachments for {len(rows)} challenges -> {attach_dir}")
 
     import httpx
 
-    def _candidate_link(obj: dict) -> str:
-        """Try several plausible attachment-url field names."""
-        for key in ("attachmentUrl", "fileUrl", "downloadUrl", "attachUrl", "attachment", "file"):
-            v = obj.get(key)
-            if isinstance(v, str) and v.startswith(("http", "/")):
-                return v
-        # nested: {"attachment": {"url": ...}} or {"file": {"download_url": ...}}
-        for key in ("attachment", "file"):
-            v = obj.get(key)
-            if isinstance(v, dict):
-                for k2 in ("url", "download_url", "downloadUrl", "path"):
-                    u = v.get(k2)
-                    if isinstance(u, str) and u:
-                        return u
-        return ""
+    def _safe_name(text: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(text))
+        return cleaned.strip("._") or "attachment"
 
     ok = 0
     fail = 0
     with httpx.Client(timeout=60, verify=False) as client:
-        for item in items:
-            eid = item.get("id") or item.get("exerciseId")
-            name = str(item.get("name") or eid or "unknown")
-            if eid is None:
-                continue
+        for token, listed in rows:
             try:
-                detail = asyncio.run(gcs.exercise(int(eid)))
-                d = detail.get("data") if isinstance(detail, dict) else detail
-                d = d if isinstance(d, dict) else {}
-                link = _candidate_link(d)
-                if not link:
-                    # maybe attachment lives under corpus/children
-                    for child in (d.get("corpus") or []) if isinstance(d.get("corpus"), list) else []:
-                        link = _candidate_link(child) if isinstance(child, dict) else ""
-                        if link:
-                            break
-                if not link:
-                    fail += 1
-                    console.print(f"    [skip] {name}: no download link in payload")
-                    continue
-                if link.startswith("/"):
-                    link = f"{gcs.api_base_url()}{link}"
-                local = os.path.join(attach_dir, f"{eid}_{name}.zip")
-                with client.stream("GET", link, follow_redirects=True) as resp:
-                    if resp.status_code != 200:
-                        fail += 1
-                        console.print(f"    [fail] {name}: HTTP {resp.status_code}")
-                        continue
-                    with open(local, "wb") as fh:
-                        for chunk in resp.iter_bytes(8192):
-                            fh.write(chunk)
-                ok += 1
-                console.print(f"    [ok]   {name} -> {os.path.basename(local)}")
+                adapter = registry.adapter_for(token)
+                challenge = asyncio.run(adapter.read_challenge(listed.ref))
             except Exception as exc:
                 fail += 1
-                console.print(f"    [fail] {name}: {type(exc).__name__}: {str(exc)[:100]}")
+                console.print(
+                    f"    [fail] {listed.name}: {type(exc).__name__}: {str(exc)[:100]}"
+                )
+                continue
+            if not challenge.attachments:
+                console.print(f"    [skip] {challenge.name}: no attachments published")
+                continue
+            for attachment in challenge.attachments:
+                label = f"{challenge.name}/{attachment.name}"
+                url = attachment.url
+                if not url:
+                    fail += 1
+                    console.print(f"    [fail] {label}: attachment has no URL")
+                    continue
+                if url.startswith("/"):
+                    base = getattr(adapter, "base_url", None)
+                    base = base() if callable(base) else ""
+                    if not base:
+                        fail += 1
+                        console.print(
+                            f"    [fail] {label}: relative URL {url!r} and the "
+                            f"platform exposes no base URL"
+                        )
+                        continue
+                    url = f"{base.rstrip('/')}{url}"
+                local = os.path.join(
+                    attach_dir, f"{_safe_name(challenge.name)}_{_safe_name(attachment.name)}"
+                )
+                try:
+                    written = 0
+                    with client.stream("GET", url, follow_redirects=True) as resp:
+                        if resp.status_code != 200:
+                            fail += 1
+                            console.print(f"    [fail] {label}: HTTP {resp.status_code}")
+                            continue
+                        with open(local, "wb") as fh:
+                            for chunk in resp.iter_bytes(8192):
+                                fh.write(chunk)
+                                written += len(chunk)
+                except Exception as exc:
+                    fail += 1
+                    console.print(f"    [fail] {label}: {type(exc).__name__}: {str(exc)[:100]}")
+                    continue
+                # Verify what the platform told us, when it told us anything.
+                # CTF2 publishes no md5 (verified), so size is the available check.
+                if attachment.size is not None and written != attachment.size:
+                    console.print(
+                        f"    [warn] {label}: size mismatch (declared {attachment.size}, "
+                        f"got {written}) -- the local copy may be truncated"
+                    )
+                ok += 1
+                console.print(f"    [ok]   {label} -> {os.path.basename(local)}")
     console.print(f"\n[*] Download complete: {ok} ok, {fail} failed/skipped.")
     if fail:
         console.print(
