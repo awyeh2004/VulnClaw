@@ -37,28 +37,35 @@ GCS_READ_TOOLS: set[str] = {
 
 
 def gcs_tools_enabled() -> bool:
-    """Whether the GCS platform tools should be exposed to the agent.
+    """Whether the LEGACY ``gcs_*`` tool names should be exposed to the agent.
 
-    OFF by default. The GCS integration is legacy (one online qualifier the team
-    did not advance from) and an agent solving a challenge on a DIFFERENT platform
+    OFF by default. The GCS integration is legacy (one online qualifier the team did
+    not advance from) and an agent solving a challenge on a DIFFERENT platform
     reached for ``gcs_submit_flag`` first -- purely because the name contains
     "submit_flag" -- without ever establishing which platform the challenge was on.
-
     Gating the schema is what actually removes the temptation: a tool the model
-    cannot see is a tool it cannot call. Prompt-level instructions would only
-    discourage it.
+    cannot see is a tool it cannot call.
 
-    Enable with ``gcs.tools_enabled: true`` or
-    ``VULNCLAW_GCS__TOOLS_ENABLED=true``. On any config error this stays False --
-    not being able to read the setting is not a reason to expose a tool face that
-    performs irreversible actions against the wrong platform.
+    There is now ONE switch for "the legacy per-platform names"
+    (``competition.expose_legacy_tool_names``, which also governs ``ctf2_*``):
+    two knobs that mean the same thing is how one of them ends up contradicting the
+    other. ``gcs.tools_enabled`` is still honoured so an existing config keeps
+    working, and is deprecated in favour of the newer field.
+
+    Fails CLOSED on a config error: not being able to read the setting is not a
+    reason to expose a tool face that performs irreversible actions.
     """
     try:
         from vulnclaw.config.settings import load_config
 
-        return bool(getattr(load_config().gcs, "tools_enabled", False))
+        config = load_config()
     except Exception:
         return False
+    unified = bool(
+        getattr(getattr(config, "competition", None), "expose_legacy_tool_names", False)
+    )
+    legacy = bool(getattr(getattr(config, "gcs", None), "tools_enabled", False))
+    return unified or legacy
 
 
 def gcs_tool_schemas() -> list[dict[str, Any]]:
