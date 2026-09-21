@@ -5,20 +5,42 @@ from vulnclaw.gcs_platform import (
     GCS_TOOL_NAMES,
     api_base_url,
     dispatch_gcs_tool,
-    gcs_tool_schemas,
 )
+# NOTE: gcs_tool_schemas is reached through the module
+# (`gcs_tools.gcs_tool_schemas()`) rather than imported directly, so the autouse
+# fixture below can stub the gate it consults. A `from ... import gcs_tool_schemas`
+# would bind the function object itself and bypass monkeypatching.
 from vulnclaw.gcs_platform import tools as gcs_tools
 from vulnclaw.gcs_platform import client as gcs_client
 from vulnclaw.gcs_platform.client import GCSError, _unwrap
 
+# Captured before any fixture stubs it, so gate tests can assert the REAL default.
+_REAL_GCS_TOOLS_ENABLED = gcs_tools.gcs_tools_enabled
+
+
+@pytest.fixture(autouse=True)
+def _enable_gcs_tools(monkeypatch):
+    """Opt the GCS tool face IN for this module.
+
+    The tool face is OFF by default (``gcs.tools_enabled``) because an agent
+    solving a challenge on another platform reached for ``gcs_submit_flag``
+    first -- it never established which platform the challenge belonged to.
+
+    These tests cover the GCS tool *implementation*, which is still present and
+    still used by the ``vulnclaw gcs`` command, so they enable the face
+    explicitly rather than being deleted. The default-off behaviour is asserted
+    separately in :class:`TestToolFaceGate`.
+    """
+    monkeypatch.setattr(gcs_tools, "gcs_tools_enabled", lambda: True)
+
 
 def test_schemas_expose_submit_flag_and_env_lifecycle():
-    names = {s["function"]["name"] for s in gcs_tool_schemas()}
+    names = {s["function"]["name"] for s in gcs_tools.gcs_tool_schemas()}
     assert {"gcs_submit_flag", "gcs_build_env", "gcs_recover_env"} <= names
 
 
 def test_tool_names_match_schemas():
-    schema_names = {s["function"]["name"] for s in gcs_tool_schemas()}
+    schema_names = {s["function"]["name"] for s in gcs_tools.gcs_tool_schemas()}
     assert schema_names == set(GCS_TOOL_NAMES)
 
 
