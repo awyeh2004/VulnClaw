@@ -196,20 +196,53 @@ def container_name(binary_path: str) -> str:
 
 # Container resource caps: a challenge binary is untrusted code, and socat's
 # `fork` mode turns a fork bomb into a host-wide resource exhaustion. Override
-# with VULNCLAW_PWN_MEMORY / VULNCLAW_PWN_CPUS / VULNCLAW_PWN_PIDS.
+# with VULNCLAW_PWN_MEMORY / VULNCLAW_PWN_CPUS / VULNCLAW_PWN_PIDS (values are
+# validated — 0/-1 mean "unlimited" to docker and fall back to the default).
+#
+# Residual, accepted: the container keeps normal bridge networking. A published
+# port requires a routable network, and `--network none`/`--internal` breaks the
+# `-p 127.0.0.1:port:port` mapping this tool exists to provide, so a hostile
+# challenge binary can still open outbound connections. Treat a challenge binary
+# as something that can phone home.
 _DEFAULT_MEMORY_LIMIT = "512m"
 _DEFAULT_CPU_LIMIT = "1.0"
 _DEFAULT_PIDS_LIMIT = "128"
 
 
+def _positive_number(text: str) -> float | None:
+    """Parse a docker size/count value, rejecting zero and negatives.
+
+    Docker reads ``0`` (and ``-1``) as "no limit", so an unvalidated override
+    silently disables the cap it was meant to tighten rather than loosening it.
+    """
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmg])?b?$", (text or "").strip().lower())
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if value > 0 else None
+
+
 def _resource_limit_flags() -> list[str]:
-    def _env(name: str, default: str) -> str:
-        return (os.environ.get(name) or "").strip() or default
+    """Docker resource caps for the replay container.
+
+    socat's ``fork`` mode turns a hostile challenge binary into host-wide
+    resource exhaustion, so memory/CPU/PID caps are on by default. Overrides are
+    validated: an invalid or non-positive value falls back to the default instead
+    of becoming "unlimited".
+    """
+
+    def _checked(var: str, default: str) -> str:
+        raw = (os.environ.get(var) or "").strip()
+        if not raw:
+            return default
+        if _positive_number(raw) is None:
+            return default
+        return raw
 
     return [
-        "--memory", _env("VULNCLAW_PWN_MEMORY", _DEFAULT_MEMORY_LIMIT),
-        "--cpus", _env("VULNCLAW_PWN_CPUS", _DEFAULT_CPU_LIMIT),
-        "--pids-limit", _env("VULNCLAW_PWN_PIDS", _DEFAULT_PIDS_LIMIT),
+        "--memory", _checked("VULNCLAW_PWN_MEMORY", _DEFAULT_MEMORY_LIMIT),
+        "--cpus", _checked("VULNCLAW_PWN_CPUS", _DEFAULT_CPU_LIMIT),
+        "--pids-limit", _checked("VULNCLAW_PWN_PIDS", _DEFAULT_PIDS_LIMIT),
     ]
 
 
@@ -351,11 +384,26 @@ def start_replay(binary_path: str, port: int | None = None) -> str:
             "mount it into the replay container"
         )
     info = detect_binary_info(data)
+    digest = hashlib.sha256(data).hexdigest()
     tag = image_tag_for(info)
 
     ok, msg = _ensure_helper_image(tag)
     if not ok:
         return msg
+
+    # Re-verify immediately before `docker run`. The checks above can be minutes
+    # old (an image pull/build is allowed 600s) and docker resolves the
+    # bind-mount path only when the container starts, so a file swapped in the
+    # meantime would otherwise be the one that executes.
+    try:
+        current = p.read_bytes()
+    except OSError as exc:
+        return f"[pwn_local] cannot re-read {p} before start: {exc}"
+    if not current.startswith(b"\x7fELF") or hashlib.sha256(current).hexdigest() != digest:
+        return (
+            f"[pwn_local] {p} changed between validation and container start — "
+            "refusing to run it (the bind mount resolves the path at start time)"
+        )
 
     port = port or _free_port()
     name = container_name(str(p))
@@ -389,9 +437,9 @@ def start_replay(binary_path: str, port: int | None = None) -> str:
     return (
         f"[pwn_local] local replay ready: 127.0.0.1:{port} "
         f"(container {name}, image {helper_image_name(tag)}, arch {info['arch']}, "
-        f"glibc {info['max_glibc'] or 'static'}). Develop and verify the exploit "
-        "here; fire the real remote only once it works. Release with "
-        "pwn_local_stop when done."
+        f"glibc {info['max_glibc'] or 'static'}, sha256 {digest[:16]}). Develop and "
+        "verify the exploit here; fire the real remote only once it works. "
+        "Release with pwn_local_stop when done."
     )
 
 

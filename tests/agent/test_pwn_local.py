@@ -334,3 +334,93 @@ def test_container_resource_limits_are_overridable(monkeypatch):
     assert flags[flags.index("--memory") + 1] == "2g"
     assert flags[flags.index("--pids-limit") + 1] == "512"
 
+
+@pytest.mark.parametrize("bad", ["0", "-1", "-512m", "abc", "", "  ", "1e9"])
+def test_invalid_or_unlimited_env_values_fall_back_to_the_cap(monkeypatch, bad):
+    """Docker reads 0/-1 as "no limit", so an unvalidated override would switch
+    the cap off instead of tightening it."""
+    for var in ("VULNCLAW_PWN_MEMORY", "VULNCLAW_PWN_CPUS", "VULNCLAW_PWN_PIDS"):
+        monkeypatch.setenv(var, bad)
+    flags = pwn_local._resource_limit_flags()
+    assert flags[flags.index("--memory") + 1] == pwn_local._DEFAULT_MEMORY_LIMIT
+    assert flags[flags.index("--cpus") + 1] == pwn_local._DEFAULT_CPU_LIMIT
+    assert flags[flags.index("--pids-limit") + 1] == pwn_local._DEFAULT_PIDS_LIMIT
+
+
+@pytest.mark.parametrize("good", ["1g", "512m", "1.5g", "1024", "256M"])
+def test_valid_env_values_are_honoured(monkeypatch, good):
+    monkeypatch.setenv("VULNCLAW_PWN_MEMORY", good)
+    flags = pwn_local._resource_limit_flags()
+    assert flags[flags.index("--memory") + 1] == good
+
+
+# ── the bind mount is re-verified immediately before `docker run` ───────
+
+
+def _fake_pipeline(monkeypatch, calls, build=None):
+    monkeypatch.setattr(
+        pwn_local,
+        "_ensure_helper_image",
+        build or (lambda tag: (True, f"vulnclaw-pwn:{tag}")),
+    )
+    monkeypatch.setattr(
+        pwn_local, "_run", lambda cmd, **kw: (calls.append(cmd), (0, "", ""))[1]
+    )
+    monkeypatch.setattr(pwn_local, "_wait_port", lambda port, timeout_s=20.0: True)
+
+
+def test_replay_mounts_only_the_binary_and_caps_resources(tmp_path, monkeypatch):
+    """A directory mount exposed every sibling file to a root container."""
+    elf = tmp_path / "chall"
+    elf.write_bytes(_elf(2, 62, b"/lib64/ld-linux-x86-64.so.2\x00", b"GLIBC_2.31"))
+    (tmp_path / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+    calls: list[list[str]] = []
+    _fake_pipeline(monkeypatch, calls)
+
+    out = pwn_local.start_replay(str(elf))
+    assert "local replay ready" in out, out
+
+    run = next(c for c in calls if c and c[0] == "run")
+    volumes = [run[i + 1] for i, tok in enumerate(run) if tok == "-v"]
+    assert volumes == [f"{elf.resolve()}:/chall/chall:ro"]
+    assert str(tmp_path) + ":/chall" not in " ".join(run)  # no directory mount
+    for flag in ("--memory", "--cpus", "--pids-limit"):
+        assert flag in run
+    assert any("127.0.0.1:" in tok for tok in run)
+    assert "sha256" in out
+
+
+def test_replay_refuses_a_binary_swapped_during_the_image_build(tmp_path, monkeypatch):
+    """The ELF check can be minutes old (a pull/build may take 600s) while docker
+    resolves the bind-mount path only at container start."""
+    elf = tmp_path / "chall"
+    elf.write_bytes(_elf(2, 62, b"/lib64/ld-linux-x86-64.so.2\x00", b"GLIBC_2.31"))
+
+    def _swap(tag):
+        # Still ELF (magic intact) but different bytes: only the hash catches it.
+        elf.write_bytes(b"\x7fELF" + b"replaced-while-building")
+        return True, f"vulnclaw-pwn:{tag}"
+
+    calls: list[list[str]] = []
+    _fake_pipeline(monkeypatch, calls, build=_swap)
+
+    out = pwn_local.start_replay(str(elf))
+    assert "changed between validation" in out
+    assert not [c for c in calls if c and c[0] == "run"], "container must not start"
+
+
+def test_replay_refuses_a_binary_replaced_by_a_non_elf(tmp_path, monkeypatch):
+    elf = tmp_path / "chall"
+    elf.write_bytes(_elf(2, 62, b"/lib64/ld-linux-x86-64.so.2\x00", b"GLIBC_2.31"))
+
+    def _swap(tag):
+        elf.write_bytes(b"#!/bin/sh\necho pwned\n")
+        return True, f"vulnclaw-pwn:{tag}"
+
+    calls: list[list[str]] = []
+    _fake_pipeline(monkeypatch, calls, build=_swap)
+    out = pwn_local.start_replay(str(elf))
+    assert "changed between validation" in out
+    assert not [c for c in calls if c and c[0] == "run"]
+
+
