@@ -554,36 +554,55 @@ def _apply_task_model_route(config: Any, target: str, model_override: str = "aut
         return
     if not getattr(llm, "route_enabled", False):
         return
+    category, difficulty = _platform_challenge_metadata(target_str)
+    if not category:
+        return
+    from vulnclaw.config.settings import apply_llm_route, resolve_llm_route
+
+    route = resolve_llm_route(config, category, difficulty)
+    if route is not None:
+        apply_llm_route(config, route)
+
+
+def _platform_challenge_metadata(challenge_id: str) -> tuple[str, str]:
+    """``(category, difficulty)`` for a challenge id, via the adapter registry.
+
+    Went through the adapter layer rather than one platform's client, which fixes a
+    silent coupling: this used to import the GCS client directly and swallow every
+    exception, so with GCS unconfigured the model router quietly fell back to the
+    default model and nothing said so. Now a platform that cannot answer simply
+    contributes nothing -- and any configured platform can.
+
+    Best-effort by design: routing is an optimisation, not a correctness
+    requirement, so a lookup failure must never break a solve.
+    """
+    import asyncio
+
     try:
-        from vulnclaw.gcs_platform import client as gcs
+        from vulnclaw.platforms import registry
+        from vulnclaw.platforms.bootstrap import ensure_adapters
 
-        import asyncio
+        ensure_adapters()
 
-        async def _fetch() -> tuple[str, str]:
-            tree = await gcs.exercise_list()
-            category = ""
-            for cat in tree or []:
-                for item in cat.get("corpus", []):
-                    if str(item.get("id")) == target_str:
-                        category = cat.get("name") or ""
-                        break
-                if category:
-                    break
-            detail = await gcs.exercise(int(target_str))
-            difficulty = str((detail or {}).get("difficulty") or "")
-            return category, difficulty
+        async def _lookup() -> tuple[str, str]:
+            for adapter in registry.configured_adapters().values():
+                try:
+                    for corpus in await adapter.list_corpora():
+                        try:
+                            challenges = await adapter.list_challenges(corpus.ref)
+                        except Exception:
+                            continue
+                        for challenge in challenges:
+                            if challenge.ref.id == challenge_id:
+                                return challenge.category, challenge.difficulty
+                except Exception:
+                    continue
+            return "", ""
 
-        category, difficulty = asyncio.run(_fetch())
-        if not category:
-            return
-        from vulnclaw.config.settings import apply_llm_route, resolve_llm_route
-
-        route = resolve_llm_route(config, category, difficulty)
-        if route is not None:
-            apply_llm_route(config, route)
+        return asyncio.run(_lookup())
     except Exception:
         # Best-effort: any lookup failure keeps the default model.
-        return
+        return "", ""
 
 
 async def _run_cli_orchestrated_task(

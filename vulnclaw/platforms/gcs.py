@@ -360,6 +360,18 @@ class GCSAdapter:
         except Exception:
             return False
 
+    def base_url(self) -> str:
+        """The API base, so callers can resolve relative attachment paths.
+
+        GCS payloads may carry a root-relative link; a caller with no base would
+        have to hardcode the host, which is exactly the platform coupling this
+        layer exists to remove.
+        """
+        try:
+            return str(self.client.api_base_url() or "")
+        except Exception:
+            return ""
+
     def make_ref(self, *, kind: str, id: str = "", group: str = "") -> ChallengeRef:
         if kind not in KINDS:
             raise RefError(f"unknown GCS kind {kind!r}; expected one of {sorted(KINDS)}")
