@@ -1,4 +1,4 @@
-﻿"""VulnClaw CLI main entry point with REPL and sub-commands."""
+"""VulnClaw CLI main entry point with REPL and sub-commands."""
 
 # ruff: noqa: E402
 
@@ -1657,6 +1657,25 @@ def run(
     console.print(_("cli.report_generated", path=report_path))
 
 
+def _cli_value(value: Any, default: Any) -> Any:
+    """Return a real value where a direct Python call left a typer sentinel.
+
+    When a Typer command function is invoked directly from Python (as ``ctf2`` and
+    ``gcs`` do when handing off to ``solve``), its un-passed parameters keep the
+    ``OptionInfo``/``ArgumentInfo`` objects instead of the CLI defaults. Those
+    sentinels are not merely wrong values -- they are **truthy**, so a
+    ``if stream:`` branch takes the streaming path, and they stringify into
+    nonsense when used as an override name. ``ctf2`` crashed outright on this
+    (``TypeError: Value after * must be an iterable, not OptionInfo`` in
+    ``build_targets``) while ``gcs`` had been patched to pass everything
+    explicitly.
+    """
+    if type(value).__name__ in {"OptionInfo", "ArgumentInfo"}:
+        resolved = getattr(value, "default", None)
+        return default if resolved is ... else resolved
+    return value
+
+
 @app.command()
 def solve(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
@@ -1881,11 +1900,34 @@ def ctf2(
         f"difficulty [bold]{difficulty}[/]"
     )
     # Hand off to the standard solve loop; reuse its full orchestration.
+    #
+    # Every optional flag is passed explicitly, because `solve()` is a Typer
+    # command: calling it from Python leaves its un-passed parameters as truthy
+    # OptionInfo sentinels, which crashed this command outright
+    # (`TypeError: Value after * must be an iterable, not OptionInfo` in
+    # build_targets). `_cli_value` also unwraps this command's own defaults,
+    # which are sentinels too when `ctf2()` is called from Python.
     solve(
         target=practice_id,
         goal=goal,
-        max_steps=max_steps,
+        max_steps=_cli_value(max_steps, 240),
         resume=False,
+        prompt=None,
+        max_directions=3,
+        max_tool_rounds=6,
+        snapshot=None,
+        run_name=None,
+        resume_run=None,
+        runs_dir=None,
+        additional_targets=None,
+        target_type=None,
+        mount=False,
+        repair=False,
+        force_fresh=False,
+        no_import=False,
+        stream=False,
+        writeup_dir=None,
+        model="auto",
     )
 
 
@@ -1985,7 +2027,7 @@ def gcs(
     solve(
         target=str(exercise_id),
         goal=goal,
-        max_steps=max_steps,
+        max_steps=_cli_value(max_steps, 240),
         resume=False,
         # typer commands keep their typer.Option default objects when called
         # directly from Python, so every optional flag must be passed
@@ -2005,6 +2047,9 @@ def gcs(
         no_import=False,
         stream=False,
         writeup_dir=None,
+        # Missed by the earlier patch: without this the OptionInfo sentinel was
+        # handed to the model router as an override name.
+        model="auto",
     )
 
 

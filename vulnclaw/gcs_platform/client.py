@@ -23,6 +23,7 @@ Configuration (environment variables):
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import httpx
@@ -34,15 +35,34 @@ AGENT_PREFIX = "/slab-match/api/v1/agent"
 _SUCCESS_CODE = "00000"
 
 # Shared module-level client so connection pools are reused across calls.
+#
+# ⚠️ Same event-loop caveat as the CTF2 client: an AsyncClient is bound to the
+# loop it was built on, so reusing it from another loop raises
+# "Event loop is closed" and then times out on every later call. The CLI calls
+# asyncio.run() repeatedly (e.g. once per challenge while batch-downloading), which
+# is exactly how a cached client outlives its loop.
 _client: httpx.AsyncClient | None = None
+_client_loop: object | None = None
+
+
+def _running_loop() -> object | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 def get_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Return the shared AsyncClient, creating it lazily. Reuses connections
-    instead of opening a fresh client per endpoint call."""
-    global _client
-    if _client is None or _client.is_closed:
+    """Return the shared AsyncClient for the CURRENT event loop, creating it lazily."""
+    global _client, _client_loop
+    loop = _running_loop()
+    if (
+        _client is None
+        or _client.is_closed
+        or (_client_loop is not None and loop is not None and _client_loop is not loop)
+    ):
         _client = httpx.AsyncClient(timeout=timeout)
+        _client_loop = loop
     return _client
 
 
