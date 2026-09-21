@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -69,103 +70,138 @@ _SPAWN_CALLS = {
     "pty.fork",
 }
 
-# Reviewed baseline, keyed by exact ``file:line:call`` so adding another spawn
-# to an already-reviewed file still fails CI and requires an owner decision.
+# Reviewed baseline. Keyed by ``file:enclosing-scope:call:invariant-hash`` and
+# carrying the number of call sites expected under that key.
+#
+# WHY NOT LINE NUMBERS: keys used to embed a line number, so inserting a line
+# anywhere above a spawn site re-keyed it and the audit cried wolf. That
+# happened five times (remote dispatch, cmd.exe quoting guard, GCS tool-face
+# gating, an in-session edit, and the platform-tool refactor) for code that had
+# not changed at all -- by the fifth, the note that used to sit here said to stop
+# re-keying by hand and switch to the enclosing function or a content hash.
+# This is that switch.
+#
+# What still fails the check (the guard keeps its teeth):
+#   * a new scope, or a renamed one, containing a spawn call;
+#   * a changed argv / call target (different invariant hash);
+#   * one extra call site under a key whose count is already spent.
+# What no longer fails: unrelated edits shifting line numbers, and moving a
+# spawn site's code without changing it.
+#
 # "model-reachable" sites are exactly those the ExecutionGate must gate;
 # "operator control plane" sites run fixed commands chosen by the local
 # operator (doctor probes, TUI launcher).
-ALLOWED_SPAWN_SITES: dict[str, str] = {
-    # NOTE ON KEYING: keys embed a LINE NUMBER, so inserting or deleting lines
-    # anywhere above a spawn site re-keys it and the audit reports it as "new".
-    # That has now happened four times (remote dispatch, cmd.exe quoting guard,
-    # GCS tool-face gating, and one more in-session edit), each time re-registering
-    # the same four nmap/pyc sites. Every occurrence has been checked by hand
-    # against the surrounding code to confirm the site itself is unchanged -- the
-    # churn is real but cheap, and the audit is still doing its job.
-    #
-    # If a fifth occurrence shows up, stop re-keying by hand and key on the
-    # enclosing function name (or a content hash of the line) instead. The
-    # line-number scheme has paid for itself; it is now mostly noise.
-    "vulnclaw/agent/builtin_tools.py:451:subprocess.Popen": (
-        "shared gated process runner for shell/python/PHP execution"
-    ),
-    "vulnclaw/agent/builtin_tools.py:636:subprocess.run": (
-        "fixed Windows taskkill fallback for the gated process runner"
-    ),
-    "vulnclaw/agent/builtin_tools.py:2408:subprocess.run": (
-        "fixed Windows nmap path lookup"
-    ),
-    "vulnclaw/agent/builtin_tools.py:2487:subprocess.run": (
-        "structured argv nmap execution constrained by the nmap tool schema"
-    ),
-    "vulnclaw/agent/builtin_tools.py:2495:subprocess.run": (
-        "structured argv non-privileged nmap retry"
-    ),
-    "vulnclaw/agent/builtin_tools.py:4146:subprocess.run": (
-        "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)"
-    ),
-    "vulnclaw/report/verifier.py:487:subprocess.run": (
-        "generated-PoC verification after synchronous ExecutionGate approval"
-    ),
-    "vulnclaw/cli/tui.py:499:subprocess.call": (
-        "operator control plane: native TUI binary launcher"
-    ),
-    "vulnclaw/cli/tui.py:1747:subprocess.run": (
-        "operator control plane: fixed version diagnostic"
-    ),
-    "vulnclaw/cli/tui.py:2636:subprocess.run": (
-        "operator control plane: Windows Get-Clipboard via powershell for /config paste"
-    ),
-    "vulnclaw/cli/tui.py:2675:subprocess.run": (
-        "operator control plane: Unix pbpaste/wl-paste/xclip/xsel for /config paste"
-    ),
-    "vulnclaw/cli/main.py:3497:subprocess.run": (
-        "operator control plane: fixed Node.js version diagnostic"
-    ),
+ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
+    # ── model-reachable: the ExecutionGate must cover these ──────────────
+    "vulnclaw/agent/builtin_tools.py:_spawn_captured:subprocess.Popen:1eacb151": {
+        "count": 1,
+        "purpose": "shared gated process runner for shell/python/PHP execution",
+    },
+    "vulnclaw/agent/builtin_tools.py:_kill_process_tree:subprocess.run:0d8fbefe": {
+        "count": 1,
+        "purpose": "fixed Windows taskkill fallback for the gated process runner",
+    },
+    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:d805ac27": {
+        "count": 1,
+        "purpose": "fixed Windows nmap path lookup",
+    },
+    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:d1b03639": {
+        "count": 1,
+        "purpose": "structured argv nmap execution constrained by the nmap tool schema",
+    },
+    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:c668bb28": {
+        "count": 1,
+        "purpose": "structured argv non-privileged nmap retry",
+    },
+    "vulnclaw/agent/builtin_tools.py:run_subprocess_capture:subprocess.run:f57fafd0": {
+        "count": 1,
+        "purpose": "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)",
+    },
+    "vulnclaw/report/verifier.py:VerifierExecutor.execute_poc:subprocess.run:7d9e470e": {
+        "count": 1,
+        "purpose": "generated-PoC verification after synchronous ExecutionGate approval",
+    },
+    # ── operator control plane: fixed commands chosen by the local operator ──
+    "vulnclaw/cli/tui.py:run_tui:subprocess.call:31fb22ef": {
+        "count": 1,
+        "purpose": "operator control plane: native TUI binary launcher",
+    },
+    "vulnclaw/cli/tui.py:_command_version:subprocess.run:96da868b": {
+        "count": 1,
+        "purpose": "operator control plane: fixed version diagnostic",
+    },
+    "vulnclaw/cli/tui.py:_read_system_clipboard:subprocess.run:000b7988": {
+        "count": 1,
+        "purpose": "operator control plane: Windows Get-Clipboard via powershell for /config paste",
+    },
+    "vulnclaw/cli/tui.py:_read_system_clipboard:subprocess.run:4650598c": {
+        "count": 1,
+        "purpose": "operator control plane: Unix pbpaste/wl-paste/xclip/xsel for /config paste",
+    },
+    "vulnclaw/cli/main.py:doctor:subprocess.run:ad1ae372": {
+        "count": 1,
+        "purpose": "operator control plane: fixed Node.js version diagnostic",
+    },
     # First-run setup wizard (merged from dev): operator-driven fixed argv
     # probes/installers; never model-reachable.
-    "vulnclaw/cli/wizard.py:100:os.system": (
-        "operator control plane: Windows terminal clear (cls)"
-    ),
-    "vulnclaw/cli/wizard.py:102:os.system": (
-        "operator control plane: POSIX terminal clear (clear)"
-    ),
-    "vulnclaw/cli/wizard.py:300:subprocess.run": (
-        "fixed java -version probe during wizard Java detection"
-    ),
-    "vulnclaw/cli/wizard.py:360:subprocess.run": (
-        "fixed winget install of Temurin JDK 17 package on user confirm"
-    ),
-    "vulnclaw/cli/wizard.py:877:subprocess.run": (
-        "git clone of the constant PortSwigger mcp-server repo"
-    ),
-    "vulnclaw/cli/wizard.py:912:subprocess.run": (
-        "gradlew embedProxyJar in the cloned constant repo (Windows shell)"
-    ),
-    "vulnclaw/cli/wizard.py:922:subprocess.run": (
-        "gradlew embedProxyJar in the cloned constant repo (POSIX argv)"
-    ),
-    "vulnclaw/cli/wizard.py:1085:subprocess.Popen": (
-        "launch local Chrome with fixed argv for remote debugging"
-    ),
-    "vulnclaw/cli/wizard.py:1104:subprocess.Popen": (
-        "macOS open-URL launcher with fixed argv"
-    ),
-    "vulnclaw/cli/wizard.py:1106:subprocess.Popen": (
-        "Linux xdg-open URL launcher with fixed argv"
-    ),
-    "vulnclaw/cli/wizard.py:1116:subprocess.Popen": (
-        "macOS open-path launcher with fixed argv"
-    ),
-    "vulnclaw/cli/wizard.py:1118:subprocess.Popen": (
-        "Linux xdg-open path launcher with fixed argv"
-    ),
-    "vulnclaw/agent/network_scan.py:452:subprocess.run": (
-        "fixed local wireless-interface diagnostic"
-    ),
-    "vulnclaw/agent/network_scan.py:493:subprocess.run": (
-        "fixed local IPv4-interface diagnostic"
-    ),
+    "vulnclaw/cli/wizard.py:_WizardUi.clear:os.system:5cd31b04": {
+        "count": 1,
+        "purpose": "operator control plane: Windows terminal clear (cls)",
+    },
+    "vulnclaw/cli/wizard.py:_WizardUi.clear:os.system:3d6e81ea": {
+        "count": 1,
+        "purpose": "operator control plane: POSIX terminal clear (clear)",
+    },
+    "vulnclaw/cli/wizard.py:_java_major_version:subprocess.run:15f85f79": {
+        "count": 1,
+        "purpose": "fixed java -version probe during wizard Java detection",
+    },
+    "vulnclaw/cli/wizard.py:ensure_java:subprocess.run:3bdfe632": {
+        "count": 1,
+        "purpose": "fixed winget install of Temurin JDK 17 package on user confirm",
+    },
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:440f9a66": {
+        "count": 1,
+        "purpose": "git clone of the constant PortSwigger mcp-server repo",
+    },
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:a4b29dcd": {
+        "count": 1,
+        "purpose": "gradlew embedProxyJar in the cloned constant repo (Windows shell)",
+    },
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:ddde3a6f": {
+        "count": 1,
+        "purpose": "gradlew embedProxyJar in the cloned constant repo (POSIX argv)",
+    },
+    "vulnclaw/cli/wizard.py:launch_chrome_debug:subprocess.Popen:9ab7963f": {
+        "count": 1,
+        "purpose": "launch local Chrome with fixed argv for remote debugging",
+    },
+    "vulnclaw/cli/wizard.py:_open_url:subprocess.Popen:7f80d92e": {
+        "count": 1,
+        "purpose": "macOS open-URL launcher with fixed argv",
+    },
+    "vulnclaw/cli/wizard.py:_open_url:subprocess.Popen:8c0315af": {
+        "count": 1,
+        "purpose": "Linux xdg-open URL launcher with fixed argv",
+    },
+    "vulnclaw/cli/wizard.py:_open_path:subprocess.Popen:cbbbe138": {
+        "count": 1,
+        # Was mislabelled "Windows explorer" in the line-keyed allowlist; the
+        # branch at 1116 is the Darwin one (Windows uses os.startfile).
+        "purpose": "macOS open-path launcher with fixed argv",
+    },
+    "vulnclaw/cli/wizard.py:_open_path:subprocess.Popen:7961a112": {
+        "count": 1,
+        "purpose": "Linux xdg-open path launcher with fixed argv",
+    },
+    "vulnclaw/agent/network_scan.py:_wifi_interfaces:subprocess.run:5d0edc44": {
+        "count": 1,
+        "purpose": "fixed local wireless-interface diagnostic",
+    },
+    "vulnclaw/agent/network_scan.py:_interface_ipv4_network:subprocess.run:898b769c": {
+        "count": 1,
+        "purpose": "fixed local IPv4-interface diagnostic",
+    },
 }
 
 
@@ -174,12 +210,68 @@ class SpawnSite:
     file: str
     line: int
     call: str
+    scope: str
+    invariant: str
 
     def key(self) -> str:
-        return f"{self.file}:{self.line}:{self.call}"
+        """Stable allowlist key: no line number, so moved code stays reviewed.
+
+        The previous key was ``file:line:call``, and every edit above a spawn
+        site re-keyed it -- five rounds of hand re-registration for code that had
+        not changed. The key is now the enclosing scope plus a hash of the call's
+        own normalized source, so:
+
+          * inserting lines / moving the function  -> same key  (no churn)
+          * renaming the function                  -> new key   (review)
+          * changing the argv or the call target   -> new key   (review)
+        """
+        return f"{self.file}:{self.scope}:{self.call}:{self.invariant}"
 
     def as_dict(self) -> dict[str, object]:
-        return {"file": self.file, "line": self.line, "call": self.call}
+        return {
+            "file": self.file,
+            "line": self.line,
+            "call": self.call,
+            "scope": self.scope,
+            "invariant": self.invariant,
+        }
+
+
+def _scope_of(tree: ast.AST) -> dict[int, str]:
+    """Map every node id to the qualified name of its enclosing function.
+
+    ``<module>`` for top-level calls, ``Cls.method`` for methods, and dotted
+    names for nested defs, so a site's key says where it lives.
+    """
+    scopes: dict[int, str] = {}
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = prefix
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+            elif isinstance(child, ast.ClassDef):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+            scopes[id(child)] = name
+            visit(child, name)
+
+    scopes[id(tree)] = "<module>"
+    visit(tree, "")
+    return scopes
+
+
+def _call_invariant(call: ast.Call) -> str:
+    """Short hash of the call with line/column noise stripped.
+
+    ``ast.dump`` without attributes gives an exact structural fingerprint, which
+    is what makes "the call still looks identical" checkable rather than a claim
+    in a comment.
+    """
+    try:
+        dumped = ast.dump(call, annotate_fields=False, include_attributes=False)
+    except TypeError:  # pragma: no cover - Python without include_attributes
+        dumped = ast.dump(call, annotate_fields=False)
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()[:8]
 
 
 def _dotted_name(node: ast.AST) -> str | None:
@@ -213,12 +305,21 @@ def scan_file(path: Path) -> list[SpawnSite]:
     # affected file.
     tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     rel = path.relative_to(REPO_ROOT).as_posix()
+    scopes = _scope_of(tree)
     sites: list[SpawnSite] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             target = _call_target(node)
             if target is not None:
-                sites.append(SpawnSite(file=rel, line=node.lineno, call=target))
+                sites.append(
+                    SpawnSite(
+                        file=rel,
+                        line=node.lineno,
+                        call=target,
+                        scope=scopes.get(id(node), "<module>"),
+                        invariant=_call_invariant(node),
+                    )
+                )
     return sites
 
 
@@ -231,13 +332,46 @@ def scan_tree() -> list[SpawnSite]:
     return all_sites
 
 
+def _partition_sites(
+    sites: list[SpawnSite],
+) -> tuple[list[SpawnSite], list[dict[str, object]]]:
+    """Split scanned sites into reviewed ones and violations.
+
+    A key is reviewed only while its call-site count is within the recorded
+    budget, so adding a *second* spawn call next to an already-approved one is
+    still a violation rather than riding along on the existing entry.
+    """
+    grouped: dict[str, list[SpawnSite]] = {}
+    for s in sites:
+        grouped.setdefault(s.key(), []).append(s)
+
+    reviewed: list[SpawnSite] = []
+    violations: list[dict[str, object]] = []
+    for key, rows in grouped.items():
+        entry = ALLOWED_SPAWN_SITES.get(key)
+        if entry is None:
+            violations.extend({**r.as_dict(), "reason": "unreviewed key"} for r in rows)
+            continue
+        budget = int(entry["count"])  # type: ignore[arg-type]
+        reviewed.extend(rows[:budget])
+        if len(rows) > budget:
+            violations.extend(
+                {
+                    **r.as_dict(),
+                    "reason": f"key reviewed for {budget} site(s), found {len(rows)}",
+                }
+                for r in rows[budget:]
+            )
+    return reviewed, violations
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args()
 
     sites = scan_tree()
-    violations = [s for s in sites if s.key() not in ALLOWED_SPAWN_SITES]
+    reviewed, violations = _partition_sites(sites)
 
     if args.json:
         print(
@@ -245,12 +379,18 @@ def main() -> int:
                 {
                     "ok": not violations,
                     "reviewed_sites": [
-                        {**s.as_dict(), "purpose": ALLOWED_SPAWN_SITES[s.key()]}
-                        for s in sites
-                        if s.key() in ALLOWED_SPAWN_SITES
+                        {
+                            **s.as_dict(),
+                            "purpose": ALLOWED_SPAWN_SITES[s.key()]["purpose"],
+                        }
+                        for s in reviewed
                     ],
-                    "violations": [s.as_dict() for s in violations],
-                    "allowlist": ALLOWED_SPAWN_SITES,
+                    "violations": violations,
+                    # Line numbers are reported per site but are deliberately NOT
+                    # part of the key (see ALLOWED_SPAWN_SITES).
+                    "allowlist": {
+                        k: dict(v) for k, v in ALLOWED_SPAWN_SITES.items()
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -261,11 +401,15 @@ def main() -> int:
     if violations:
         print("execution-boundary check FAILED — unreviewed spawn sites:\n")
         for v in violations:
-            print(f"  {v.file}:{v.line}  {v.call}()")
+            print(f"  {v['file']}:{v['line']}  {v['call']}()  [{v.get('scope')}]")
+            print(f"      key:    {v['file']}:{v.get('scope')}:{v['call']}:{v.get('invariant')}")
+            print(f"      reason: {v.get('reason')}")
         print(
             "\nEvery new process-spawn call site must be reviewed and added to\n"
             "ALLOWED_SPAWN_SITES in scripts/verify_execution_boundary.py with an\n"
-            "owner/purpose note before it can merge.\n"
+            "owner/purpose note before it can merge. The key is\n"
+            "  file:enclosing-scope:call:invariant-hash\n"
+            "so it survives line shifts; if only the line moved, nothing to do.\n"
         )
         return 1
 
