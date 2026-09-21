@@ -80,3 +80,82 @@ def test_system_prompt_includes_tool_card():
     # — both are valid; just ensure no crash
     assert isinstance(prompt, str)
     assert len(prompt) > 100
+
+
+# ── portability (round-5 review N7) ─────────────────────────────────────
+
+
+def test_tools_dir_override_takes_priority(monkeypatch, tmp_path):
+    root = tmp_path / "bundles"
+    root.mkdir()
+    monkeypatch.setenv("VULNCLAW_TOOLS_DIR", str(root))
+    assert tr._candidate_roots()[0] == root
+    assert tr.tools_dir() == root
+
+
+def test_relative_detection_works_under_any_root(monkeypatch, tmp_path):
+    """A bundle relocated anywhere is still found (the old entries were absolute)."""
+    root = tmp_path / "bundles"
+    (root / "sqlmap").mkdir(parents=True)
+    (root / "sqlmap" / "sqlmap.py").write_text("# sqlmap", encoding="utf-8")
+    monkeypatch.setenv("VULNCLAW_TOOLS_DIR", str(root))
+    entry = next(e for e in tr._REGISTRY if e["name"] == "sqlmap")
+    found = tr._detect(entry)
+    assert found is not None
+    assert str(root / "sqlmap" / "sqlmap.py") in found
+
+
+def test_glob_detection_works_under_any_root(monkeypatch, tmp_path):
+    root = tmp_path / "bundles"
+    (root / "hashcat-beta" / "6.2.6").mkdir(parents=True)
+    (root / "hashcat-beta" / "6.2.6" / "hashcat.exe").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VULNCLAW_TOOLS_DIR", str(root))
+    entry = next(e for e in tr._REGISTRY if e["name"] == "hashcat (GPU)")
+    found = tr._detect(entry)
+    assert found is not None
+    assert str(root / "hashcat-beta" / "6.2.6" / "hashcat.exe") in found
+
+
+def test_path_fallback_detects(monkeypatch):
+    """A tool installed on PATH needs no bundle root at all."""
+    monkeypatch.setenv("VULNCLAW_TOOLS_DIR", "")
+    monkeypatch.setattr(tr.shutil, "which", lambda name: f"/usr/bin/{name}")
+    entry = next(e for e in tr._REGISTRY if e["name"] == "nmap")
+    assert tr._detect(entry) == "nmap"
+
+
+def test_missing_tool_is_not_reported(monkeypatch, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(tr, "_candidate_roots", lambda: [empty])
+    monkeypatch.setattr(tr.shutil, "which", lambda name: None)
+    entry = next(e for e in tr._REGISTRY if e["name"] == "gobuster")
+    assert tr._detect(entry) is None
+
+
+def test_winscp_is_detected_from_localappdata(monkeypatch, tmp_path):
+    """No hardcoded user name: %LOCALAPPDATA% supplies the machine-specific part."""
+    local = tmp_path / "AppData" / "Local"
+    (local / "Programs" / "WinSCP").mkdir(parents=True)
+    winscp = local / "Programs" / "WinSCP" / "WinSCP.com"
+    winscp.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(tr.shutil, "which", lambda name: None)
+    assert str(winscp) in (tr._detect(tr._IR_REGISTRY[0]) or "")
+
+
+def test_no_personal_paths_in_the_module_source():
+    """Regression: a C:\\Users\\<name>\\AppData\\... path was committed here."""
+    import re
+    from pathlib import Path as _Path
+
+    source = _Path(tr.__file__).read_text(encoding="utf-8")
+    assert re.search(r"Users\\+[^\\\s\"']+\\+AppData", source) is None
+    assert str(tr._LEGACY_TOOLS_DIR) in source  # the one documented exception
+
+
+def test_no_absolute_fragments_in_detection_data():
+    for entry in [*tr._REGISTRY, *tr._IR_REGISTRY]:
+        for key in ("rel", "rel_glob"):
+            for part in entry.get(key, ()):
+                assert ":" not in part, f"absolute path fragment {part!r} in {entry['name']}"
