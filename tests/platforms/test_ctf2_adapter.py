@@ -439,11 +439,14 @@ class FakeClient:
 
 class TestAdapterLifecycle:
     async def test_start_env_reports_starting_when_the_payload_is_partial(self):
+        """The poll instruction comes from the renderer, and only from there."""
         adapter = CTF2Adapter(FakeClient(start_environment=fx.STARTING_PAYLOAD))
         info = await adapter.start_env(PRACTICE_REF)
         assert info.state == base.STATE_STARTING
         assert info.complete is False
-        assert "platform_read_env" in " ".join(info.guidance)
+        head = render_env_info(info).split("\n{", 1)[0]
+        assert head.lower().count("poll platform_read_env") == 1
+        assert "INCOMPLETE" in head
 
     async def test_start_env_passes_the_group_as_the_practice_id(self):
         client = FakeClient(start_environment=fx.RUNNING_PAYLOAD)

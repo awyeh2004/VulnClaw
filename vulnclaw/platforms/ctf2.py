@@ -61,7 +61,7 @@ from vulnclaw.platforms.normalize import (
     transport_from_url,
 )
 from vulnclaw.platforms.refs import ChallengeRef, CorpusRef, RefError, parse_fields
-from vulnclaw.platforms.render import TOOL_READ_ENV, TOOL_START_ENV
+from vulnclaw.platforms.render import TOOL_START_ENV
 
 KIND_PRACTICE = "practice"
 KIND_DAILY = "daily"
@@ -482,16 +482,17 @@ class CTF2Adapter:
         if info.state in (base.STATE_NONE, base.STATE_STARTING):
             # Either the Open API answered with a queue acknowledgement, or the
             # session API returned 202 + task_id. Both mean: poll read_env.
+            #
+            # No guidance tuple: `_render_incomplete` (the renderer's
+            # STATE_STARTING branch) already gives the "poll platform_read_env in
+            # ~10s until status=running" instruction and states that the connection
+            # details are absent from this response; repeating it here is the same
+            # duplication that was removed from the STATE_NONE path.
             return EnvInfo(
                 ref=ref,
                 state=base.STATE_STARTING,
                 complete=False,
                 expires_at=info.expires_at,
-                guidance=(
-                    f"the environment is being created; poll {TOOL_READ_ENV} in ~10s "
-                    f"until status={base.STATE_RUNNING} (connection details are NOT in "
-                    f"this response).",
-                ),
                 raw=info.raw,
             )
         return info

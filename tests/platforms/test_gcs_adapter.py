@@ -148,6 +148,33 @@ class TestReadinessMapping:
         assert "not reported" in text
         assert "try TLS" in text
 
+    def test_transport_note_only_for_bare_host_port(self):
+        """A scheme answers the question the note exists to ask.
+
+        Round-6 review F2: the note was emitted unconditionally, so an https
+        endpoint got "the transport is unknown -- try plain TCP first" in the same
+        message as the renderer's "THIS TARGET IS TLS-WRAPPED" block: two
+        statements pointing in opposite directions, on precisely the side the
+        scheme-based transport fix was written to stop misleading.
+        """
+        tls = normalize_exercise_env(
+            {"isNeedCheck": False, "exposeIps": ["https://h:443"]}, REF
+        )
+        assert [ep.transport for ep in tls.endpoints] == [base.TRANSPORT_TLS]
+        assert not any("transport is unknown" in line for line in tls.guidance)
+        assert "TLS-WRAPPED" in render_env_info(tls)
+
+        plain = normalize_exercise_env(
+            {"isNeedCheck": False, "exposeIps": ["http://h:80"]}, REF
+        )
+        assert [ep.transport for ep in plain.endpoints] == [base.TRANSPORT_TCP]
+        assert not any("transport is unknown" in line for line in plain.guidance)
+
+        bare = normalize_exercise_env({"isNeedCheck": False, "exposeIps": ["h:1337"]}, REF)
+        assert [ep.transport for ep in bare.endpoints] == [base.TRANSPORT_UNKNOWN]
+        note = next(line for line in bare.guidance if "transport is unknown" in line)
+        assert "h:1337" in note  # names which endpoint is unknown
+
     def test_running_guidance_warns_that_transport_is_unknown(self):
         info = normalize_exercise_env(
             {"isNeedCheck": False, "exposeIps": ["h:1"]}, REF
@@ -310,12 +337,20 @@ class TestAdapterBehaviour:
         assert client.calls == [("exercise", (10662,))]
 
     async def test_start_env_polls_rather_than_trusting_the_ack(self):
-        """build-exercise-env is async: an acknowledgement is not the target."""
+        """build-exercise-env is async: an acknowledgement is not the target.
+
+        The poll instruction is asserted on the RENDERED text, not on
+        ``info.guidance``: the renderer owns that sentence (see
+        tests/platforms/test_no_duplicate_guidance.py), so what matters is that the
+        model still reads it — exactly once.
+        """
         client = FakeClient(build_environment={"name": "p1"})
         info = await GCSAdapter(client).start_env(REF)
         assert info.state == base.STATE_STARTING
         assert info.complete is False
-        assert "platform_read_env" in " ".join(info.guidance)
+        head = render_env_info(info).split("\n{", 1)[0]
+        assert head.lower().count("poll platform_read_env") == 1
+        assert "INCOMPLETE" in head
 
     async def test_start_env_passes_through_a_ready_payload(self):
         client = FakeClient(
