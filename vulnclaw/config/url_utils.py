@@ -9,7 +9,57 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from urllib.parse import urlparse
+
+
+def is_ip_address(text: str) -> bool:
+    """Whether ``text`` is a bare IPv4/IPv6 literal (not a hostname)."""
+    candidate = str(text or "").strip().strip("[]")
+    if not candidate:
+        return False
+    if ":" in candidate:  # IPv6
+        return all(ch in "0123456789abcdefABCDEF:." for ch in candidate)
+    parts = candidate.split(".")
+    if len(parts) != 4:
+        return False
+    return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+
+
+def host_in_scope(host: str, patterns: Iterable[str]) -> bool:
+    """Whether ``host`` falls inside any scope pattern.
+
+    A bare domain pattern is a **domain scope**, not an exact host:
+    ``dasctf.com`` covers ``dasctf.com`` and ``direct-ctf2.dasctf.com``. Measured
+    need -- a competition target host is almost always a subdomain of the platform
+    domain, and exact-equality matching rejected the target itself, which blocked
+    ``fetch`` / ``shell_command`` / ``python_execute`` / ``http_probe_batch`` on a
+    live challenge and left only the browser toolset able to reach it.
+
+    ``*.example.com`` is accepted as an explicit wildcard. Suffix matching cannot
+    be fooled by a lookalike: ``evil-dasctf.com`` does not end with
+    ``.dasctf.com``, so it stays out of scope.
+
+    An IP pattern stays exact-only: nothing may be "inside" an address.
+    """
+    candidate = str(host or "").strip().lower().rstrip(".")
+    if not candidate:
+        return False
+    for raw in patterns or ():
+        pattern = str(raw or "").strip().lower().rstrip(".")
+        if not pattern:
+            continue
+        if pattern.startswith("*."):
+            pattern = pattern[2:]
+        if not pattern:
+            continue
+        if candidate == pattern:
+            return True
+        if is_ip_address(pattern):
+            continue
+        if candidate.endswith("." + pattern):
+            return True
+    return False
 
 
 def infer_port_from_url(url: str) -> int | None:

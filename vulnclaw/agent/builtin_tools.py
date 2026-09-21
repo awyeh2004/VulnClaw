@@ -53,7 +53,7 @@ from vulnclaw.config.source_render import (
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V1 违规 — infer_port_from_url 已移至 config/url_utils.py，
 #          此处重新导出以保持向后兼容。
-from vulnclaw.config.url_utils import infer_port_from_url  # noqa: F401 — re-export
+from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url  # noqa: F401 — re-export
 from vulnclaw.intel.tools import (
     INTEL_TOOL_NAMES,
     dispatch_intel_tool,
@@ -1512,11 +1512,11 @@ def enforce_host_path_constraints(
     if constraints is None or constraints.is_empty():
         return None
 
-    if constraints.allowed_hosts and host and host not in constraints.allowed_hosts:
+    if constraints.allowed_hosts and host and not host_in_scope(host, constraints.allowed_hosts):
         allowed = ", ".join(constraints.allowed_hosts)
         return f"[constraint_violation] Host {host} is outside allowed scope [{allowed}] for target {target or host}."
 
-    if host and host in constraints.blocked_hosts:
+    if host and host_in_scope(host, constraints.blocked_hosts):
         return f"[constraint_violation] Host {host} is blocked by task constraints for target {target or host}."
 
     if constraints.allowed_paths and path and path not in constraints.allowed_paths:
