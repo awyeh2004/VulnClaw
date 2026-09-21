@@ -26,8 +26,13 @@ def ensure_adapters(force: bool = False) -> dict[str, PlatformAdapter]:
         return registry.all_adapters()
 
     from vulnclaw.platforms.ctf2 import CTF2Adapter
+    from vulnclaw.platforms.gcs import GCSAdapter
 
     registry.register_adapter(CTF2Adapter())
+    # Registered but not exposed by default (`enabled_by_default = False`): the
+    # GCS integration is legacy, so it must be switched on deliberately. Being
+    # registered is what lets `platforms.gcs.enabled = true` work later.
+    registry.register_adapter(GCSAdapter())
     _BUILTINS_REGISTERED = True
     return registry.all_adapters()
 
