@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +44,145 @@ DEFAULT_AUTO_LIMIT = 3
 DEFAULT_MAX_LIMIT = 50
 
 _ENTRY_DEFAULTS: dict[str, Any] = {"attempts": 0, "accepted": False, "last_flag": None}
+
+
+# ── crash-safe, multi-process state persistence ──────────────────────────
+
+
+def _read_entries(path: Path) -> dict[str, dict]:
+    """Entries currently on disk ({} when absent or unreadable)."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        # A pre-versioned file is the legacy flat mapping.
+        entries = raw
+    cleaned: dict[str, dict] = {}
+    for token, value in entries.items():
+        entry = _clean_entry(value)
+        if entry is not None:
+            cleaned[str(token)] = entry
+    return cleaned
+
+
+def _merge_entries(disk: dict[str, dict], memory: dict[str, dict]) -> dict[str, dict]:
+    """Union of two views of the counters, taking the *stricter* value.
+
+    Attempts use ``max`` and ``accepted`` is sticky-true: a concurrent writer can
+    only ever make the accounting more conservative, so two processes submitting
+    for the same key cannot reset each other's budget.
+    """
+    merged: dict[str, dict] = {}
+    for token in set(disk) | set(memory):
+        on_disk = disk.get(token) or {}
+        in_memory = memory.get(token) or {}
+        attempts = max(int(on_disk.get("attempts", 0) or 0), int(in_memory.get("attempts", 0) or 0))
+        accepted = bool(on_disk.get("accepted")) or bool(in_memory.get("accepted"))
+        entry = dict(_ENTRY_DEFAULTS)
+        entry["attempts"] = attempts
+        entry["accepted"] = accepted
+        entry["last_flag"] = in_memory.get("last_flag") or on_disk.get("last_flag")
+        merged[token] = entry
+    return merged
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a same-directory temp file + rename, so a crash cannot truncate.
+
+    ``os.replace`` is retried on PermissionError: on Windows it fails when the
+    destination is briefly open by a concurrent reader (a sharing violation), and
+    a single failure here would otherwise drop the caller's increment.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".submit-state-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        last: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_name, str(path))
+                return
+            except PermissionError as exc:  # Windows sharing violation
+                last = exc
+                time.sleep(0.05 * (attempt + 1))
+        if last is not None:
+            raise last
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _take_os_lock(fd: int, timeout_s: float) -> None:
+    deadline = time.monotonic() + max(0.1, timeout_s)
+    while True:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() > deadline:
+                raise TimeoutError("submit-state guard busy") from None
+            time.sleep(0.02)
+
+
+def _drop_os_lock(fd: int) -> None:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextmanager
+def _state_guard(path: Path, timeout_s: float = 5.0):
+    """Serialize read-merge-write across processes (sibling guard file).
+
+    The guard lives beside the state file and is never deleted, so its identity
+    is never in question; the OS releases it if the holder dies.
+    """
+    guard = path.with_name(path.name + ".guard")
+    fd = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+        except OSError:
+            pass
+        _take_os_lock(fd, timeout_s)
+    except Exception:
+        os.close(fd)
+        raise
+    try:
+        yield
+    finally:
+        _drop_os_lock(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -171,23 +313,74 @@ class SubmitGuard:
         self._migration = report
         self._entries = report.entries
 
-    def _save(self) -> None:
+    def _write_entries(self, path: Path, entries: dict[str, dict]) -> None:
+        """Atomically persist ``entries`` (temp file + rename)."""
+        _atomic_write(
+            path,
+            json.dumps(
+                {"version": STATE_VERSION, "entries": entries},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
+    def _mutate(self, key: str, mutate) -> None:
+        """Apply ``mutate`` to one entry with the file as the source of truth.
+
+        Round-5 review N8: the counter used to live only in memory and the file
+        was rewritten wholesale, so two processes submitting for the same key
+        overwrote each other (and a crash mid-write reset the count, silently
+        raising the effective auto-submit budget — the counter is what the cap is
+        enforced against). Every mutation therefore re-reads the file inside the
+        cross-process guard, so concurrent attempts add up.
+        """
+        token = str(key)
+        path = Path(self.state_path) if self.state_path else None
+        if path is None:
+            mutate(self._entry(token))
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _state_guard(path):
+                entries = _read_entries(path)
+                # Fold in anything this process counts but the file does not have
+                # yet (an earlier write failed, or the file was reset). Merging
+                # BEFORE the increment is what makes both properties hold:
+                # concurrent processes still sum (each reads the latest disk
+                # value), and a failed write cannot lose a local increment.
+                for other, value in self._entries.items():
+                    on_disk = entries.get(other)
+                    entries[other] = (
+                        _merge_entries({other: on_disk}, {other: value})[other]
+                        if on_disk is not None
+                        else dict(value)
+                    )
+                entry = entries.get(token) or dict(_ENTRY_DEFAULTS)
+                mutate(entry)
+                entries[token] = entry
+                self._write_entries(path, entries)
+                self._entries = entries
+        except OSError:
+            # Persistence is best-effort; keep the increment in memory so the
+            # next successful write includes it (never lose an attempt).
+            mutate(self._entry(token))
+
+    def _refresh(self, key: str) -> None:
+        """Pull the authoritative entry for ``key`` from disk into memory.
+
+        Reads need no lock: :func:`_atomic_write` renames into place, so a reader
+        sees either the old or the new file, never a partial one.
+        """
         path = Path(self.state_path) if self.state_path else None
         if path is None:
             return
-        payload = {
-            "version": STATE_VERSION,
-            "entries": self._entries,
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            # Persistence is best-effort; the in-memory guard still applies.
-            pass
+        token = str(key)
+        on_disk = _read_entries(path).get(token)
+        if on_disk is None:
+            return
+        current = self._entries.get(token)
+        merged = _merge_entries({token: on_disk}, {token: current} if current else {})
+        self._entries[token] = merged[token]
 
     # -- state access ------------------------------------------------------
 
@@ -234,6 +427,7 @@ class SubmitGuard:
 
     def allow(self, key: str, flag: str) -> tuple[bool, str]:
         """Decide whether a submit may proceed, and why not when it may not."""
+        self._refresh(key)  # another process may have spent an attempt
         entry = self._entry(key)
 
         if entry.get("accepted"):
@@ -259,12 +453,14 @@ class SubmitGuard:
 
     def record(self, key: str, accepted: bool, flag: str) -> None:
         """Account for a submit that the caller actually performed."""
-        entry = self._entry(key)
-        entry["attempts"] = int(entry.get("attempts", 0)) + 1
-        entry["last_flag"] = flag
-        if accepted:
-            entry["accepted"] = True
-        self._save()
+
+        def _apply(entry: dict) -> None:
+            entry["attempts"] = int(entry.get("attempts", 0)) + 1
+            entry["last_flag"] = flag
+            if accepted:
+                entry["accepted"] = True
+
+        self._mutate(key, _apply)
 
     def record_error(self, key: str) -> None:
         """Account for an infrastructure failure (network / platform error).
@@ -273,8 +469,7 @@ class SubmitGuard:
         flag: the platform never judged it, so retrying the same flag later must
         not be blocked by the dedup rule.
         """
-        self._entry(key)
-        self._save()
+        self._mutate(key, lambda entry: None)
 
 
 _default_guard: SubmitGuard | None = None
