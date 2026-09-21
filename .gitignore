@@ -198,4 +198,8 @@ w*.txt
 # cron、SUID、包列表等机器特定信息）。属证据不是源码：体积随采集次数增长，
 # 且含目标机器信息，误提交进历史后很难干净移除。现场采集后仍需保留在本地
 # 供分析与写报告，所以是忽略而非删除。
-ir-collection/
+#
+# 根锚定（审计 round-5 复查）：写 `/ir-collection/` 而不是 `ir-collection/`，
+# 与上面 /demo/* 同一条纪律 —— 未锚定的写法会连任意深度的
+# `xxx/ir-collection/` 一起忽略（例如将来某个 skill 自带的同名目录会被静默吞掉）。
+/ir-collection/
