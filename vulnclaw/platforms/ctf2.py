@@ -187,12 +187,14 @@ def normalize_target_payload(payload: Any, ref: ChallengeRef) -> EnvInfo:
                 "platform note: CTF2 did not report `nc_ssl` for this endpoint, so "
                 "the transport is unknown here -- probe rather than assume."
             )
+        # One line, not four. This is a CONTINGENCY note ("if a later poll says
+        # TARGET NOT FOUND, the instance expired"), and it used to be appended in
+        # full to every running poll -- the text the model reads most often in a
+        # solve. The lesson is kept; the repetition is not.
         guidance.append(
-            "platform note: a successful TLS handshake does NOT prove the target is "
-            "alive. An expired instance still answers the handshake and then replies "
-            "'RANGE KEEPER / [ TARGET NOT FOUND ] This address has no running "
-            f"target.' -- if you see that, restart the target with {TOOL_START_ENV} "
-            "and re-read the endpoint (the host changes) instead of retrying payloads."
+            f"platform note: if a poll ever answers 'TARGET NOT FOUND', the instance "
+            f"expired -- restart it with {TOOL_START_ENV} and re-read the endpoint "
+            f"(the host changes). A TLS handshake alone does not prove liveness."
         )
 
     return EnvInfo(
