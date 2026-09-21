@@ -183,6 +183,47 @@ def extract_endpoints(data: Mapping[str, Any]) -> tuple[EnvEndpoint, ...]:
     return tuple(endpoints)
 
 
+def payload_body(payload: Any) -> Any:
+    """Return the body of a GCS client response.
+
+    ``gcs_platform.client._request`` returns ``_unwrap(payload)`` — the ``data``
+    member of the unified ``{code, message, data}`` envelope — so an adapter here
+    receives the BODY. Indexing ``payload["data"]`` a second time (as every helper
+    below used to) therefore found nothing on the real platform:
+    ``read_challenge`` produced an empty description/attachment list and
+    ``read_env``/``start_env`` collapsed a running environment to ``STATE_NONE``.
+
+    Note the asymmetry with the CTF2 adapter: ``ctf_platform.client._request``
+    returns the whole envelope, so *that* adapter does have to unwrap. The two
+    clients have different contracts; this one is already unwrapped.
+
+    Deliberately NOT tolerant of a nested ``data`` member: a real payload that
+    happens to carry one must not be silently replaced by it, which is the same
+    class of silent-wrong-shape failure this fixes.
+    """
+    return payload
+
+
+def body_map(payload: Any) -> Mapping[str, Any]:
+    """``payload_body`` narrowed to a Mapping (``{}`` when there is none)."""
+    body = payload_body(payload)
+    return body if isinstance(body, Mapping) else {}
+
+
+def _candidate_bodies(payload: Any) -> tuple[Any, ...]:
+    """Body first, then a nested ``data`` member if the body is a Mapping.
+
+    Used only by the fail-closed answer readers: looking one level deeper can
+    turn a missed ``isCorrect`` into a found one (never the reverse), so it is
+    safe there in a way it is not for the body-everything helpers above.
+    """
+    body = payload_body(payload)
+    nested = body.get("data") if isinstance(body, Mapping) else None
+    if isinstance(nested, Mapping) and nested is not body:
+        return (body, nested)
+    return (body,)
+
+
 def normalize_exercise_env(payload: Any, ref: ChallengeRef) -> EnvInfo:
     """Turn a GCS exercise payload into an :class:`EnvInfo`.
 
@@ -191,8 +232,7 @@ def normalize_exercise_env(payload: Any, ref: ChallengeRef) -> EnvInfo:
     and out of the renderer.
     """
     raw = payload if isinstance(payload, Mapping) else {"raw": payload}
-    data = payload.get("data") if isinstance(payload, Mapping) else None
-    data = data if isinstance(data, Mapping) else {}
+    data = body_map(payload)
 
     if not data:
         # No guidance tuple here: the renderer already emits the start->poll
@@ -289,9 +329,8 @@ def extract_attachments(data: Mapping[str, Any]) -> tuple[Attachment, ...]:
 
 
 def row_of(payload: Any) -> Mapping[str, Any]:
-    """The exercise detail object inside a GCS envelope response."""
-    data = payload.get("data") if isinstance(payload, Mapping) else None
-    return data if isinstance(data, Mapping) else {}
+    """The exercise/notice detail object inside a GCS client response."""
+    return body_map(payload)
 
 
 def exercise_tree(payload: Any) -> list[tuple[str, list[dict]]]:
@@ -300,7 +339,7 @@ def exercise_tree(payload: Any) -> list[tuple[str, list[dict]]]:
     The platform returns a category tree whose leaves are the challenges; the
     leaves are what carry the numeric ``id`` used by every other call.
     """
-    data = payload.get("data") if isinstance(payload, Mapping) else payload
+    data = payload_body(payload)
     if isinstance(data, Mapping):
         data = data.get("list") or data.get("items") or []
     if not isinstance(data, list):
@@ -539,8 +578,7 @@ class GCSAdapter:
         """
         if notice_id in (None, ""):
             payload = await self.client.notice_list()
-            data = payload.get("data") if isinstance(payload, Mapping) else None
-            return data if data is not None else payload
+            return payload_body(payload)
         try:
             numeric = int(str(notice_id))
         except ValueError as exc:
@@ -556,8 +594,7 @@ class GCSAdapter:
 
 def submit_accepted(payload: Any) -> bool:
     """Whether an answer payload reports a correct flag (GCS uses ``isCorrect``)."""
-    data = payload.get("data") if isinstance(payload, Mapping) else None
-    for source in (data, payload):
+    for source in _candidate_bodies(payload):
         if isinstance(source, Mapping):
             for key in ("isCorrect", "correct", "accepted"):
                 if key in source:
@@ -568,8 +605,7 @@ def submit_accepted(payload: Any) -> bool:
 
 
 def _first_text(payload: Any) -> str:
-    data = payload.get("data") if isinstance(payload, Mapping) else None
-    for source in (data, payload):
+    for source in _candidate_bodies(payload):
         if isinstance(source, Mapping):
             for key in ("message", "msg", "detail", "error"):
                 value = source.get(key)
