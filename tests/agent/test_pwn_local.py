@@ -354,6 +354,22 @@ def test_valid_env_values_are_honoured(monkeypatch, good):
     assert flags[flags.index("--memory") + 1] == good
 
 
+def test_refused_overrides_are_reported_not_silent(monkeypatch):
+    """Falling back to the default must be visible to whoever set the value."""
+    for var in ("VULNCLAW_PWN_MEMORY", "VULNCLAW_PWN_CPUS", "VULNCLAW_PWN_PIDS"):
+        monkeypatch.delenv(var, raising=False)
+    assert pwn_local.limit_override_warnings() == []
+
+    monkeypatch.setenv("VULNCLAW_PWN_MEMORY", "-1")
+    monkeypatch.setenv("VULNCLAW_PWN_PIDS", "0")
+    monkeypatch.setenv("VULNCLAW_PWN_CPUS", "2.0")
+    notes = pwn_local.limit_override_warnings()
+    assert len(notes) == 2
+    assert any("VULNCLAW_PWN_MEMORY" in n and pwn_local._DEFAULT_MEMORY_LIMIT in n for n in notes)
+    assert any("VULNCLAW_PWN_PIDS" in n for n in notes)
+    assert not any("VULNCLAW_PWN_CPUS" in n for n in notes)
+
+
 # ── the bind mount is re-verified immediately before `docker run` ───────
 
 

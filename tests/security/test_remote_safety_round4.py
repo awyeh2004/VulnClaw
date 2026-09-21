@@ -374,6 +374,20 @@ def test_insecure_does_not_record(monkeypatch, fake_paramiko, tmp_path):
     assert fake_paramiko.saved == []
 
 
+def test_insecure_does_not_load_recorded_keys(monkeypatch, fake_paramiko, tmp_path):
+    """`insecure` must not check anything — not even our own record.
+
+    Loaded keys would make a *changed* host key fail the handshake, i.e. the mode
+    would silently not be the "no check" it advertises.
+    """
+    kh = tmp_path / "known_hosts"
+    kh.write_text("h ssh-rsa AAAAB3Nza\n", encoding="utf-8")
+    monkeypatch.setattr(remote, "_known_hosts_path", lambda: kh)
+    remote._connect({"hostname": "h", "host_key_policy": "insecure"}, 5.0)
+    assert fake_paramiko.loaded == []
+    assert fake_paramiko.system_keys_loaded is False
+
+
 def test_recorded_keys_are_loaded_back(monkeypatch, fake_paramiko, tmp_path):
     """A recorded key is verified on the next session — that is the difference
     from `insecure`, which checked nothing."""
