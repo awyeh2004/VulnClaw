@@ -56,17 +56,17 @@ def test_default_home_ignores_a_stray_drill_directory(watchdog, tmp_path, monkey
 
 
 def test_default_home_honours_the_env_override(watchdog, tmp_path, monkeypatch):
-    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "home"))
-    import importlib
+    """The override comes from settings, so patch what settings resolved to.
 
+    Deliberately NOT `importlib.reload(vulnclaw.config.settings)`: a reload
+    recomputes every module-level path in that module and leaves modules that
+    already imported a derived constant holding stale values, which leaked into
+    unrelated test files (CLI tests failed when this file happened to run first).
+    """
     import vulnclaw.config.settings as settings
 
-    importlib.reload(settings)
-    try:
-        assert Path(watchdog._default_home()) == tmp_path / "home"
-    finally:
-        monkeypatch.delenv("VULNCLAW_CONFIG_DIR")
-        importlib.reload(settings)
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "home", raising=True)
+    assert Path(watchdog._default_home()) == tmp_path / "home"
 
 
 @pytest.mark.parametrize(
