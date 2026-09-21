@@ -169,19 +169,35 @@ def _wmic_args_rule(tokens: list[str]) -> str | None:
     return "wmic without a read-only verb (get/list/...) is not auto-approved"
 
 
+_REG_READONLY_VERBS = frozenset({"query", "compare"})
+_REG_WRITE_VERBS = frozenset({
+    "add", "delete", "copy", "save", "restore", "load", "unload", "import",
+    "export", "flags",
+})
+
+
 def _reg_args_rule(tokens: list[str]) -> str | None:
-    """reg query/export/compare only. reg add/delete/import/copy/save/restore mutate."""
-    for tok in tokens[1:]:
-        low = tok.lower()
-        if low in ("query", "export", "compare"):
-            return None
-        if low.startswith("-") or low.startswith("/"):
-            continue
+    """Only ``reg query`` / ``reg compare`` may run unattended.
+
+    ``reg export``/``reg save`` take an operator-chosen output path and write it
+    (``/y`` even force-overwrites), which inside an auto-approved command is an
+    arbitrary-file-write primitive — so they are not read-only, despite only
+    reading the registry. Every non-flag token is checked, not just the first,
+    so a write verb smuggled in as an operand cannot ride along behind a
+    read-only verb.
+    """
+    verbs = [t.lower() for t in tokens[1:] if not t.startswith(("-", "/"))]
+    if not verbs:
+        return "reg without a subcommand is not auto-approved"
+    if verbs[0] not in _REG_READONLY_VERBS:
         return (
-            f"reg subcommand {tok!r} is not read-only "
-            "(only query/export/compare are allowed)"
+            f"reg subcommand {verbs[0]!r} is not read-only "
+            "(only query/compare are allowed; export/save/restore write files)"
         )
-    return "reg without a subcommand is not auto-approved"
+    for verb in verbs[1:]:
+        if verb in _REG_WRITE_VERBS:
+            return f"reg argument {verb!r} is a mutating subcommand"
+    return None
 
 
 def _sc_args_rule(tokens: list[str]) -> str | None:
@@ -214,13 +230,17 @@ def _schtasks_args_rule(tokens: list[str]) -> str | None:
 
 
 def _wevtutil_args_rule(tokens: list[str]) -> str | None:
-    """wevtutil qe/gl/el/gs are read-only; cl/clear-log wipes logs."""
+    """wevtutil qe/gl/el/gs/gli are read-only; cl/clear-log wipes logs.
+
+    ``ep``/``epl`` (export-log) are deliberately absent: like ``reg export``
+    they write an operator-chosen local path, so they are not read-only.
+    """
     mutating = {"cl", "clear-log", "im", "import", "sl", "set-log",
-                "cd", "configure-log"}
+                "cd", "configure-log", "ep", "epl", "export-log"}
     for tok in tokens[1:]:
         if tok.lower().lstrip("/-") in mutating:
-            return f"wevtutil action {tok!r} mutates the event log"
-    readonly = {"qe", "gl", "el", "gs", "gli", "ep", "epl"}
+            return f"wevtutil action {tok!r} mutates the event log or writes a file"
+    readonly = {"qe", "gl", "el", "gs", "gli"}
     for tok in tokens[1:]:
         if tok.lower().lstrip("/-") in readonly:
             return None
@@ -233,12 +253,20 @@ def _net_args_rule(tokens: list[str]) -> str | None:
     ⚠️ 同一子命令既能读也能写：
       net user                     → 列举（只读）
       net user hacker P@ss /add    → 加账号（改状态）
+      net user hacker P@ss         → **重置密码**（同样改状态，且不需要 /add）
       net share                    → 列举（只读）
       net share evil=c:/           → 建共享（改状态）
-    所以不能只看第一个子命令。
+      net use                      → 列举映射（只读）
+      net use Z: \\\\host\\share    → 新建映射（改状态）
+      net time                     → 查询（只读）
+      net time /set                → **改系统时间**（改状态）
+    所以只看第一个子命令（甚至只看 /add）都不够——还要数操作数。
     """
-    mutating_flags = {"/add", "-add", "/delete", "-delete", "/active:yes",
-                      "/active:no", "/domain", "/times", "/comment"}
+    mutating_flags = {
+        "/add", "-add", "/delete", "-delete", "/active:yes", "/active:no",
+        "/domain", "/times", "/comment", "/set", "/setsntp", "/grant",
+        "/revoke", "/remove", "/y", "/yes",
+    }
     mutating_verbs = {"start", "stop", "pause", "continue", "share-add",
                       "share-del", "session-delete", "file-close"}
     tokens_l = [t.lower() for t in tokens[1:]]
@@ -253,24 +281,175 @@ def _net_args_rule(tokens: list[str]) -> str | None:
     readonly = {"view", "user", "users", "share", "session", "sessions",
                 "statistics", "stats", "config", "accounts", "group",
                 "localgroup", "time", "file", "use", "computer"}
+
+    sub: str | None = None
+    operands: list[str] = []
     for tok in tokens_l:
         if tok.startswith("-") or tok.startswith("/"):
             continue
-        if tok in readonly:
-            return None
+        if sub is None:
+            if tok not in readonly:
+                return (
+                    f"net subcommand {tok!r} is not read-only "
+                    "(start/stop/… mutate)"
+                )
+            sub = tok
+            continue
+        operands.append(tok)
+    if sub is None:
+        return "net without a subcommand is not auto-approved"
+
+    # `net user <name> <password>` resets a password with no /add in sight.
+    if sub in ("user", "users") and len(operands) >= 2:
         return (
-            f"net subcommand {tok!r} is not read-only "
-            "(start/stop/… mutate)"
+            f"net {sub} with a second operand sets that account's password "
+            "(only listing / a bare account name is read-only)"
         )
-    return "net without a subcommand is not auto-approved"
+    # `net use <share>` / `net session \\host` / `net file <id> /close` act.
+    if sub in ("use", "session", "sessions", "file") and operands:
+        return f"net {sub} with an operand changes connection state"
+    # `net accounts /minpwlen:8`, `net config server /autodisconnect:5`,
+    # `net share x /users:10` — a `/flag:value` setter mutates configuration.
+    if sub in ("accounts", "config", "share", "server", "workstation"):
+        for tok in tokens_l:
+            if tok.startswith("/") and ":" in tok:
+                return f"net {sub} setter {tok!r} changes configuration"
+    return None
 
 
 def _service_args_rule(tokens: list[str]) -> str | None:
-    """`service <name> status` is read-only; start/stop/restart are not."""
+    """`service <name> status` is read-only; start/stop/restart are not.
+
+    ``service --status-all`` is the SysV equivalent of listing every unit and is
+    read-only, so it is allowed explicitly rather than dropped by the
+    "needs two operands" shape check.
+    """
+    if "--status-all" in tokens[1:] or "-status-all" in tokens[1:]:
+        return None
     args = [t for t in tokens[1:] if not t.startswith("-")]
     if len(args) >= 2 and args[-1].lower() == "status":
         return None
     return "service is only auto-approved for the 'status' action"
+
+
+def _hostname_args_rule(tokens: list[str]) -> str | None:
+    """bare `hostname` and its read flags print the name; an operand sets it.
+
+    ``-F <file>`` also sets it (from a file), so it is refused too. Note the
+    case: ``-f`` reads the FQDN while ``-F`` writes the hostname.
+    """
+    for tok in tokens[1:]:
+        if tok == "-F" or tok.lower().startswith("--file"):
+            return "hostname -F sets the host name from a file"
+        if not tok.startswith("-"):
+            return f"hostname operand {tok!r} sets the host name"
+    return None
+
+
+def _hostnamectl_args_rule(tokens: list[str]) -> str | None:
+    """Only the query verbs are read-only; `set-hostname` & friends change identity."""
+    mutating = {
+        "set-hostname", "set-chassis", "set-deployment", "set-icon-name",
+        "set-location", "set-static-hostname", "set-transient-hostname",
+    }
+    readonly = {"status", "hostname", "icon-name", "chassis", "deployment",
+                "location"}
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low in mutating:
+            return f"hostnamectl verb {tok!r} changes host identity"
+        if tok.startswith("-"):
+            continue
+        if low not in readonly:
+            return f"hostnamectl subcommand {tok!r} is not read-only"
+        return None  # first non-flag token is a query verb; rest are operands
+    return None
+
+
+def _route_args_rule(tokens: list[str]) -> str | None:
+    """`route print` / bare `route` list; add/delete/change/flush mutate."""
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low in ("/f", "-f", "--flush"):
+            return f"route flag {tok} flushes the routing table"
+        if tok.startswith(("-", "/")):
+            continue
+        if low not in ("print", "get"):
+            return (
+                f"route operand {tok!r} is not read-only "
+                "(only `route print` / `route -n` list)"
+            )
+    return None
+
+
+def _arp_args_rule(tokens: list[str]) -> str | None:
+    """arp -a/-n/-g list; -d deletes an entry and -s plants a static one."""
+    for tok in tokens[1:]:
+        if tok.lower().lstrip("-/") in ("d", "s", "delete", "set"):
+            return f"arp action {tok!r} mutates the ARP cache"
+    return None
+
+
+def _ipconfig_args_rule(tokens: list[str]) -> str | None:
+    """ipconfig (bare) /all /displaydns read; release/renew/flushdns mutate."""
+    mutating = {
+        "/release", "/release6", "/renew", "/renew6", "/flushdns",
+        "/registerdns", "/setclassid", "/setclassid6",
+    }
+    for tok in tokens[1:]:
+        if tok.lower() in mutating:
+            return f"ipconfig flag {tok} mutates adapter or DNS state"
+    return None
+
+
+def _attrib_args_rule(tokens: list[str]) -> str | None:
+    """bare `attrib [file]` displays attributes; `+h`/`-h`/`+r`/`+s` set them."""
+    for tok in tokens[1:]:
+        if re.match(r"^[+-][A-Za-z]*$", tok):
+            return f"attrib attribute set {tok!r} mutates file attributes"
+    return None
+
+
+def _openfiles_args_rule(tokens: list[str]) -> str | None:
+    """`openfiles /query` reads; /disconnect closes handles, /local flips global state."""
+    for tok in tokens[1:]:
+        if tok.lower().lstrip("-/") in ("disconnect", "local"):
+            return f"openfiles action {tok!r} closes handles or changes global state"
+    return None
+
+
+_XXD_VALUE_FLAGS = frozenset({"-l", "-c", "-g", "-o", "-s", "-n"})
+
+
+def _xxd_args_rule(tokens: list[str]) -> str | None:
+    """xxd hex-dumps a file; a *second* operand is an output file it writes.
+
+    Operands are counted, not tokens: options that take a separate value
+    (``-l 64``, ``-c 16``, ``-s 0``…) must not be mistaken for the input file, so
+    ``xxd -l 64 /tmp/x`` stays auto-approved. A lone ``-`` IS an operand (the
+    stdin/stdout placeholder), because ``xxd -r - out.bin`` writes ``out.bin``.
+    """
+    operands: list[str] = []
+    idx = 1
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok in _XXD_VALUE_FLAGS:
+            idx += 2  # consume the flag together with its value
+            continue
+        if tok == "-" or not tok.startswith("-"):
+            operands.append(tok)
+        idx += 1
+    if len(operands) >= 2:
+        return "xxd with an output operand writes that file"
+    return None
+
+
+def _ulimit_args_rule(tokens: list[str]) -> str | None:
+    """`ulimit -a`/`-n` query; an operand (`-c unlimited`) sets a limit."""
+    for tok in tokens[1:]:
+        if not tok.startswith("-"):
+            return f"ulimit operand {tok!r} sets a resource limit"
+    return None
 
 
 def _systeminfo_args_rule(tokens: list[str]) -> str | None:
@@ -293,11 +472,19 @@ def _win_where_args_rule(tokens: list[str]) -> str | None:
 
 
 def _dmesg_args_rule(tokens: list[str]) -> str | None:
-    """dmesg -C/-c clear the kernel ring buffer."""
+    """dmesg -C/-c clear the kernel ring buffer; --clear/--read-clear do too.
+
+    早先版本只扫短选项（且跳过 ``--`` 开头的 token），于是 ``dmesg --clear``
+    这条同样会清空环形缓冲区的写法被直接放行。
+    """
+    mutating_long = {"--clear", "--read-clear", "--console-off", "--console-on"}
     for tok in tokens[1:]:
-        if tok.startswith("-") and not tok.startswith("--"):
-            for ch in tok[1:]:
-                if ch in ("C", "c"):
+        low = tok.lower()
+        if low.split("=", 1)[0] in mutating_long:
+            return f"dmesg flag {tok} clears or redirects the kernel ring buffer"
+        if low.startswith("-") and not low.startswith("--"):
+            for ch in low[1:]:
+                if ch == "c":  # matches both -c and -C
                     return f"dmesg flag {tok} clears the kernel ring buffer"
     return None
 
@@ -315,17 +502,58 @@ def _ac_args_rule(tokens: list[str]) -> str | None:
 
 
 def _crontab_args_rule(tokens: list[str]) -> str | None:
-    """crontab -l lists; -e/-r/-i MUTATE (edit / remove-all)."""
-    mutating = {"-e", "-r", "-i"}
-    for tok in tokens[1:]:
-        if tok in mutating:
-            return (
-                f"crontab flag {tok} mutates the schedule "
-                "(only -l / no-flag listing is read-only)"
-            )
-        if tok == "-u":
-            return "crontab -u targets another user's schedule (not read-only here)"
+    """Only `crontab -l` is read-only.
+
+    ⚠️ **无 flag 的 ``crontab`` 不是列举**：它从 stdin 读取计划并**整体替换**
+    当前 crontab。由于 ``|`` 是分类器的分段符，``echo '...' | crontab -``
+    会分成两段（``echo`` 与 ``crontab -``）各自通过只读判定，合起来却是一次
+    计划任务植入。``crontab <file>``（操作数）同样安装文件内容。
+    因此这里要求 **必须显式出现 ``-l``**，其余一律走审批。
+    """
+    args = tokens[1:]
+    if not args:
+        return (
+            "bare crontab replaces the schedule from stdin "
+            "(only `crontab -l` / `crontab -u <user> -l` is read-only)"
+        )
+    has_list = False
+    idx = 0
+    while idx < len(args):
+        tok = args[idx]
+        low = tok.lower()
+        if low in ("-l", "--list"):
+            has_list = True
+            idx += 1
+            continue
+        if low in ("-u", "--user"):
+            idx += 2  # consume the user operand that follows
+            continue
+        return (
+            f"crontab argument {tok!r} is not read-only "
+            "(only -l / -u <user> -l is allowed; a file operand or -e/-r installs "
+            "or destroys the schedule)"
+        )
+    if not has_list:
+        return "crontab without -l is not auto-approved"
     return None
+
+
+_RPM_MUTATING_LONG = frozenset({
+    "--install", "--erase", "--upgrade", "--freshen", "--replacepkgs",
+    "--initdb", "--rebuilddb", "--import", "--setperms", "--setugids",
+    "--justdb", "--nodeps", "--force",
+})
+
+_RPM_READONLY_LONG = frozenset({
+    "--verify", "--query", "--checksig", "--querytags", "--showrc", "--eval",
+    "--version", "--help",
+    # query-mode modifiers: they only shape the report
+    "--info", "--list", "--state", "--filesbypkg", "--dump", "--requires",
+    "--provides", "--whatrequires", "--whatprovides", "--conflicts",
+    "--obsoletes", "--changelog", "--scripts", "--triggers", "--filecaps",
+    "--dependencies", "--last", "--queryformat", "--package", "--file",
+    "--all", "--nodigest", "--nosignature",
+})
 
 
 def _rpm_args_rule(tokens: list[str]) -> str | None:
@@ -337,7 +565,8 @@ def _rpm_args_rule(tokens: list[str]) -> str | None:
       -U / -F  升级（改状态）
 
     ⚠️ 早先版本用一个扁平字符集，把 ``-i`` 当只读、把 ``-Va`` 里的 ``a`` 当非法，
-       两头都错。
+       两头都错。长选项同样不能"不认识就跳过"——``rpm --initdb`` /
+       ``--rebuilddb`` / ``--import`` 会重写包数据库，必须显式拒绝。
     """
     if len(tokens) == 1:
         return None
@@ -345,15 +574,16 @@ def _rpm_args_rule(tokens: list[str]) -> str | None:
     for tok in tokens[1:]:
         low = tok.lower()
         if low.startswith("--"):
-            if low.startswith(("--verify", "--query", "--checksig",
-                               "--querytags", "--showrc", "--eval",
-                               "--version", "--help")):
+            head = low.split("=", 1)[0]
+            if head in _RPM_MUTATING_LONG:
+                return f"rpm option {tok} mutates the package database"
+            if head in _RPM_READONLY_LONG:
                 mode = mode or "query"
                 continue
-            if low in ("--install", "--erase", "--upgrade", "--freshen",
-                       "--replacepkgs", "--nodeps"):
-                return f"rpm option {tok} mutates the package database"
-            continue
+            return (
+                f"rpm long option {tok} is not a recognised read-only query "
+                "(unknown options are refused rather than skipped)"
+            )
         if not low.startswith("-"):
             continue  # package / file operand
         for ch in low[1:]:
@@ -376,7 +606,14 @@ def _rpm_args_rule(tokens: list[str]) -> str | None:
 
 
 def _mount_args_rule(tokens: list[str]) -> str | None:
-    """bare `mount` / `mount -l` lists; adding operands mounts (mutates)."""
+    """bare `mount` / `mount -l` lists; adding operands mounts (mutates).
+
+    ``-a``/``--all`` mount every entry in fstab and take **no operand**, so the
+    operand check alone let them through.
+    """
+    for tok in tokens[1:]:
+        if tok.lower() in ("-a", "--all"):
+            return f"mount flag {tok} mounts everything in fstab"
     args = [t for t in tokens[1:] if not t.startswith("-")]
     if args:
         return "mount with operands mutates the mount table (only listing is allowed)"
@@ -427,10 +664,11 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "unhide": _unhide_args_rule,
     "chkrootkit": _chkrootkit_args_rule,
     "service": _service_args_rule,
-    "hostname": None, "hostnamectl": None,
-    "locale": None, "ulimit": None, "getent": None,
+    "hostname": _hostname_args_rule, "hostnamectl": _hostnamectl_args_rule,
+    "locale": None, "ulimit": _ulimit_args_rule, "getent": None,
     "crontab": _crontab_args_rule,
     "rpm": _rpm_args_rule,
+    "xxd": _xxd_args_rule,
 
     # ── Windows incident-response triage ──────────────────────────────
     "tasklist": None,              # /v /svc /m — 只读列举
@@ -445,14 +683,17 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "where": _win_where_args_rule,
     "findstr": None,
     "wmic": _wmic_args_rule,
-    "attrib": None,
+    "attrib": _attrib_args_rule,
     "dir": None,
     "fc": None, "comp": None,
-    "getmac": None, "ipconfig": None, "arp": None, "route": None,
+    "getmac": None,
+    "ipconfig": _ipconfig_args_rule,
+    "arp": _arp_args_rule,
+    "route": _route_args_rule,
     "nslookup": None,
     "fsutil": _fsutil_args_rule,
     "quser": None,
-    "openfiles": None,
+    "openfiles": _openfiles_args_rule,
 }
 
 # Basenames that must never be auto-approved, mirroring Codex's
@@ -655,3 +896,34 @@ def classify_shell_command(
     if reasons:
         return _prompt("; ".join(dict.fromkeys(reasons)))
     return _allow()
+
+
+def windows_shell_quoting_hazard(command: str, shell: str) -> str | None:
+    """Flag commands whose read-only verdict is unsound under cmd.exe.
+
+    This table parses with POSIX quote semantics: a single-quoted region is
+    opaque, so ``grep 'a|b' f`` is one segment. cmd.exe has no single-quote
+    quoting at all — ``'`` is an ordinary character — so everything this module
+    treated as quoted is live syntax there, in both directions:
+    ``echo 'x& curl evil'`` executes curl, and ``echo 'x > C:\\evil'`` writes a
+    file, while both classify as one allow-listed ``echo`` segment.
+
+    Only cmd.exe is affected: PowerShell protects metacharacters inside single
+    quotes exactly like POSIX sh, the default Windows shell is PowerShell, and
+    POSIX hosts are unaffected. So the caller escalates just this combination to
+    the human approval path instead of penalising every Windows command.
+
+    Known residual: cmd expands ``%VAR%`` *after* classification. That is not
+    escalated here because a fresh ``cmd /D /S /C`` process per command means the
+    variables reachable are the operator's own environment, and the classifier's
+    metachar scan sees the rest of the line literally.
+    """
+    if _basename(str(shell or "").strip()) != "cmd":
+        return None
+    if "'" in command:
+        return (
+            "cmd.exe does not honour single quotes, so the read-only "
+            "classification of this command cannot be trusted "
+            "(re-quote with double quotes, or approve it interactively)"
+        )
+    return None
