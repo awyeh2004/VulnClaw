@@ -82,10 +82,16 @@ routing:
 | CPU 飙升 / 卡顿 / 连接矿池地址 | **挖矿木马** | `events/cryptomining.md` |
 | 站点有可疑脚本、暗链、后门告警、页面跳转 | **Webshell** | `events/webshell.md` |
 | 首页被篡改、挂黑链、搜索引擎/移动端跳转 | **网页篡改 / 流量劫持** | `events/web-defacement.md` |
+| ⭐ 服务不可用、流量异常、大量半开连接、源端口 53/123 的 UDP | **DDoS 攻击** | `events/ddos.md` |
+| ⭐ 敏感数据出现在外部、监管通报、客户投诉 | **数据泄露** | `events/data-leak.md` |
 | 管理员账号被改、多出账号、登录异常 | **账号类事件** | `20-accounts.md` + `40-log-analysis.md` |
 | 只有"找到恶意程序/痕迹"这类泛问 | **先按面扫** | `10-system-basics.md` → `20-accounts.md` → `30-file-artifacts.md` |
 
 > ⚠️ 分型不要只看一个现象。勒索也会 `CPU 高`，挖矿也可能带 Webshell。**交叉验证后再定**。
+
+> ⭐ **DDoS 与数据泄露是唯一两类"攻击者不在本机留文件"的事件** —— 前几篇的
+> 找落地文件/找持久化/找后门账号那套在这里会空手而归，必须换成**流量视角**
+> （DDoS）或**数据流转视角**（数据泄露）。分型时先把这两类排掉，再进常规排查。
 
 ## 第二步：按面排查（通用主干）
 
@@ -179,6 +185,8 @@ routing:
 - `events/cryptomining.md` — 挖矿木马
 - `events/ransomware.md` — 勒索病毒（四项判据 / 错误处置方法 / 解密工具查询）
 - `events/web-defacement.md` — 网页篡改 / 流量劫持（四层篡改 / 数据库侧）
+- `events/ddos.md` — DDoS（类型判定 / 缓解顺序 / ⭐ 留证与溯源；含反射放大误判）
+- `events/data-leak.md` — 数据泄露（⭐ 泄露途径全景清单 / 逐路径排查 / 表述纪律）
 
 **案例**
 
