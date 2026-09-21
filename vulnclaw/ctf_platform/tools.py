@@ -389,6 +389,89 @@ async def _handle_start_environment(args: dict[str, Any]) -> str:
     return _format(payload)
 
 
+def _render_target_state(payload: dict[str, Any]) -> str:
+    """Render a target response so the caller cannot mistake a partial one for complete.
+
+    WHY THIS EXISTS (a real miss, not a hypothetical): the target response has two
+    different shapes depending on ``status``:
+
+      status=starting -> {id, name, status, expires_at, created_at, description}
+                         NO ``access_url``, NO ``access_urls``, NO ``nc_ssl``
+      status=running  -> adds ``access_url``, ``access_urls[]``, and ``nc_ssl``
+
+    A raw dump of the ``starting`` shape looks like a complete target description,
+    so a caller reads it once and assumes it has the connection info -- then never
+    polls again. That is exactly what happened on a real challenge: the agent
+    fetched the target while it was still ``starting``, took the bare host:port
+    from the create call, and attacked a **TLS-wrapped** target with a raw socket
+    for 20+ minutes. The ``nc_ssl: true`` it needed only appears once running.
+
+    So the status is surfaced explicitly, and when the response is not yet usable
+    the tool says what to do instead of leaving the caller to infer it.
+    """
+    import json as _json
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return (
+            "[ctf2] no target is running for this challenge.\n"
+            "Start one with ctf2_start_environment, then poll ctf2_get_target "
+            "until status=running before touching the service.\n"
+            + _format(payload)
+        )
+
+    status = str(data.get("status") or "").strip().lower()
+    url = data.get("access_url") or ""
+    ssl_flag = data.get("nc_ssl")
+    if ssl_flag is None:
+        for entry in data.get("access_urls") or []:
+            if isinstance(entry, dict) and entry.get("nc_ssl") is not None:
+                ssl_flag = entry.get("nc_ssl")
+                if not url:
+                    url = entry.get("url") or ""
+                break
+
+    lines: list[str] = [f"[ctf2] target status: {status or 'unknown'}"]
+
+    if status in ("starting", "pending", "creating", "queued", ""):
+        lines += [
+            "⚠️ NOT READY — this response is INCOMPLETE, do not use it as the target.",
+            "   While status != running the payload omits access_url / access_urls /",
+            "   nc_ssl, so connection details are simply absent (not empty).",
+            "   → Poll ctf2_get_target again in ~10s until status=running.",
+            "   → Do NOT reuse a host:port from the create call: it can differ, and",
+            "     the transport flags are unavailable until running.",
+        ]
+    elif status == "running":
+        lines.append(f"access_url: {url}")
+        if ssl_flag is True:
+            lines += [
+                "nc_ssl: true  ⚠️ THIS TARGET IS TLS-WRAPPED.",
+                "   A raw socket will complete the TCP handshake and then appear to",
+                "   do nothing (payload never reaches the service), which looks",
+                "   identical to a failed exploit. Wrap the connection first:",
+                "       ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)",
+                "       ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE",
+                "       raw = socket.create_connection((host, port), timeout=8)",
+                "       s = ctx.wrap_socket(raw, server_hostname=host)",
+            ]
+        elif ssl_flag is False:
+            lines.append("nc_ssl: false  → plain TCP is fine.")
+        else:
+            lines.append(
+                "nc_ssl: (not reported) — try plain TCP first; if the handshake "
+                "succeeds but the service never responds, try TLS."
+            )
+    else:
+        lines.append(f"(status {status!r} is not one this tool knows how to guide on)")
+
+    exp = data.get("expires_at")
+    if exp:
+        lines.append(f"expires_at: {exp}  (renew or restart the target after this)")
+
+    return "\n".join(lines) + "\n" + _format(payload)
+
+
 async def _handle_get_target(args: dict[str, Any]) -> str:
     if not _client.session_token():
         return (
@@ -401,7 +484,7 @@ async def _handle_get_target(args: dict[str, Any]) -> str:
         payload = await _client.get_target(usage, challenge)
     except Exception as exc:
         return f"[ctf2_error] get target failed: {exc}"
-    return _format(payload)
+    return _render_target_state(payload)
 
 
 async def _handle_stop_environment(args: dict[str, Any]) -> str:
