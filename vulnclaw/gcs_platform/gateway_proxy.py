@@ -16,6 +16,15 @@ This module starts a tiny in-process HTTP server on ``127.0.0.1`` that:
 The SDK is then pointed at ``http://127.0.0.1:<port>`` (which it equips with
 ``/chat/completions``) instead of the raw gateway URL, so the gateway is used
 without any code-path changes elsewhere.
+
+⚠️ The forwarding client must NOT use the system proxy. httpx defaults to
+``trust_env=True`` and reads the platform (Windows: WinINET) proxy, and it does
+not honour the Windows ``ProxyOverride`` bypass list. With a proxy tool running,
+requests to the competition gateway -- and even to the local mock upstream in the
+tests -- were handed to the proxy, which answered 502/connection-reset. Measured:
+``connect_tcp.started host='127.0.0.1' port=12334`` while the destination was
+loopback. The gateway lives on the competition network, so it must be reached
+directly; see ``vulnclaw.utils.http_client``.
 """
 
 from __future__ import annotations
@@ -26,6 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import httpx
+
+from vulnclaw.utils.http_client import http_client
 
 _PROXY_LOCK = threading.Lock()
 _PROXY_BASE_URL: str | None = None
@@ -74,7 +85,14 @@ class _GatewayProxyHandler(BaseHTTPRequestHandler):
         headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
         headers.pop("Content-Length", None)
         try:
-            with httpx.Client(timeout=600.0, follow_redirects=True) as client:
+            # targets= keeps the system proxy out of the way: the gateway is on
+            # the competition network, and a loopback upstream is local by
+            # definition. See the module docstring.
+            with http_client(
+                targets=_GatewayProxyHandler.upstream,
+                timeout=600.0,
+                follow_redirects=True,
+            ) as client:
                 resp = client.request(
                     self.command,
                     _GatewayProxyHandler.upstream,

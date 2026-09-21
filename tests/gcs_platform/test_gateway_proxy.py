@@ -9,6 +9,26 @@ from vulnclaw.gcs_platform.gateway_proxy import (
 )
 
 
+def _local_post(url: str, **kwargs) -> httpx.Response:
+    """POST to the local proxy without the system proxy in the way.
+
+    ``httpx.post`` is a module-level convenience function with ``trust_env=True``
+    baked in, so on any machine running a proxy tool (Clash/Hiddify/...) these
+    tests sent their loopback request to the proxy and got a connection reset.
+    httpx does not honour the Windows ``ProxyOverride`` bypass list, so "it works
+    on my machine" depended entirely on whether a proxy happened to be running.
+    The client under test is deliberately local, so opt out explicitly.
+
+    The real client class is taken from ``httpx._client`` rather than the
+    ``httpx.Client`` attribute, because one test monkeypatches that attribute with
+    a stub that only implements ``request``. Reading through the module object
+    keeps this helper usable no matter what the test under way has replaced.
+    """
+    real_client = httpx._client.Client  # noqa: SLF001 - deliberately bypass the patch
+    with real_client(trust_env=False) as client:
+        return client.post(url, **kwargs)
+
+
 def _local_server():
     """Return a mock upstream (bare gateway) that echoes back a valid reply."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,7 +90,7 @@ def test_proxy_forwards_to_bare_url():
     upstream = f"http://127.0.0.1:{port}"
     local = ensure_gateway_proxy_running(upstream=upstream, api_key="k1")
     try:
-        resp = httpx.post(
+        resp = _local_post(
             f"{local}/chat/completions",
             headers={"Authorization": "Bearer k1", "Content-Type": "application/json"},
             json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}]},
@@ -108,7 +128,7 @@ def test_proxy_restarts_on_new_upstream():
         )
         assert first != second
         # The old mapping is replaced: both ports should route to their mocks.
-        r = httpx.post(
+        r = _local_post(
             f"{second}/chat/completions",
             headers={"Authorization": "Bearer k", "Content-Type": "application/json"},
             json={"model": "m", "messages": [{"role": "user", "content": "x"}]},
@@ -142,7 +162,7 @@ def test_proxy_error_body_does_not_leak_the_gateway_token(monkeypatch):
 
         monkeypatch.setattr(httpx, "Client", lambda **kwargs: _BoomClient(_boom))
         base = gp.ensure_gateway_proxy_running(upstream=upstream, api_key="sk-secret-key-1234")
-        resp = httpx.post(
+        resp = _local_post(
             f"{base}/chat/completions",
             headers={"Content-Type": "application/json"},
             json={"model": "m", "messages": []},
