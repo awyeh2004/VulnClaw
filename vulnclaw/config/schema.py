@@ -852,6 +852,55 @@ class RemoteConfig(BaseModel):
     )
 
 
+class PlatformToggle(BaseModel):
+    """Per-platform exposure switch: ``platforms.<name>.enabled``.
+
+    ``None`` means "say nothing", so the adapter's own ``enabled_by_default``
+    applies; ``True``/``False`` override it.
+    """
+
+    enabled: bool | None = Field(
+        default=None,
+        description=(
+            "Expose this platform's tool face to the agent. Omit to use the "
+            "adapter's built-in default (GCS: hidden, CTF2: exposed)."
+        ),
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
+class PlatformsConfig(BaseModel):
+    """``platforms.<name>.enabled`` switches (design doc decision Q6).
+
+    Free-form by name on purpose: adapters register themselves at runtime, so a
+    fixed field list would make every newly registered platform silently
+    unconfigurable. ``extra="allow"`` is what lets ``platforms.gcs.enabled: true``
+    survive parsing — without it pydantic drops the unknown section and every
+    documented switch is a no-op.
+
+    A bare ``platforms.gcs: true`` shorthand is also honoured (see
+    ``registry._config_enabled``).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    def toggle_for(self, name: str) -> bool | None:
+        """The explicit value for ``name``, or None when it is unset/unknown."""
+        entry = getattr(self, name, None)
+        if entry is None:
+            extra = self.model_extra or {}
+            entry = extra.get(name)
+        if entry is None:
+            return None
+        if isinstance(entry, bool):
+            return entry
+        if isinstance(entry, dict):
+            value = entry.get("enabled")
+            return None if value is None else bool(value)
+        return getattr(entry, "enabled", None)
+
+
 class VulnClawConfig(BaseModel):
     """Top-level VulnClaw configuration."""
 
@@ -864,6 +913,12 @@ class VulnClawConfig(BaseModel):
     gcs: "GCSPLatformConfig" = Field(default_factory=lambda: GCSPLatformConfig())
     competition: CompetitionConfig = Field(default_factory=CompetitionConfig)
     remote: RemoteConfig = Field(default_factory=RemoteConfig)
+    platforms: PlatformsConfig = Field(
+        default_factory=PlatformsConfig,
+        description=(
+            "Per-platform exposure switches, e.g. platforms: {gcs: {enabled: true}}"
+        ),
+    )
 
     model_config = ConfigDict(
         env_prefix="VULNCLAW_",

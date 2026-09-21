@@ -80,6 +80,11 @@ def _config_enabled(name: str) -> bool | None:
     Returns False when the config cannot be read at all (fail closed); returns
     None when it reads fine but simply says nothing about this platform, so the
     adapter's own default can apply.
+
+    Reads three shapes, because the section is free-form by adapter name
+    (``PlatformsConfig`` uses ``extra="allow"``): a nested mapping
+    (``{name: {enabled: true}}``), a model instance, and the bare
+    ``{name: true}`` shorthand.
     """
     try:
         from vulnclaw.config.settings import load_config
@@ -97,9 +102,14 @@ def _config_enabled(name: str) -> bool | None:
         entry = section.get(name)
     else:
         entry = getattr(section, name, None)
+    if entry is None and not isinstance(section, Mapping):
+        entry = (getattr(section, "model_extra", None) or {}).get(name)
     if entry is None:
         return None
 
+    # `platforms.gcs: true` shorthand.
+    if isinstance(entry, bool):
+        return entry
     if isinstance(entry, Mapping):
         value = entry.get("enabled")
     else:
