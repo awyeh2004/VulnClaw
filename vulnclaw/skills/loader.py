@@ -152,6 +152,30 @@ def load_skill_by_name(name: str) -> Optional[dict[str, Any]]:
     return None
 
 
+# ── reference ordering ──────────────────────────────────────────────
+#
+# Two properties the prompt depends on, both from the round-5 review:
+#
+# 1. **Platform-independent.** The list used to come from ``sorted(rglob())``, and
+#    comparing ``Path`` objects case-folds on Windows: ``book/INDEX.md`` sorted
+#    AFTER every ``book/ch*.md`` there but BEFORE it on POSIX. Since the prompt
+#    shows only the first ten refs, the file a skill tells the model to read first
+#    ("read INDEX.md before the chapters") reached the system prompt on Linux and
+#    silently did not on Windows. Sorting the POSIX relative *string* makes the
+#    order identical everywhere.
+# 2. **Entry points first.** Whatever the truncation, a doc named as the entry
+#    point keeps a slot instead of competing with 13 chapters.
+_ENTRY_POINT_RE = re.compile(r"^(index|readme|overview|contents|00[-_].*)$", re.IGNORECASE)
+
+
+def reference_sort_key(rel_path: str) -> tuple[int, str]:
+    """Sort key for a references/-relative POSIX path (entry points, then ASCII)."""
+    name = str(rel_path or "").rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    is_entry = bool(_ENTRY_POINT_RE.match(stem))
+    return (0 if is_entry else 1, str(rel_path or ""))
+
+
 def _parse_skill_directory(skill_dir: Path) -> dict[str, Any]:
     """Parse a directory-format skill.
 
@@ -178,9 +202,13 @@ def _parse_skill_directory(skill_dir: Path) -> dict[str, Any]:
     references_dir = skill_dir / "references"
     ref_files: list[str] = []
     if references_dir.exists() and references_dir.is_dir():
-        for ref in sorted(references_dir.rglob("*")):
-            if ref.is_file() and ref.suffix in (".md", ".yaml", ".yml"):
-                ref_files.append(ref.relative_to(references_dir).as_posix())
+        collected = [
+            ref.relative_to(references_dir).as_posix()
+            for ref in references_dir.rglob("*")
+            if ref.is_file() and ref.suffix in (".md", ".yaml", ".yml")
+        ]
+        collected.sort(key=reference_sort_key)
+        ref_files.extend(collected)
 
     result["references"] = ref_files
     result["references_dir"] = str(references_dir)
