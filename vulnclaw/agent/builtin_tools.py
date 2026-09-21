@@ -69,6 +69,12 @@ from vulnclaw.ctf_platform import (
     ctf2_tool_schemas,
     dispatch_ctf2_tool,
 )
+from vulnclaw.platforms.tools import (
+    CORE_TOOL_NAMES as _PLATFORM_CORE_TOOL_NAMES,
+    PLATFORM_TOOL_NAMES as _PLATFORM_TOOL_NAMES,
+    dispatch_platform_tool,
+    platform_tool_schemas,
+)
 from vulnclaw.gcs_platform import (
     GCS_TOOL_NAMES,
     dispatch_gcs_tool,
@@ -1256,6 +1262,12 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     if tool_name in INTEL_TOOL_NAMES:
         return await dispatch_intel_tool(agent, tool_name, args)
 
+    # Platform-neutral tools. The platform rides in the `ref` argument, so there
+    # is no tool name that could express the wrong platform (the old
+    # ctf2_submit_flag / gcs_submit_flag pair is what let an agent pick wrongly).
+    if tool_name in _PLATFORM_TOOL_NAMES:
+        return await dispatch_platform_tool(tool_name, args)
+
     if tool_name in CTF_TOOL_NAMES:
         return await dispatch_ctf2_tool(tool_name, args)
 
@@ -1600,6 +1612,15 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     # setting (`gcs.tools_enabled`, default off) and gcs_tool_schemas() returns
     # an empty list when it is disabled, which removes the tools from the schema
     # entirely. Nothing to pin, and no list to keep in sync.
+    #
+    # ⚠️ The platform-neutral tools DO have to be pinned, and this was measured
+    # rather than assumed: `_infer_allowed_tools` prunes the schema from the goal
+    # text, and a goal containing any task keyword ("password", "http://", "登录",
+    # "源码"...) dropped the entire ctf2_*/gcs_* face -- measured as
+    # `n=41, ctf2 in: []`. A model that cannot see a platform tool cannot address
+    # the platform at all, and the failure is silent. So the 6 core verbs are
+    # kept unconditionally; only the optional, capability-gated ones can be pruned.
+    *_PLATFORM_CORE_TOOL_NAMES,
 })
 
 # Task-specific tool bundles keyed by inferred task type. Names not listed here
@@ -2066,6 +2087,9 @@ def build_openai_tools(
         append_tool(tool)
 
     for tool in ctf2_tool_schemas():
+        append_tool(tool)
+
+    for tool in platform_tool_schemas():
         append_tool(tool)
 
     for tool in gcs_tool_schemas():
