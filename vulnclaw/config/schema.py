@@ -778,13 +778,20 @@ class SSHHostConfig(BaseModel):
     )
     password: str = Field(
         default="",
-        description="Password auth fallback. Only used when no key succeeds.",
+        description=(
+            "Password auth fallback. Only used when no key succeeds. "
+            "NOTE: this is stored in plaintext in the config file — prefer "
+            "key_file/auth-agent, and treat ~/.vulnclaw/config.yaml as a secret."
+        ),
     )
     host_key_policy: str = Field(
         default="known_hosts",
         description=(
-            "known_hosts (default, strict) | accept_new (TOFU: record and "
-            "report the fingerprint, then trust it) | insecure (no check)"
+            "known_hosts (default, strict: system + VulnClaw known_hosts, unknown "
+            "host raises) | accept_new (TOFU with memory: the first-contact key is "
+            "recorded into ~/.vulnclaw/known_hosts and verified on every later "
+            "session, so a changed key is refused) | insecure (no check and no "
+            "record — every session is a fresh trust decision)"
         ),
     )
     note: str = Field(default="", description="Free-form label (role, owner, why in scope)")
