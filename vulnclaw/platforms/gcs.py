@@ -54,6 +54,7 @@ from vulnclaw.platforms.normalize import (
     normalize_bool,
     split_host_port,
     state_from_flags,
+    transport_from_url,
 )
 from vulnclaw.platforms.refs import ChallengeRef, CorpusRef, RefError, parse_fields
 from vulnclaw.platforms.render import TOOL_READ_ENV, TOOL_START_ENV
@@ -175,8 +176,10 @@ def extract_endpoints(data: Mapping[str, Any]) -> tuple[EnvEndpoint, ...]:
                 host=host,
                 port=port,
                 url="" if url.startswith(host) and "://" not in url else url,
-                # GCS publishes no transport flag we have observed; never assume tcp.
-                transport=base.TRANSPORT_UNKNOWN,
+                # GCS publishes no transport flag we have observed, so the scheme is
+                # the only evidence available -- and it beats `unknown`: `http://` is
+                # plain, `https://` is TLS. A bare host:port stays `unknown`.
+                transport=transport_from_url(url),
                 user=user,
             )
         )
