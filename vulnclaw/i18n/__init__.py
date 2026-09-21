@@ -205,3 +205,18 @@ def current_lang() -> str:
         init_i18n()
     return _translator.lang
 
+
+def reset_i18n() -> None:
+    """Drop the global translator so the next use auto-detects again.
+
+    Test helper, mirroring ``exec_gate.reset_execution_gate`` and
+    ``submit_guard.reset_guard``. The module holds process-wide mutable state
+    (``_translator``) and there was no way to clear it, so a test that called
+    ``init_i18n("en")`` without restoring left every later test pinned to English.
+    That produced a *non-deterministic* full-suite failure -- a different handful
+    of language-sensitive tests failed on each run, including the KB language
+    gate, depending on which test happened to have run last.
+    """
+    global _translator
+    _translator = None
+
