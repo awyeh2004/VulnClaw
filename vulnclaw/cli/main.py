@@ -1676,6 +1676,31 @@ def run(
     console.print(_("cli.report_generated", path=report_path))
 
 
+def _typer_sentinel_types() -> tuple[type, ...]:
+    """typer's ``OptionInfo``/``ArgumentInfo`` classes, when importable."""
+    try:
+        from typer.models import ArgumentInfo, OptionInfo
+
+        return (OptionInfo, ArgumentInfo)
+    except Exception:  # pragma: no cover - exotic typer builds
+        return ()
+
+
+def _is_typer_sentinel(value: Any) -> bool:
+    """True for a typer parameter sentinel, without relying on the class NAME.
+
+    Round-5 review (information level): this used to compare
+    ``type(value).__name__`` against two strings, so a rename inside typer would
+    blind the check and its tests at the same time — the sentinel would then be
+    used as a real value and the failure would surface far away. The real classes
+    are authoritative; the name comparison stays only as a fallback.
+    """
+    kinds = _typer_sentinel_types()
+    if kinds and isinstance(value, kinds):
+        return True
+    return type(value).__name__ in {"OptionInfo", "ArgumentInfo"}
+
+
 def _cli_value(value: Any, default: Any) -> Any:
     """Return a real value where a direct Python call left a typer sentinel.
 
@@ -1689,10 +1714,54 @@ def _cli_value(value: Any, default: Any) -> Any:
     ``build_targets``) while ``gcs`` had been patched to pass everything
     explicitly.
     """
-    if type(value).__name__ in {"OptionInfo", "ArgumentInfo"}:
+    if _is_typer_sentinel(value):
         resolved = getattr(value, "default", None)
         return default if resolved is ... else resolved
     return value
+
+
+def _signature_defaults(command: Any) -> dict[str, Any]:
+    """The declared defaults of a Typer command's parameters.
+
+    Unwraps the ``typer.Option``/``typer.Argument`` wrapper to reach the real
+    default, and skips required parameters (``...``) — those must come from the
+    caller, never from a fabricated value.
+    """
+    import inspect
+
+    defaults: dict[str, Any] = {}
+    try:
+        parameters = inspect.signature(command).parameters
+    except (TypeError, ValueError):  # pragma: no cover - Typer keeps the signature
+        return defaults
+    for name, param in parameters.items():
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        declared = getattr(param.default, "default", param.default)
+        if declared is inspect.Parameter.empty or declared is ...:
+            continue
+        defaults[name] = declared
+    return defaults
+
+
+def _solve_defaults(**overrides: Any) -> dict[str, Any]:
+    """Keyword arguments for calling :func:`solve` from Python.
+
+    ``solve`` is a Typer command, so calling it directly leaves every un-passed
+    parameter as its ``typer.Option`` object — truthy sentinels rather than the
+    declared defaults (see :func:`_cli_value`). Every optional flag therefore has
+    to be passed.
+
+    Round-5 review (information level): the three hand-off call sites copied those
+    values by hand (``max_directions=3``, ``max_tool_rounds=6``, ``model="auto"``…),
+    so changing a default inside ``solve`` would have silently left the old value
+    at the call site. They come from the command's own signature instead
+    (``_SOLVE_DECLARED_DEFAULTS``), and callers override only what they mean to
+    change.
+    """
+    merged = dict(_SOLVE_DECLARED_DEFAULTS)
+    merged.update(overrides)
+    return merged
 
 
 @app.command()
@@ -1852,6 +1921,13 @@ def solve(
                 _emit_competition_writeup(live_agent, config, writeup_dir)
 
 
+#: Declared defaults of :func:`solve`, captured ONCE from the function Typer
+#: registered. Deliberately not re-read at call time: tests (and any wrapper)
+#: replace ``main.solve`` with a stub, and inspecting the module global then sees
+#: the stub's ``**kwargs`` signature and silently yields no defaults at all.
+_SOLVE_DECLARED_DEFAULTS: dict[str, Any] = _signature_defaults(solve)
+
+
 @app.command("ctf2")
 def ctf2(
     challenge_id: str = typer.Argument(..., help="CTF2 challenge id"),
@@ -1930,33 +2006,19 @@ def ctf2(
     )
     # Hand off to the standard solve loop; reuse its full orchestration.
     #
-    # Every optional flag is passed explicitly, because `solve()` is a Typer
-    # command: calling it from Python leaves its un-passed parameters as truthy
-    # OptionInfo sentinels, which crashed this command outright
-    # (`TypeError: Value after * must be an iterable, not OptionInfo` in
-    # build_targets). `_cli_value` also unwraps this command's own defaults,
-    # which are sentinels too when `ctf2()` is called from Python.
+    # Every optional flag has to be passed explicitly (`_solve_defaults`), because
+    # `solve()` is a Typer command: calling it from Python leaves its un-passed
+    # parameters as truthy OptionInfo sentinels, which crashed this command
+    # outright (`TypeError: Value after * must be an iterable, not OptionInfo` in
+    # build_targets). `_cli_value` unwraps this command's own defaults, which are
+    # sentinels too when `ctf2()` is called from Python.
     solve(
-        target=practice_id,
-        goal=goal,
-        max_steps=_cli_value(max_steps, 240),
-        resume=False,
-        prompt=None,
-        max_directions=3,
-        max_tool_rounds=6,
-        snapshot=None,
-        run_name=None,
-        resume_run=None,
-        runs_dir=None,
-        additional_targets=None,
-        target_type=None,
-        mount=False,
-        repair=False,
-        force_fresh=False,
-        no_import=False,
-        stream=False,
-        writeup_dir=None,
-        model="auto",
+        **_solve_defaults(
+            target=practice_id,
+            goal=goal,
+            max_steps=_cli_value(max_steps, 240),
+            resume=False,
+        )
     )
 
 
@@ -2058,32 +2120,18 @@ def gcs(
         f"score [bold]{score}[/]"
     )
     # Hand off to the standard solve loop; reuse its full orchestration.
+    #
+    # `solve` is a typer command: called directly from Python its un-passed
+    # parameters keep the typer.Option objects, which read as truthy. The declared
+    # defaults come from its signature (`_solve_defaults`) rather than being
+    # copied here, so they cannot drift.
     solve(
-        target=str(exercise_id),
-        goal=goal,
-        max_steps=_cli_value(max_steps, 240),
-        resume=False,
-        # typer commands keep their typer.Option default objects when called
-        # directly from Python, so every optional flag must be passed
-        # explicitly (otherwise the OptionInfo objects read as truthy).
-        prompt=None,
-        max_directions=3,
-        max_tool_rounds=6,
-        snapshot=None,
-        run_name=None,
-        resume_run=None,
-        runs_dir=None,
-        additional_targets=None,
-        target_type=None,
-        mount=False,
-        repair=False,
-        force_fresh=False,
-        no_import=False,
-        stream=False,
-        writeup_dir=None,
-        # Missed by the earlier patch: without this the OptionInfo sentinel was
-        # handed to the model router as an override name.
-        model="auto",
+        **_solve_defaults(
+            target=str(exercise_id),
+            goal=goal,
+            max_steps=_cli_value(max_steps, 240),
+            resume=False,
+        )
     )
 
 
@@ -2426,26 +2474,13 @@ def go(
         + (f" | type={type}" if type else "")
     )
     solve(
-        target=target,
-        goal=resolved_goal,
-        prompt=None,
-        max_steps=240,
-        max_directions=3,
-        max_tool_rounds=6,
-        resume=True,
-        snapshot=None,
-        run_name=None,
-        resume_run=None,
-        runs_dir=None,
-        additional_targets=None,
-        target_type=None,
-        mount=False,
-        repair=False,
-        force_fresh=False,
-        no_import=False,
-        stream=False,
-        writeup_dir=None,
-        model=model,
+        **_solve_defaults(
+            target=target,
+            goal=resolved_goal,
+            max_steps=240,
+            resume=True,
+            model=model,
+        )
     )
 
 
