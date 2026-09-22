@@ -12,20 +12,27 @@ The obvious design searches the log for a marker:
 
 Measured on a real solve log, that never fires: the marker bytes are not present
 in the file at all, under UTF-8 or GBK (the visible text is double-encoded
-mojibake). So the "solved"/"failed" conditions were dead and the watchdog was
-silently relying on its stall timer alone.
+mojibake). A condition that can never become true is worse than no condition at
+all -- the watchdog looked healthy while silently relying on its stall timer
+alone, and nothing distinguished "checked and fine" from "check is dead".
 
 Robust instead: read vulnclaw's own structured state.
   * ``run.json``            -> status: running | completed | failed, exit_code
+  * ``current.json``        -> ``agent_state.completed`` / ``pending_questions``
   * ``python_execute_audit.jsonl`` mtime -> activity (cheap, no file read)
+
+⚠️ Do NOT read ``run.json.status == "completed"`` as "the task finished". A run
+whose process exits normally can leave ``agent_state.completed == False`` with a
+pending question, i.e. the agent is mid-task and waiting on a reply. That case is
+reported as ``NEEDS_INPUT``; see :func:`_outcome`.
 
 Token budget
 ------------
 The old design wrote 300-800 characters of raw log into its report. The agent
-does not need log prose -- it needs the state and where to look next, so the
-default report is ~6 short lines. Milestones are printed as they happen (so
-progress is visible without polling), and ``--verbose`` exists for the rare case
-where human-readable detail is actually wanted.
+does not need log prose -- it needs the state and what to do next, so the default
+report is ~6 short lines. Milestones are printed as they happen (so progress is
+visible without polling), and ``--verbose`` exists for the rare case where
+human-readable detail is actually wanted.
 
 Usage (agent: run this in the background)
 ----------------------------------------
@@ -343,7 +350,13 @@ def _status_lines(args: argparse.Namespace) -> tuple[list[str], str, tuple[int, 
                     lines.append(f"asking: {outcome['answer'][:160]}")
                 for q in outcome.get("questions", [])[:3]:
                     lines.append(f"question: {q[:200]}")
-                lines.append("^ the run is BLOCKED on a reply -- it has NOT finished the task")
+                # State the action, not just the condition. An agent reading this
+                # as its only context should not have to infer whether the run is
+                # finished, nor re-derive how to resume it.
+                lines.append(
+                    "ACTION: the agent is waiting on you. Answer it in the session, "
+                    "then re-check this run. Do NOT record this run as finished."
+                )
         elif outcome.get("answer") and status.lower() != "running":
             lines.append(f"final: {outcome['answer']}")
 
@@ -399,8 +412,44 @@ def follow_status(args: argparse.Namespace) -> int:
     return 0
 
 
+_EPILOG = """\
+pick exactly ONE mode (two watchdogs on one run duplicate every notification):
+
+  python scripts/run_watchdog.py --run NAME --status
+      Peek once, ~10 lines, exits. For "is it still working?" mid-flight.
+
+  python scripts/run_watchdog.py --run NAME --follow
+      One short line per change, then the final block. For a running narrative.
+
+  python scripts/run_watchdog.py --run NAME --follow --quiet
+      Silent until the run ends OR needs input, then ONE block.
+      Use this in the background for unattended supervision: one call in, one
+      verdict out, and every poll inside that single call is free.
+
+do NOT call --status in your own loop: N checks then cost N tool calls and N
+full blocks, which is the cost these modes exist to avoid.
+
+how to read the verdict (always the first line of the final block):
+
+  ENDED:COMPLETED   the run finished its task
+  NEEDS_INPUT       the run is WAITING ON YOU. Read the 'question:' line, answer
+                    it in the session, then re-check. Do NOT record it finished.
+  ENDED:FAILED      the process failed
+  STUCK             no activity for --stall-secs; look for what blocked it
+  NO_RUN_DIR        no run.json appeared; the run name or --home is probably wrong
+  TIMEOUT           still running when --max-minutes elapsed; the block shows how far
+
+exit code is always 0 -- the verdict is the first line of stdout, and a non-zero
+exit would be indistinguishable from the watchdog itself failing.
+"""
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Token-lean watchdog for a vulnclaw run")
+    ap = argparse.ArgumentParser(
+        description="Token-lean watchdog for a vulnclaw run",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--run", required=True, help="run name (the runs/<name> directory)")
     ap.add_argument("--home", default=str(DEFAULT_HOME), help="VULNCLAW_CONFIG_DIR used by the run")
     ap.add_argument("--stall-secs", type=float, default=420.0,
@@ -479,10 +528,14 @@ def main() -> int:
                     # stopped to ask the operator something. Saying "ENDED:COMPLETED"
                     # here would invite the supervisor to close a run that is
                     # actually blocked on them.
-                    detail += " | BLOCKED: run.json says completed but agent_state"
-                    detail += " says completed=False"
+                    detail += " | run.json says completed but agent_state says"
+                    detail += " completed=False"
                     for q in outcome.get("questions", [])[:3]:
                         detail += f"\n     question: {q[:200]}"
+                    detail += (
+                        "\n     ACTION: answer the run, then re-check it."
+                        " Do NOT record it as finished."
+                    )
                     return emit("NEEDS_INPUT", detail)
                 return emit(f"ENDED:{status.upper()}", detail)
 

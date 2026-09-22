@@ -314,6 +314,31 @@ $env:VULNCLAW_CONFIG_DIR = 'D:\ir-run\vulnclaw-home'   # 全部状态都去这�
 
 > ⭐ **赛前务必确认 `~/.vulnclaw` 可写。** 否则可能"跑完才发现报告没生成"。
 
+### ⭐ 监督长跑：`scripts/run_watchdog.py`（给外层 agent 用）
+
+`vulnclaw solve` 一跑就是几十分钟。这个脚本读 vulnclaw **自己的结构化状态**
+（`run.json` / `current.json`），不解析日志文本，所以不受编码与格式变化影响，
+输出也压到几行 —— 它是给 agent 当**上下文**用的，不是给人看的。
+
+```bash
+# 三选一，别同时开两个（会重复通知）
+python scripts/run_watchdog.py --run <name> --status          # 偷看一次，~10 行
+python scripts/run_watchdog.py --run <name> --follow          # 变化才打一行
+python scripts/run_watchdog.py --run <name> --follow --quiet  # 后台盯梢，只在有事时说话
+```
+
+⚠️ **别自己循环调 `--status`**：N 次检查 = N 次工具调用 + N 个状态块。
+轮询循环在脚本进程里，所以第三种模式一次后台调用就能覆盖全过程。
+
+⚠️ **`NEEDS_INPUT` 必须处理**：`run.json` 显示 `completed` **不等于任务做完了**。
+实测遇到过进程正常退出、但 `agent_state.completed=False` 且 `pending_questions`
+非空 —— agent 停在问操作员一个问题。只看 `run.json` 会**关掉一个正等着你回复的
+run**。该情形现在单独报成 `NEEDS_INPUT` 并附上待答问题与行动指引。
+
+`python scripts/run_watchdog.py --help` 末尾列了全部结局（`ENDED:COMPLETED` /
+`NEEDS_INPUT` / `ENDED:FAILED` / `STUCK` / `NO_RUN_DIR` / `TIMEOUT`）的含义。
+**退出码恒为 0**，结局看 stdout 第一行。
+
 ### ⚠️ 坑 2：题面提示没有外部注入通道
 
 ```
