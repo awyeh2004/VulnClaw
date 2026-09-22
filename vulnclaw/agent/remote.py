@@ -590,6 +590,13 @@ def fetch_file(
         tmp_path = Path(tmp_name)
         sftp.get(remote_path, str(tmp_path), callback=_watch)
         sftp.close()
+        # Durability before the rename: on NTFS the rename's metadata can hit
+        # the disk ahead of the fetched data, leaving a size-correct but
+        # truncated file after a power loss — the exact "looks complete"
+        # outcome this fetch must never produce. Every other atomic_write
+        # adopter fsyncs; this was the omission.
+        with open(tmp_path, "rb+") as f:
+            os.fsync(f.fileno())
         size = tmp_path.stat().st_size
         # Retried rename: on Windows a bare os.replace fails intermittently when a
         # scanner holds the destination open, which would lose a fetched artifact.
