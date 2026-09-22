@@ -252,12 +252,17 @@ class FindingParser:
                     break
 
         clean_response = strip_think_tags(response)
+        # Flag literals come from the ONE list of platform prefixes (ctf_mode), not a
+        # local copy: the copy here had drifted to 3 of the 17 prefixes, so a
+        # DASCTF{}/BUUCTF{}/CTFshow{} flag mentioned in a response was never recorded.
+        # The generic word{...} catch-all is deliberately excluded -- too loose for
+        # note extraction. IGNORECASE stays, so this is a superset of the old set.
+        from vulnclaw.agent.ctf_mode import FLAG_PREFIX_PATTERNS
+
         discovery_markers = [
             r"\[\+\]\s*(.+?)(?:\n|$)",
             r"发现[：: ]\s*(.+?)(?:\n|$)",
-            r"(flag\{[^}]+\})",
-            r"(NSSCTF\{[^}]+\})",
-            r"(CTF\{[^}]+\})",
+            *FLAG_PREFIX_PATTERNS,
         ]
         for pattern in discovery_markers:
             for match in re.findall(pattern, clean_response, re.IGNORECASE):
