@@ -44,3 +44,17 @@ def test_boundary_age_is_kept(tmp_path, monkeypatch):
     monkeypatch.setattr(conftest, "TEST_ROOT", sandbox)
     assert conftest._prune_stale_test_root() == 0
     assert (sandbox / "edge-file").exists()
+
+
+def test_top_level_markdown_is_never_pruned(tmp_path, monkeypatch):
+    """Handoff notes (.md) live in TEST_ROOT and must outlive any staleness window."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    _touch(sandbox / "HANDOFF.md", age_hours=conftest.STALE_TEST_ROOT_HOURS * 10)
+    _touch(sandbox / "PROGRESS-2099-01-01.md", age_hours=conftest.STALE_TEST_ROOT_HOURS * 10)
+
+    monkeypatch.setattr(conftest, "TEST_ROOT", sandbox)
+    conftest._prune_stale_test_root()
+
+    assert (sandbox / "HANDOFF.md").exists()
+    assert (sandbox / "PROGRESS-2099-01-01.md").exists()
