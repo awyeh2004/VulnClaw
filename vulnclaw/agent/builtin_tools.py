@@ -1361,9 +1361,10 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             return execute_bg_launch(agent, args)
         return execute_bg_result(agent, args)
 
-    # ── OCR（本地 GPU 加速）────────────────────────────────────────────────────
+    # ── OCR（本地 GPU 加载 + 可能的 PowerShell/HTTP 降级链，整体重同步活）
+    # to_thread：easyocr Reader 首次加载可达数十秒，同步直调会冻结整个 agent 循环
     if tool_name in _OCR_TOOL_NAMES:
-        return execute_ocr(agent, args)
+        return await asyncio.to_thread(execute_ocr, agent, args)
 
     # ── pyc 字节码分析（CTF REVERSE）──────────────────────────────────────────
     if tool_name in _PYC_TOOL_NAMES:
@@ -2425,6 +2426,17 @@ async def execute_vault_tool(agent: AgentContext, tool_name: str, args: dict[str
     return f"[!] unknown vault tool: {tool_name}"
 
 
+def _run_nmap_argv(cmd: list[str], **kwargs: Any) -> Any:
+    """Synchronous nmap runner for asyncio.to_thread.
+
+    Kept as its own function so the run_text call stays a scannable spawn site:
+    passing ``run_text`` itself to to_thread would hide it from
+    verify_execution_boundary. Off the event loop because a 120s scan (plus the
+    de-escalation retry) used to freeze the whole agent loop.
+    """
+    return run_text(cmd, **kwargs)
+
+
 async def execute_nmap(agent: AgentContext, args: dict[str, Any]) -> str:
     target = args.get("target", "").strip()
     if not target:
@@ -2528,19 +2540,13 @@ async def execute_nmap(agent: AgentContext, args: dict[str, Any]) -> str:
         cmd.append(target)
 
     try:
-        kwargs: dict[str, Any] = {
-            "capture_output": True,
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
-            "timeout": 120,
-        }
+        kwargs: dict[str, Any] = {"timeout": 120}
         if sys.platform == "win32":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
             kwargs["startupinfo"] = startupinfo
-        result = subprocess.run(cmd, **kwargs)
+        result = await asyncio.to_thread(_run_nmap_argv, cmd, **kwargs)
         if (
             result.returncode != 0
             and not result.stdout
@@ -2548,7 +2554,7 @@ async def execute_nmap(agent: AgentContext, args: dict[str, Any]) -> str:
         ):
             fallback_cmd = deescalate_nmap_argv(cmd)
             if fallback_cmd != cmd:
-                fallback = subprocess.run(fallback_cmd, **kwargs)
+                fallback = await asyncio.to_thread(_run_nmap_argv, fallback_cmd, **kwargs)
                 if fallback.returncode == 0 or fallback.stdout:
                     result = fallback
                     deescalated_note = "[i] 权限错误后已使用非特权 nmap 参数重试。\n"
@@ -3828,18 +3834,20 @@ def execute_bg_result(agent: AgentContext, args: dict[str, Any]) -> str:
 # ── OCR 工具（本地 GPU 加速）────────────────────────────────────────────────────
 
 _OCR_TOOL_NAMES = {"ocr"}
-_OCR_READER_CACHE: dict[str, Any] = {}
+_OCR_READER_CACHE: dict[Any, Any] = {}
+# Module-level on purpose: the double-checked lock below used to create a fresh
+# ``threading.Lock()`` inside the function on every call, which locks nothing —
+# concurrent OCR calls would each load their own GPU Reader.
+_OCR_READER_LOCK = _threading.Lock()
 
 
 def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
     """Run easyocr on the image, reusing a process-wide cached Reader to avoid
     reloading the model on every call (GPU warm-up dominates single-shot cost)."""
-    import threading
-
     key = (lang, "en")
     reader = _OCR_READER_CACHE.get(key)
     if reader is None:
-        with threading.Lock():
+        with _OCR_READER_LOCK:
             reader = _OCR_READER_CACHE.get(key)
             if reader is None:
                 reader = easyocr_module.Reader([lang], gpu=True)

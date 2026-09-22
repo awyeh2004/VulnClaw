@@ -30,7 +30,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOT = REPO_ROOT / "vulnclaw"
 
-# Callables that create (or can create) an OS process.
+# Callables that create (or can create) an OS process, plus the single shared
+# funnel every ad-hoc text-mode subprocess call was collapsed into. Bare
+# ``run_text`` must be scanned like a spawn: otherwise any new
+# ``run_text(argv, shell=True)`` call site would be invisible to this audit,
+# which is exactly the drift the audit exists to catch (round-5 C1).
 _SPAWN_CALLS = {
     # subprocess module
     "subprocess.run",
@@ -68,6 +72,8 @@ _SPAWN_CALLS = {
     "multiprocessing.Process",
     "pty.spawn",
     "pty.fork",
+    # the shared pinned-codec subprocess funnel
+    "run_text",
 }
 
 # Reviewed baseline. Keyed by ``file:enclosing-scope:call:invariant-hash`` and
@@ -101,23 +107,23 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "fixed Windows taskkill fallback for the gated process runner",
     },
-    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:d805ac27": {
+    "vulnclaw/agent/builtin_tools.py:execute_nmap:run_text:23791bbb": {
         "count": 1,
-        "purpose": "fixed Windows nmap path lookup",
+        "purpose": "fixed Windows nmap path lookup (where.exe), via the pinned-codec funnel",
     },
-    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:d1b03639": {
+    "vulnclaw/agent/builtin_tools.py:_run_nmap_argv:run_text:ddcaa122": {
         "count": 1,
+        # model-reachable: called via asyncio.to_thread from execute_nmap;
+        # argv stays the structured, schema-constrained nmap command (plus the
+        # de-escalated retry) that the previous two inline subprocess.run
+        # entries covered.
         "purpose": "structured argv nmap execution constrained by the nmap tool schema",
-    },
-    "vulnclaw/agent/builtin_tools.py:execute_nmap:subprocess.run:c668bb28": {
-        "count": 1,
-        "purpose": "structured argv non-privileged nmap retry",
     },
     "vulnclaw/agent/builtin_tools.py:run_subprocess_capture:subprocess.run:f57fafd0": {
         "count": 1,
         "purpose": "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)",
     },
-    "vulnclaw/report/verifier.py:VerifierExecutor.execute_poc:subprocess.run:7d9e470e": {
+    "vulnclaw/report/verifier.py:VerifierExecutor.execute_poc:run_text:90b02123": {
         "count": 1,
         "purpose": "generated-PoC verification after synchronous ExecutionGate approval",
     },
@@ -136,7 +142,7 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "operator control plane: native TUI binary launcher",
     },
-    "vulnclaw/cli/tui.py:_command_version:subprocess.run:96da868b": {
+    "vulnclaw/cli/tui.py:_command_version:run_text:eda38280": {
         "count": 1,
         "purpose": "operator control plane: fixed version diagnostic",
     },
@@ -148,7 +154,7 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "operator control plane: Unix pbpaste/wl-paste/xclip/xsel for /config paste",
     },
-    "vulnclaw/cli/main.py:doctor:subprocess.run:ad1ae372": {
+    "vulnclaw/cli/main.py:doctor:run_text:3409aa7f": {
         "count": 1,
         "purpose": "operator control plane: fixed Node.js version diagnostic",
     },
@@ -162,23 +168,23 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "operator control plane: POSIX terminal clear (clear)",
     },
-    "vulnclaw/cli/wizard.py:_java_major_version:subprocess.run:15f85f79": {
+    "vulnclaw/cli/wizard.py:_java_major_version:run_text:078b11ec": {
         "count": 1,
         "purpose": "fixed java -version probe during wizard Java detection",
     },
-    "vulnclaw/cli/wizard.py:ensure_java:subprocess.run:3bdfe632": {
+    "vulnclaw/cli/wizard.py:ensure_java:run_text:eba5a3e8": {
         "count": 1,
         "purpose": "fixed winget install of Temurin JDK 17 package on user confirm",
     },
-    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:440f9a66": {
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:run_text:acf65aa5": {
         "count": 1,
         "purpose": "git clone of the constant PortSwigger mcp-server repo",
     },
-    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:a4b29dcd": {
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:run_text:c694af39": {
         "count": 1,
         "purpose": "gradlew embedProxyJar in the cloned constant repo (Windows shell)",
     },
-    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:subprocess.run:ddde3a6f": {
+    "vulnclaw/cli/wizard.py:ensure_burp_mcp_jar:run_text:65d5802e": {
         "count": 1,
         "purpose": "gradlew embedProxyJar in the cloned constant repo (POSIX argv)",
     },
@@ -350,6 +356,11 @@ def _partition_sites(
     A key is reviewed only while its call-site count is within the recorded
     budget, so adding a *second* spawn call next to an already-approved one is
     still a violation rather than riding along on the existing entry.
+
+    Stale allowlist entries are violations too (round-5 C2): an entry whose key
+    matched nothing in the tree is dead budget — it can silently absorb a
+    structurally identical spawn if one is ever reintroduced, so it must be
+    pruned at the same commit that removes the call site it used to cover.
     """
     grouped: dict[str, list[SpawnSite]] = {}
     for s in sites:
@@ -372,6 +383,8 @@ def _partition_sites(
                 }
                 for r in rows[budget:]
             )
+    for key in sorted(set(ALLOWED_SPAWN_SITES) - set(grouped)):
+        violations.append({"key": key, "reason": "stale allowlist entry (matches nothing)"})
     return reviewed, violations
 
 
@@ -409,8 +422,12 @@ def main() -> int:
         return 0 if not violations else 1
 
     if violations:
-        print("execution-boundary check FAILED — unreviewed spawn sites:\n")
+        print("execution-boundary check FAILED — unreviewed/stale spawn entries:\n")
         for v in violations:
+            if "key" in v and "file" not in v:  # stale allowlist entry
+                print(f"  ALLOWLIST {v['key']}")
+                print(f"      reason: {v.get('reason')}")
+                continue
             print(f"  {v['file']}:{v['line']}  {v['call']}()  [{v.get('scope')}]")
             print(f"      key:    {v['file']}:{v.get('scope')}:{v['call']}:{v.get('invariant')}")
             print(f"      reason: {v.get('reason')}")
@@ -420,6 +437,9 @@ def main() -> int:
             "owner/purpose note before it can merge. The key is\n"
             "  file:enclosing-scope:call:invariant-hash\n"
             "so it survives line shifts; if only the line moved, nothing to do.\n"
+            "Stale entries must be deleted in the same commit that removes the\n"
+            "call site they covered — dead budget can silently absorb a\n"
+            "reintroduced spawn.\n"
         )
         return 1
 

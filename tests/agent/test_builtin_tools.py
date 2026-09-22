@@ -1051,3 +1051,33 @@ class TestSolveScratchWorkdir:
         )
         cwd = str(getattr(channel.views[-1], "cwd", ""))
         assert "20260921T101010Z-solve-x" not in cwd
+
+
+class TestNmapThreadOffload:
+    """Round-5 A1: a 120s nmap scan must not run on the event loop thread."""
+
+    async def test_nmap_scan_runs_off_the_event_loop_thread(self, monkeypatch):
+        import subprocess
+        import threading
+
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        loop_thread = threading.get_ident()
+        worker_threads: list[int] = []
+
+        def fake_run(cmd, **kwargs):
+            worker_threads.append(threading.get_ident())
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(builtin_tools.shutil, "which", lambda name: "C:/fake/nmap.exe")
+        monkeypatch.setattr(builtin_tools, "_run_nmap_argv", fake_run)
+
+        agent = DummyAgent()
+        agent.session_state.recon_data = {}
+        agent.session_state.add_step = lambda *a, **k: None
+        result = await builtin_tools.execute_nmap(
+            agent, {"target": "example.com", "scan_type": "tcp"}
+        )
+        assert "constraint_violation" not in result
+        assert worker_threads, "the nmap runner was never reached"
+        assert worker_threads[0] != loop_thread, "nmap ran on the event loop thread"

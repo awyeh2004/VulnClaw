@@ -113,8 +113,11 @@ class TestMechanicalBoundary:
             pytest.skip("baseline key changed; budget assertion not applicable")
         reviewed, violations = _partition_sites([key_holder, key_holder])
         assert len(reviewed) == 1
-        assert len(violations) == 1
-        assert "reviewed for 1 site(s), found 2" in str(violations[0]["reason"])
+        # since the stale-entry guard, feeding a partial scan also flags every
+        # unmatched allowlist key; this test is only about the budget semantics
+        budget_violations = [v for v in violations if "stale" not in str(v["reason"])]
+        assert len(budget_violations) == 1
+        assert "reviewed for 1 site(s), found 2" in str(budget_violations[0]["reason"])
 
     def test_json_report_lists_reviewed_sites(self):
         result = _run_script("--json")
@@ -250,3 +253,31 @@ def test_auto_approve_channel_does_not_leak_into_later_tests():
     assert get_execution_gate().channel is None, (
         "an AutoApproveChannel from an earlier test is still installed"
     )
+
+
+class TestFunnelAndStaleGuards:
+    """Round-5 C1/C2: run_text is scannable, dead allowlist budget fails CI."""
+
+    def test_run_text_calls_are_scanned_as_spawn_sites(self):
+        from scripts.verify_execution_boundary import _call_target
+
+        import ast
+
+        call = ast.parse("run_text(['ls'], timeout=5)").body[0].value
+        assert _call_target(call) == "run_text"
+
+    def test_every_run_text_site_is_in_the_allowlist(self):
+        from scripts.verify_execution_boundary import ALLOWED_SPAWN_SITES, scan_tree
+
+        run_text_sites = [s for s in scan_tree() if s.call == "run_text"]
+        assert run_text_sites, "scan no longer sees run_text call sites"
+        assert all(s.key() in ALLOWED_SPAWN_SITES for s in run_text_sites)
+
+    def test_stale_allowlist_entry_is_a_violation(self, monkeypatch):
+        from scripts import verify_execution_boundary as veb
+
+        # simulate one dead entry: scan nothing, keep the full allowlist
+        monkeypatch.setattr(veb, "scan_tree", lambda: [])
+        reviewed, violations = veb._partition_sites([])
+        assert reviewed == []
+        assert violations and all("stale allowlist entry" in str(v["reason"]) for v in violations)
