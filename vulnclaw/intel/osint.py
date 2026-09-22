@@ -17,6 +17,7 @@ import contextlib
 import re
 import socket
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse
@@ -408,10 +409,26 @@ def _socket_whois_blocking(domain: str, timeout: float) -> Optional[WHOISResult]
     server = whois_servers.get(tld, f"whois.nic.{tld}")
     try:
         with socket.create_connection((server, 43), timeout=timeout) as sock:
+            # create_connection's timeout applies to the CONNECT only; it is not
+            # inherited as a socket-wide timeout in a way that bounds the read
+            # loop below. Without this, a server that accepts the connection and
+            # then stays silent (or dribbles bytes) hangs the caller forever --
+            # the same "no timeout, no diagnostic" failure that produced a 15.7h
+            # freeze elsewhere in this project.
+            sock.settimeout(timeout)
             sock.sendall(f"{domain}\r\n".encode())
-            chunks = []
+            chunks: list[bytes] = []
+            deadline = time.monotonic() + timeout
             while True:
-                chunk = sock.recv(4096)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # Partial response is better than nothing, but say so.
+                    break
+                sock.settimeout(remaining)
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    break
                 if not chunk:
                     break
                 chunks.append(chunk)

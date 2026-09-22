@@ -33,6 +33,7 @@ from vulnclaw.config.settings import (
     save_config,
 )
 from vulnclaw.config.token_provider import has_llm_credentials
+from vulnclaw.utils.subprocess_text import combine_output, run_text
 
 MIN_JAVA_MAJOR = 17
 DEFAULT_DEBUG_PORT = 9222
@@ -297,17 +298,18 @@ def _parse_java_major(version_output: str) -> Optional[int]:
 def _java_major_version(java_bin: str) -> Optional[int]:
     """Run ``java -version`` and return its major version, or None on failure."""
     try:
-        proc = subprocess.run(
+        # Pinned codec: the inherited locale (cp936) could not decode the JVM's
+        # banner on a Chinese Windows box, which left stdout/stderr as None; the
+        # f-string below then parsed the literal text "None\nNone" as a version.
+        proc = run_text(
             [java_bin, "-version"],
-            capture_output=True,
-            text=True,
             check=False,
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     # The JVM prints its version banner to stderr.
-    return _parse_java_major(f"{proc.stderr}\n{proc.stdout}")
+    return _parse_java_major(combine_output(proc))
 
 
 def java_meets_minimum(java_bin: str, minimum: int = MIN_JAVA_MAJOR) -> bool:
@@ -357,7 +359,7 @@ def ensure_java(
             default=True,
         ):
             console.print("  Running winget install EclipseAdoptium.Temurin.17.JDK …")
-            proc = subprocess.run(
+            proc = run_text(
                 [
                     winget,
                     "install",
@@ -368,8 +370,6 @@ def ensure_java(
                     "--accept-source-agreements",
                     "--disable-interactivity",
                 ],
-                capture_output=True,
-                text=True,
                 check=False,
             )
             if proc.returncode != 0:
@@ -874,10 +874,8 @@ def ensure_burp_mcp_jar(
         if BURP_MCP_DIR.exists():
             shutil.rmtree(BURP_MCP_DIR, ignore_errors=True)
         console.print(f"  Cloning {BURP_REPO} …")
-        proc = subprocess.run(
+        proc = run_text(
             ["git", "clone", "--depth", "1", BURP_REPO, str(BURP_MCP_DIR)],
-            capture_output=True,
-            text=True,
             check=False,
         )
         if proc.returncode != 0:
@@ -909,21 +907,17 @@ def ensure_burp_mcp_jar(
 
     console.print("  Running Gradle embedProxyJar (first run may download deps)…")
     if platform.system() == "Windows":
-        proc = subprocess.run(
+        proc = run_text(
             f'"{gradlew}" embedProxyJar --no-daemon',
             cwd=str(BURP_MCP_DIR),
-            capture_output=True,
-            text=True,
             check=False,
             shell=True,
             env=env,
         )
     else:
-        proc = subprocess.run(
+        proc = run_text(
             [str(gradlew), "embedProxyJar", "--no-daemon"],
             cwd=str(BURP_MCP_DIR),
-            capture_output=True,
-            text=True,
             check=False,
             env=env,
         )
