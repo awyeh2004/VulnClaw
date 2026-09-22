@@ -121,6 +121,16 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "generated-PoC verification after synchronous ExecutionGate approval",
     },
+    "vulnclaw/utils/subprocess_text.py:run_text:subprocess.run:8130d1f2": {
+        "count": 1,
+        "purpose": (
+            "shared child-process runner with a pinned codec; the single funnel "
+            "that every previously-ad-hoc subprocess.run(text=True) call now goes "
+            "through. It introduces no execution path of its own -- callers keep "
+            "their own ExecutionGate coverage -- it only stops the inherited "
+            "locale from silently destroying child output."
+        ),
+    },
     # ── operator control plane: fixed commands chosen by the local operator ──
     "vulnclaw/cli/tui.py:run_tui:subprocess.call:31fb22ef": {
         "count": 1,

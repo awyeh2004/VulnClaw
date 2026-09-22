@@ -22,6 +22,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from vulnclaw.utils.subprocess_text import combine_output, run_text
+
 # 修改者: Nyaecho
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V2 违规 — 叶子类型已移至 config/domain_models.py。
@@ -484,14 +486,18 @@ class VerifierExecutor:
 
         try:
             # 执行 PoC
-            result = subprocess.run(
+            # Codec is pinned: the inherited locale (cp936 on Chinese Windows)
+            # turned a byte sequence it could not decode into a swallowed
+            # UnicodeDecodeError, leaving stdout/stderr as None. The old
+            # `result.stdout + result.stderr` then raised TypeError, the generic
+            # handler below returned -3, and parse_result reported
+            # EXECUTION_ERROR -- for a PoC that had actually CONFIRMED the vuln.
+            result = run_text(
                 [cls.PYTHON_CMD, temp_path],
-                capture_output=True,
-                text=True,
                 timeout=timeout,
             )
 
-            output = result.stdout + result.stderr
+            output = combine_output(result)
             return result.returncode, output
 
         except subprocess.TimeoutExpired:

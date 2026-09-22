@@ -49,6 +49,7 @@ from vulnclaw.utils.http_client import (
     bypass_proxy_for,
     http_client as make_http_client,
 )
+from vulnclaw.utils.subprocess_text import combine_output, run_text
 from vulnclaw.config.source_render import (
     render_highlighted_source_block,
     strip_highlighted_source,
@@ -2459,10 +2460,11 @@ async def execute_nmap(agent: AgentContext, args: dict[str, Any]) -> str:
     nmap_cmd = shutil.which("nmap")
     if not nmap_cmd:
         try:
-            result = subprocess.run(
-                ["where.exe", "nmap"], capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
+            # Pinned codec: a `where.exe` path containing bytes invalid for the
+            # inherited locale made the reader thread raise, result.stdout came
+            # back None, and an installed nmap looked missing.
+            result = run_text(["where.exe", "nmap"], timeout=10)
+            if result.returncode == 0 and result.stdout:
                 nmap_cmd = result.stdout.strip().split("\n")[0]
         except Exception:
             pass

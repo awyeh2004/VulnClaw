@@ -79,6 +79,7 @@ from vulnclaw.config.settings import (
     set_config_value,
 )
 from vulnclaw.config.token_provider import has_llm_credentials
+from vulnclaw.utils.subprocess_text import run_text
 from vulnclaw.ctf_platform.client import is_configured as ctf2_is_configured
 from vulnclaw.ctf_platform.client import read_challenge as ctf2_read_challenge
 from vulnclaw.gcs_platform.client import is_configured as gcs_is_configured
@@ -3749,10 +3750,11 @@ def doctor() -> None:
         import subprocess
 
         try:
-            result = subprocess.run(
-                [node_path, "--version"], capture_output=True, text=True, timeout=5
-            )
-            console.print(f"  Node.js: [green]{result.stdout.strip()}[/]")
+            # Pinned codec: without it the inherited locale decodes the child's
+            # output, and an undecodable byte leaves stdout as None -- so this
+            # printed a bare "[green]None[/]" or crashed on .strip().
+            result = run_text([node_path, "--version"], timeout=5)
+            console.print(f"  Node.js: [green]{(result.stdout or '').strip()}[/]")
         except Exception:
             console.print("  Node.js: [yellow]check failed[/]")
     else:

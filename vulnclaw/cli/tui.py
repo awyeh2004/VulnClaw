@@ -55,6 +55,7 @@ from vulnclaw.config.settings import (
 )
 from vulnclaw.i18n import _, init_i18n
 from vulnclaw.skills.dispatcher import SkillDispatcher
+from vulnclaw.utils.subprocess_text import combine_output, run_text
 from vulnclaw.skills.flag_skills import (
     apply_flag_skill_to_tui_state,
     complete_flag_skills,
@@ -1744,16 +1745,14 @@ def _command_version(command: str, *args: str) -> str:
     if not path:
         return ""
     try:
-        result = subprocess.run(
-            [path, *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        # Pinned codec: on a CP936 console an undecodable byte made the reader
+        # thread raise and stdout come back None, so the old
+        # `(result.stdout or result.stderr)` reported the tool as merely
+        # "installed" and hid the real version it had actually printed.
+        result = run_text([path, *args], timeout=5, check=False)
     except Exception:
         return "check failed"
-    return (result.stdout or result.stderr).strip() or "installed"
+    return combine_output(result).strip() or "installed"
 
 
 def _metric_panel(label: str, value: str, style: str) -> Panel:
