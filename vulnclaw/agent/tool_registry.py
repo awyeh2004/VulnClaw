@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -386,7 +387,20 @@ def _detect(entry: dict) -> str | None:
 
 
 def _match(goal_lower: str, keywords: list[str]) -> bool:
-    return any(k in goal_lower for k in keywords)
+    """Keyword match with word boundaries for pure-ASCII tokens.
+
+    Round-5 N2: bare substring matching made tokens like "ioc" fire inside
+    "association" and "triage" inside "pilgrimage" — over-injection only, but
+    noisy. Pure-ASCII keywords require non-alphanumeric edges; CJK and mixed
+    keywords keep plain substring semantics (no word concept to anchor on).
+    """
+    for k in keywords:
+        if k.isascii() and k.isalnum():
+            if re.search(rf"(?:^|[^a-z0-9]){re.escape(k)}(?:$|[^a-z0-9])", goal_lower):
+                return True
+        elif k in goal_lower:
+            return True
+    return False
 
 
 # The IR section is gated as a WHOLE, not only per tool.
