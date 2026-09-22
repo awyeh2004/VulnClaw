@@ -17,6 +17,46 @@ os.environ["TEMP"] = str(TEST_ROOT)
 os.environ["TMP"] = str(TEST_ROOT)
 tempfile.tempdir = str(TEST_ROOT)
 
+# Nothing below TEST_ROOT is ever cleaned otherwise: the custom tmp_path keeps
+# every per-test uuid dir and the sandbox config/kb/runs accumulate on top
+# (measured: 29k files / 60MB after a few full-suite runs). Prune at session
+# start instead. The staleness window is what makes this safe with two pytest
+# processes sharing the checkout (parallel agent sessions): a concurrently
+# running suite only ever has fresh files here, and those are left alone.
+STALE_TEST_ROOT_HOURS = 12
+
+
+def _prune_stale_test_root() -> int:
+    import shutil
+    import time
+
+    cutoff = time.time() - STALE_TEST_ROOT_HOURS * 3600
+    removed = 0
+    for entry in TEST_ROOT.iterdir():
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                continue
+        removed += 1
+    return removed
+
+
+def pytest_sessionstart(session) -> None:
+    removed = _prune_stale_test_root()
+    if removed:
+        print(
+            f"[conftest] pruned {removed} stale top-level entr{'y' if removed == 1 else 'ies'} "
+            f"from .test-tmp (older than {STALE_TEST_ROOT_HOURS}h)"
+        )
+
 
 @pytest.fixture(autouse=True)
 def _restore_global_translator():
