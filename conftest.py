@@ -33,6 +33,12 @@ def _prune_stale_test_root() -> int:
     cutoff = time.time() - STALE_TEST_ROOT_HOURS * 3600
     removed = 0
     for entry in TEST_ROOT.iterdir():
+        # Top-level *.md files are hand-written session handoff/design notes
+        # (HANDOFF.md, PLATFORM-ADAPTER-DESIGN.md, PROGRESS-*.md), not sandbox
+        # output. The first version of this prune deleted three of them — the
+        # dir is gitignored, so they were gone for good. Never again.
+        if entry.is_file() and entry.suffix.lower() == ".md":
+            continue
         try:
             if entry.stat().st_mtime > cutoff:
                 continue
