@@ -412,3 +412,31 @@ class TestKnowledgeUpdater:
         # Check that the store has some data after seeding
         stats = store.get_stats()
         assert len(stats) > 0
+
+
+def test_add_entry_failure_keeps_previous_entry_intact(tmp_path, monkeypatch):
+    """Round-5 B1: add_entry is add-or-replace; a failed write must leave the
+    previous good entry readable instead of a truncated JSON husk."""
+    import vulnclaw.kb.store as store_mod
+
+    from vulnclaw.kb.store import KnowledgeStore
+
+    store = KnowledgeStore(store_dir=tmp_path)
+    store.add_entry("techniques", "t1", {"title": "original", "steps": ["a"]})
+    assert store.get_entry("techniques", "t1")["title"] == "original"
+
+    def exploding_write(path, text, **kwargs):
+        raise OSError("disk full simulation")
+
+    monkeypatch.setattr(store_mod, "atomic_write_text", exploding_write)
+    try:
+        store.add_entry("techniques", "t1", {"title": "replacement"})
+    except OSError:
+        pass
+    else:
+        raise AssertionError("write failure must propagate")
+
+    # the old entry survived byte-for-byte and still loads
+    survived = store.get_entry("techniques", "t1")
+    assert survived["title"] == "original"
+    assert survived["steps"] == ["a"]

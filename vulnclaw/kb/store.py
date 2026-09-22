@@ -11,7 +11,7 @@ from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 from vulnclaw.config.settings import KB_DIR
-from vulnclaw.utils.atomic_write import replace_with_retry
+from vulnclaw.utils.atomic_write import atomic_write_text, replace_with_retry
 
 _TITLE_MAX = 80
 _INDEX_PROCESS_LOCK = threading.RLock()
@@ -271,8 +271,13 @@ class KnowledgeStore:
 
         data["id"] = entry_id
         filepath = category_dir / f"{entry_id}.json"
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # add_entry is add-or-replace: a bare "w" truncate would destroy the
+        # previous good entry if the process dies mid-write, and the readers
+        # below silently skip broken JSON — the entry would just vanish.
+        # Same atomic contract as _save_index_unlocked above.
+        atomic_write_text(
+            filepath, json.dumps(data, ensure_ascii=False, indent=2)
+        )
 
         self.upsert_index_entry(category, entry_id, filepath, data)
         return filepath
