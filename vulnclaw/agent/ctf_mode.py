@@ -9,9 +9,19 @@ if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
 
 
-# Comprehensive CTF flag format patterns
-# Covers major CTF platforms in China and international competitions
-FLAG_PATTERNS = [
+# Flag-shaped literals for the known platforms. SINGLE SOURCE OF TRUTH for "what a
+# flag looks like by prefix":
+#
+#   * detect_flag_claim() matches the whole list to decide whether the model is
+#     claiming a flag;
+#   * finding_parser imports FLAG_PREFIX_PATTERNS (the prefix subset, WITHOUT the
+#     generic catch-all) to spot flag literals in model output and record them as
+#     notes.
+#
+# They used to be maintained separately, and the copy in finding_parser had already
+# drifted down to 3 of these 17 prefixes -- so a DASCTF{} / BUUCTF{} / CTFshow{} flag
+# mentioned in a response was never recorded as a note.
+FLAG_PREFIX_PATTERNS = [
     # Chinese CTF platforms
     r"(DASCTF\{[^}]+\})",
     r"(NSSCTF\{[^}]+\})",
@@ -32,9 +42,15 @@ FLAG_PATTERNS = [
     # Capitalized variants
     r"(DASctf\{[^}]+\})",
     r"(Nssctf\{[^}]+\})",
-    # Generic flag-like patterns (low priority, matched last)
-    r"(?:^|\s)([A-Za-z0-9_]+\{[^}]+\})(?:\s|$)",
 ]
+
+# Deliberately kept OUT of the prefix list: it matches ANY word{...}, which is
+# acceptable as a last-resort detection pattern but far too loose for note extraction.
+GENERIC_FLAG_PATTERN = r"(?:^|\s)([A-Za-z0-9_]+\{[^}]+\})(?:\s|$)"
+
+# Comprehensive CTF flag format patterns
+# Covers major CTF platforms in China and international competitions
+FLAG_PATTERNS = [*FLAG_PREFIX_PATTERNS, GENERIC_FLAG_PATTERN]
 
 
 def detect_flag_claim(output: str) -> Optional[str]:
