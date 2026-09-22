@@ -346,6 +346,59 @@ def _hostname_args_rule(tokens: list[str]) -> str | None:
     return None
 
 
+# `type` prints a file's contents in cmd.exe and is PowerShell's built-in alias of
+# `Get-Content`; on POSIX it is the shell's command-lookup builtin. Read-only in
+# all three, so it is safe to auto-approve — but the argument rule is not optional,
+# because three shapes BLOCK an unattended run instead of mutating anything.
+_TYPE_BLOCKED_SWITCHES = frozenset({"-wait", "--wait", "-w"})
+_TYPE_DEVICE_NAMES = frozenset(
+    ["con", "prn", "aux", "nul", "clock$"]
+    + [f"com{i}" for i in range(1, 10)]
+    + [f"lpt{i}" for i in range(1, 10)]
+)
+
+
+def _type_args_rule(tokens: list[str]) -> str | None:
+    """`type <file>` reads a file; the rule refuses the shapes that hang.
+
+    Why this entry exists at all: it was dropped from the table by accident (the
+    commit that ADDED the Windows triage entries removed it), and without it every
+    ``type <file>`` in ``auto_review`` mode needs an operator approval — and is
+    refused outright when no approval channel exists (headless runs), which is
+    precisely how the Windows side of an incident-response task reads a file.
+
+    The refusals below are all about the run stalling, not about state changing:
+      * bare ``type`` — PowerShell's ``Get-Content`` reads stdin, so the command
+        waits for input that a non-interactive run will never provide;
+      * ``-Wait`` (``-w``) — follows the file forever, the ``tail -f`` shape;
+      * a DOS device name (``type con``) — blocks on the console. Reserved names
+        apply with or without an extension, so ``con.txt`` is refused as well.
+    """
+    operands: list[str] = []
+    for tok in tokens[1:]:
+        low = tok.lower()
+        if low.split("=", 1)[0] in _TYPE_BLOCKED_SWITCHES:
+            return (
+                f"type switch {tok} waits on the file indefinitely "
+                "(a non-interactive run would stall; use a plain type/Get-Content)"
+            )
+        if tok.startswith("-"):
+            continue
+        operands.append(tok)
+
+    if not operands:
+        return (
+            "bare type reads from stdin (PowerShell's Get-Content alias does), so it "
+            "is not auto-approved -- name the file: type <file>"
+        )
+    for operand in operands:
+        basename = operand.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        # Windows reserved device names ignore the extension (con.txt == con).
+        if basename.split(".", 1)[0].lower() in _TYPE_DEVICE_NAMES:
+            return f"type {operand} targets a console device and would block"
+    return None
+
+
 def _hostnamectl_args_rule(tokens: list[str]) -> str | None:
     """Only the query verbs are read-only; `set-hostname` & friends change identity."""
     mutating = {
@@ -658,7 +711,7 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "lsmod": None, "modinfo": None,
     "lsattr": _lsattr_args_rule, "lsblk": _lsblk_args_rule,
     "mount": _mount_args_rule,
-    "strings": None, "xxd": None, "od": None, "hexdump": None,
+    "strings": None, "xxd": _xxd_args_rule, "od": None, "hexdump": None,
     "getcap": None, "getenforce": None, "sestatus": None,
     "ac": _ac_args_rule,
     "unhide": _unhide_args_rule,
@@ -668,7 +721,6 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "locale": None, "ulimit": _ulimit_args_rule, "getent": None,
     "crontab": _crontab_args_rule,
     "rpm": _rpm_args_rule,
-    "xxd": _xxd_args_rule,
 
     # ── Windows incident-response triage ──────────────────────────────
     "tasklist": None,              # /v /svc /m — 只读列举
@@ -685,6 +737,7 @@ SAFE_COMMANDS: dict[str, Callable[[list[str]], str | None] | None] = {
     "wmic": _wmic_args_rule,
     "attrib": _attrib_args_rule,
     "dir": None,
+    "type": _type_args_rule,
     "fc": None, "comp": None,
     "getmac": None,
     "ipconfig": _ipconfig_args_rule,

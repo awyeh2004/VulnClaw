@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import pytest
 
+from vulnclaw.agent import command_classifier
 from vulnclaw.agent.command_classifier import (
+    SAFE_COMMANDS,
     classify_shell_command,
     windows_shell_quoting_hazard,
 )
@@ -197,3 +199,92 @@ def test_non_cmd_shells_keep_posix_quoting(shell):
 def test_cmd_hazard_only_when_shell_is_explicitly_cmd():
     """The classifier itself stays shell-agnostic (POSIX semantics)."""
     assert _allows("echo 'x& curl evil'")
+
+
+# ── `type`: read-only in every shell, but three shapes hang a run ───────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"type C:\Windows\Temp\a.txt",
+        r"type .\uploads\a7f3c1.jpg.php",
+        r'type "C:\Program Files\x\a.txt"',
+        "type /etc/hostname",  # POSIX: the shell's command-lookup builtin
+        "type -a ls",
+        "type C:\\a.txt | findstr flag",  # both halves are read-only
+        "type C:\\a.txt & whoami",
+    ],
+)
+def test_type_reads_a_file_without_approval(command):
+    """It was dropped from the table by accident, so Windows file reads prompted.
+
+    (That commit ADDED the Windows triage entries; the diff shows the line going
+    from ``"which": None, "type": None`` to ``"which": None``.)
+    """
+    assert _allows(command), _reason(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "type",  # PowerShell's Get-Content alias reads stdin
+        r"type -Wait C:\a.txt",  # follows the file forever (tail -f shape)
+        r"type -w C:\a.txt",
+        r"type --wait=C:\a.txt",
+        "type con",  # blocks on the console
+        "type con.txt",  # reserved names ignore the extension
+        "type com1",
+        "type C:\\a.txt > C:\\evil.txt",  # write primitive: still gated upstream
+    ],
+)
+def test_type_shapes_that_would_stall_are_refused(command):
+    assert not _allows(command), f"{command!r} was still auto-approved"
+
+
+def test_type_does_not_become_a_write_primitive():
+    """`type file > out` is the reason a bare entry would be wrong.
+
+    The redirection is caught by the metachar scan rather than by the type rule,
+    which is exactly why the entry is safe to add: the write shape never reaches
+    the table at all.
+    """
+    verdict = classify_shell_command(r"type C:\a.txt > C:\evil.txt")
+    assert verdict.decision == "prompt"
+    assert "redirection" in verdict.reason
+
+
+# ── the table itself: a repeated key silently overrides an earlier entry ─
+
+
+def test_the_command_table_has_no_duplicate_keys():
+    """`"xxd": None` and `"xxd": _xxd_args_rule` coexisted in SAFE_COMMANDS.
+
+    Python keeps the LAST binding, so the rule happened to win — but reordering
+    those two lines would have reverted the arbitrary-file-write guard to "no
+    rule" with nothing to catch it. ruff's F set flags it; this test does not
+    depend on the linter being installed. Scanned across the whole module, not
+    just the table, because the same trap can appear in any dict literal.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(command_classifier.__file__).read_text(encoding="utf-8")
+    duplicates: list[tuple[str, int, int]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        seen: dict[str, int] = {}
+        for key in node.keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                if key.value in seen:
+                    duplicates.append((key.value, seen[key.value], key.lineno))
+                else:
+                    seen[key.value] = key.lineno
+    assert duplicates == [], f"duplicate dict keys (name, first line, again): {duplicates}"
+
+
+def test_the_rules_are_actually_the_effective_values():
+    """Pin the binding, since a duplicate key is invisible to readers."""
+    assert SAFE_COMMANDS["xxd"] is command_classifier._xxd_args_rule
+    assert SAFE_COMMANDS["type"] is command_classifier._type_args_rule
