@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +13,7 @@ from uuid import uuid4
 
 from vulnclaw.config.settings import CONFIG_DIR, ensure_dirs
 from vulnclaw.targets import Target
+from vulnclaw.utils.atomic_write import atomic_write_text as atomic_write_text_shared
 
 RUN_SCHEMA_VERSION = 1
 RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
@@ -377,24 +377,16 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    dir_flags = getattr(os, "O_DIRECTORY", None)
-    if dir_flags is None:
-        return
-    try:
-        dir_fd = os.open(str(path.parent), dir_flags)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    """Thin alias for the shared implementation.
+
+    This used to be its own copy, and it was one of six places doing a bare
+    ``os.replace``. On Windows that fails intermittently with a sharing violation
+    when a scanner or a concurrent reader holds the destination open, so a single
+    un-retried replace made every caller's state droppable depending on machine
+    timing. The retry, the fsync ordering and the directory fsync all live in one
+    place now (``vulnclaw.utils.atomic_write``).
+    """
+    atomic_write_text_shared(path, text)
 
 
 def generate_run_name(command: str, targets: Iterable[Target]) -> str:

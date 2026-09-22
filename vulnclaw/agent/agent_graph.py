@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -33,6 +34,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
+
+from vulnclaw.utils.atomic_write import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -664,21 +667,37 @@ class AgentGraph:
         self._persist_snapshot()
 
     def _persist_event(self, event: AgentEvent) -> None:
+        """Append the event, durably.
+
+        Append (not atomic rewrite) is correct for a log, but the write MUST be
+        fsync'd: the ordering guarantee the class is built on is "graph.json
+        always equals a fold over events.jsonl". Without fsync an event can still
+        be in the OS cache when a crash hits, while the snapshot it caused was
+        already committed by _persist_snapshot -- so resume() would find a
+        snapshot that names a node the log never created and raise
+        GraphInconsistencyError. The event log is written first, so flushing it
+        first is what keeps the two in order.
+        """
         if self.storage_dir is None:
             return
         path = self.storage_dir / EVENTS_FILE
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(event.model_dump(mode="json"), ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def _persist_snapshot(self) -> None:
         if self.storage_dir is None:
             return
         path = self.storage_dir / GRAPH_FILE
         snapshot = _snapshot_from_state(self._state, self.caps)
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(snapshot.model_dump(mode="json"), fh, ensure_ascii=False, indent=2)
-        tmp.replace(path)
+        # Atomic, fsync'd, and tolerant of the Windows sharing violation that
+        # made a bare os.replace here fail intermittently (a different graph
+        # operation each run) whenever a scanner held the destination open.
+        atomic_write_text(
+            path,
+            json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        )
 
 
 def _state_from_snapshot(snapshot: GraphSnapshot) -> _State:
