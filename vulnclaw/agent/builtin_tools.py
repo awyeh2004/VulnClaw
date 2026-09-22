@@ -46,6 +46,7 @@ from vulnclaw.agent.tool_result_overrides import set_raw_tool_output_override
 from vulnclaw.agent.tool_schemas import append_builtin_tool_schemas
 from vulnclaw.utils.http_client import (
     async_http_client as make_async_http_client,
+    bypass_proxy_for,
     http_client as make_http_client,
 )
 from vulnclaw.config.source_render import (
@@ -2702,23 +2703,48 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
 
     def _run() -> str:
         results: list[dict[str, Any]] = []
+        # Group the batch by whether a request must bypass the system proxy.
+        #
         # targets= keeps the system proxy out of the way for loopback/private
         # targets: httpx defaults to trust_env=True and ignores the Windows
-        # ProxyOverride bypass list, so a running proxy tool would send the whole
-        # probe batch at the wrong source address (and internal targets would look
-        # unreachable). Public targets still honour the environment proxy.
-        with make_http_client(
-            targets=base_url,
-            follow_redirects=follow_redirects,
-            timeout=timeout,
-            verify=verify_tls,
-            headers={"User-Agent": "VulnClaw-http_probe_batch/1.0"},
-        ) as client:
-            for item in prepared:
-                if item.get("error"):
-                    results.append(item)
-                    continue
-                results.append(_execute_one_http_probe(client, item, max_body_chars))
+        # ProxyOverride bypass list, so a running proxy tool would send the batch at
+        # the wrong source address (and internal targets would look unreachable).
+        # Public targets still honour the environment proxy.
+        #
+        # ONE client cannot do both: trust_env is fixed per client, and
+        # targets_need_direct() is an EVERY test — handing it the whole batch keeps
+        # the environment proxy for every request, so a spec whose raw_url overrides
+        # a public base_url with an internal host would still be proxied and then
+        # reported unreachable. That is the failure this bypass exists to prevent,
+        # so build one client per group (the factory's documented remedy). A
+        # raw_url is not a rare shape: http_probe_batch is used for exactly this
+        # kind of host/path mixing.
+        proxied: list[dict[str, Any]] = []
+        direct: list[dict[str, Any]] = []
+        for item in prepared:
+            if item.get("error"):
+                results.append(item)
+                continue
+            if bypass_proxy_for(str(item.get("url") or "")):
+                direct.append(item)
+            else:
+                proxied.append(item)
+
+        for group in (proxied, direct):
+            if not group:
+                continue
+            with make_http_client(
+                targets=[str(item.get("url") or "") for item in group],
+                follow_redirects=follow_redirects,
+                timeout=timeout,
+                verify=verify_tls,
+                headers={"User-Agent": "VulnClaw-http_probe_batch/1.0"},
+            ) as client:
+                for item in group:
+                    results.append(_execute_one_http_probe(client, item, max_body_chars))
+
+        # Two groups means the append order is no longer spec order.
+        results.sort(key=lambda entry: entry.get("index") or 0)
         seen = getattr(agent.runtime, "seen_body_hashes", None)
         if isinstance(seen, dict):
             return _format_http_probe_batch(results, seen_hashes=seen)
