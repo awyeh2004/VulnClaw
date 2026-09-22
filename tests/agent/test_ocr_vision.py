@@ -92,3 +92,79 @@ def test_ocr_vision_no_credentials_safe(monkeypatch):
     monkeypatch.setattr(settings, "load_config", lambda: _NoCreds())
     r = bt._ocr_via_vision_llm(TEST_IMG)
     assert r == ""
+
+
+class TestOcrThreadOffload:
+    """Round-5 A1/A2: OCR/nmap heavy work must leave the event loop, and the
+    Reader double-checked lock must be a real module-level lock."""
+
+    async def test_ocr_dispatch_runs_off_the_event_loop_thread(self, monkeypatch):
+        import asyncio
+        import threading
+
+        import vulnclaw.agent.builtin_tools as bt
+
+        loop_thread = threading.get_ident()
+        seen_threads: list[int] = []
+
+        def fake_execute_ocr(agent, args):
+            seen_threads.append(threading.get_ident())
+            return "[ok] ocr"
+
+        monkeypatch.setattr(bt, "execute_ocr", fake_execute_ocr)
+
+        class _Cfg:
+            class safety:
+                python_execute_audit_enabled = False
+
+        class _Agent:
+            config = _Cfg()
+
+        result = await bt.execute_mcp_tool(_Agent(), "ocr", {"image_path": "x.png"})
+        assert result == "[ok] ocr"
+        assert seen_threads and seen_threads[0] != loop_thread, (
+            "execute_ocr must run in a worker thread, not on the event loop"
+        )
+
+    def test_reader_lock_is_module_level_and_serializes_construction(self, monkeypatch):
+        import threading
+        import time
+
+        import vulnclaw.agent.builtin_tools as bt
+
+        constructions = []
+        ready = threading.Barrier(4)
+
+        class _FakeReader:
+            def __init__(self, langs, gpu=True):
+                constructions.append(threading.get_ident())
+                time.sleep(0.05)  # widen the race window the old fake lock missed
+                time.sleep(0.05)
+
+            def readtext(self, path, detail=0):
+                return ["text"]
+
+        class _FakeEasyOCR:
+            Reader = _FakeReader
+
+        monkeypatch.setattr(bt, "_OCR_READER_CACHE", {})
+
+        outputs = []
+
+        def worker():
+            outputs.append(
+                bt._ocr_with_cached_reader(_FakeEasyOCR, "img.png", "en")
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # one cached Reader no matter how many threads race the first call
+        assert len(constructions) == 1, (
+            f"Reader constructed {len(constructions)} times under concurrency — "
+            "the double-checked lock is not serializing"
+        )
+        assert outputs == ["text"] * 4
