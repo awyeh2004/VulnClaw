@@ -2,8 +2,8 @@
 
 Ported from HackBot (``hackbot/core/osint.py``) and rewritten for VulnClaw's
 async stack: HTTP features (Certificate Transparency via crt.sh, RDAP WHOIS,
-tech-stack fingerprinting) use httpx; blocking DNS / socket-WHOIS / TLS calls run
-in worker threads. ``dnspython`` is an optional enhancement (``vulnclaw[osint]``);
+tech-stack fingerprinting) use httpx; blocking DNS / socket-WHOIS / TLS calls go
+through asyncio.to_thread so they never stall the event loop. ``dnspython`` is an optional enhancement (``vulnclaw[osint]``);
 without it DNS resolution falls back to the stdlib socket resolver.
 
 Exposed to the agent as the ``osint_recon`` tool. This is *active* recon (it
@@ -13,6 +13,7 @@ rather than read-only.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 import socket
@@ -270,14 +271,16 @@ async def enumerate_subdomains(
             sub = f"{word}.{domain}"
             if sub in found:
                 continue
-            ip = _resolve_host(sub)
+            ip = await asyncio.to_thread(_resolve_host, sub)
             if ip:
                 found[sub] = SubdomainResult(subdomain=sub, ip=ip, source="brute")
 
     if resolve:
         for result in found.values():
             if not result.ip:
-                result.ip = _resolve_host(result.subdomain)
+                result.ip = await asyncio.to_thread(
+                    _resolve_host, result.subdomain
+                )
 
     return sorted(found.values(), key=lambda s: s.subdomain)
 
@@ -333,7 +336,9 @@ def _dns_records_blocking(domain: str, timeout: float) -> list[DNSRecord]:
 
 async def get_dns_records(domain: str, *, timeout: float = 15.0) -> list[DNSRecord]:
     """Retrieve DNS records (dnspython if installed, socket fallback otherwise)."""
-    return _dns_records_blocking(clean_domain(domain), timeout)
+    return await asyncio.to_thread(
+        _dns_records_blocking, clean_domain(domain), timeout
+    )
 
 
 def _mx_exists_blocking(domain: str) -> bool:
@@ -466,7 +471,7 @@ async def whois_lookup(
     result = await rdap_whois(domain, client=client, timeout=timeout)
     if result:
         return result
-    return _socket_whois_blocking(domain, timeout)
+    return await asyncio.to_thread(_socket_whois_blocking, domain, timeout)
 
 
 # ── Email harvesting ─────────────────────────────────────────────────────────
@@ -479,7 +484,7 @@ async def common_emails(domain: str) -> list[str]:
     unreliable and ToS-fragile. This yields deterministic, low-noise candidates.
     """
     domain = clean_domain(domain)
-    if not _mx_exists_blocking(domain):
+    if not await asyncio.to_thread(_mx_exists_blocking, domain):
         return []
     return sorted(f"{prefix}@{domain}" for prefix in COMMON_EMAIL_PREFIXES)
 
@@ -568,7 +573,9 @@ async def fingerprint_tech(
     if check_ssl:
         parsed = urlparse(url)
         if parsed.scheme == "https" and parsed.hostname:
-            org = _ssl_issuer_org(parsed.hostname, timeout)
+            org = await asyncio.to_thread(
+                _ssl_issuer_org, parsed.hostname, timeout
+            )
             if org:
                 result.technologies.append(
                     {

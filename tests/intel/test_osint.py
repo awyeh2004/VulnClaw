@@ -217,3 +217,32 @@ async def test_tool_orchestrates_without_network(monkeypatch):
     assert "www.example.com" in out
     assert "Example Registrar Inc" in out
     assert "info@example.com" in out
+
+
+class TestBlockingCallsStayOffLoop:
+    """Round-5 A3: socket WHOIS / DNS / TLS must run in worker threads."""
+
+    @pytest.mark.asyncio
+    async def test_socket_whois_fallback_runs_off_loop_thread(self, monkeypatch):
+        import threading
+
+        import vulnclaw.intel.osint as osint_mod
+
+        loop_thread = threading.get_ident()
+        worker: list[int] = []
+
+        def fake_whois(domain, timeout):
+            worker.append(threading.get_ident())
+            return osint_mod.WHOISResult(domain=domain, registrar="whois-test")
+
+        async def no_rdap(domain, client=None, timeout=15.0):
+            return None
+
+        monkeypatch.setattr(osint_mod, "rdap_whois", no_rdap)
+        monkeypatch.setattr(osint_mod, "_socket_whois_blocking", fake_whois)
+
+        result = await osint_mod.whois_lookup("example.com")
+        assert result is not None
+        assert worker and worker[0] != loop_thread, (
+            "socket WHOIS ran on the event loop thread"
+        )
