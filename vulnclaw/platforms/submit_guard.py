@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from vulnclaw.utils.atomic_write import atomic_write_text
 
 STATE_VERSION = 2
 """Bumped when the on-disk key format changes; see :func:`migrate_legacy_state`."""
@@ -93,32 +94,12 @@ def _merge_entries(disk: dict[str, dict], memory: dict[str, dict]) -> dict[str, 
 def _atomic_write(path: Path, text: str) -> None:
     """Write via a same-directory temp file + rename, so a crash cannot truncate.
 
-    ``os.replace`` is retried on PermissionError: on Windows it fails when the
-    destination is briefly open by a concurrent reader (a sharing violation), and
-    a single failure here would otherwise drop the caller's increment.
+    The retry-on-Windows-sharing-violation logic that used to live here now lives
+    in ``vulnclaw.utils.atomic_write``, which six other modules also needed (they
+    all had a bare ``os.replace`` and so all had the same intermittent failure).
+    Keeping one implementation means the workaround cannot quietly diverge.
     """
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".submit-state-")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        last: OSError | None = None
-        for attempt in range(5):
-            try:
-                os.replace(tmp_name, str(path))
-                return
-            except PermissionError as exc:  # Windows sharing violation
-                last = exc
-                time.sleep(0.05 * (attempt + 1))
-        if last is not None:
-            raise last
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, text)
 
 
 def _take_os_lock(fd: int, timeout_s: float) -> None:

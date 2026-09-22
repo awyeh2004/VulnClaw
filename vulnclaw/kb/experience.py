@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from vulnclaw.config.settings import KB_DIR
 from vulnclaw.kb.store import KnowledgeStore
+from vulnclaw.utils.atomic_write import replace_with_retry
 
 
 class LessonScope(str, Enum):
@@ -400,7 +401,7 @@ class ExperienceStore:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             try:
                 os.chmod(path, 0o600)
             except OSError:

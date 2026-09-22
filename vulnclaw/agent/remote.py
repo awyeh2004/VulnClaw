@@ -591,7 +591,11 @@ def fetch_file(
         sftp.get(remote_path, str(tmp_path), callback=_watch)
         sftp.close()
         size = tmp_path.stat().st_size
-        os.replace(str(tmp_path), str(local_path))
+        # Retried rename: on Windows a bare os.replace fails intermittently when a
+        # scanner holds the destination open, which would lose a fetched artifact.
+        from vulnclaw.utils.atomic_write import replace_with_retry
+
+        replace_with_retry(tmp_path, local_path)
         tmp_path = None
         return True, f"fetched {remote_path} -> {local_path}", size
     except Exception as exc:

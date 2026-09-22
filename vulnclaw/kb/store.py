@@ -11,6 +11,7 @@ from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 from vulnclaw.config.settings import KB_DIR
+from vulnclaw.utils.atomic_write import replace_with_retry
 
 _TITLE_MAX = 80
 _INDEX_PROCESS_LOCK = threading.RLock()
@@ -128,7 +129,7 @@ class KnowledgeStore:
                 json.dump(self._index, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temporary, index_file)
+            replace_with_retry(temporary, index_file)
             try:
                 index_file.chmod(0o600)
             except OSError:

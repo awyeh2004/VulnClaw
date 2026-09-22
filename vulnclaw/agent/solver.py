@@ -45,6 +45,7 @@ from vulnclaw.agent.subagent.solve import (
     shutdown as shutdown_subagents,
 )
 from vulnclaw.agent.think_filter import strip_think_tags
+from vulnclaw.utils.atomic_write import replace_with_retry
 
 if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
@@ -1273,7 +1274,7 @@ def _write_solve_lock(path: Path, payload: dict[str, Any]) -> None:
             json.dump(payload, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, str(path))
+        replace_with_retry(tmp_name, str(path))
     except BaseException:
         try:
             os.unlink(tmp_name)

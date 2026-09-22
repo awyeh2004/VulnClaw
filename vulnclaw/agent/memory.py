@@ -13,6 +13,7 @@ from typing import Any, Iterator, Optional
 from uuid import uuid4
 
 from vulnclaw.config.settings import KB_DIR
+from vulnclaw.utils.atomic_write import replace_with_retry
 
 _PROCESS_LOCK = threading.RLock()
 
@@ -95,7 +96,7 @@ class MemoryStore:
                     json.dump(self._cache, handle, ensure_ascii=False, indent=2)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, self._memory_file)
+                replace_with_retry(temporary, self._memory_file)
                 try:
                     os.chmod(self._memory_file, 0o600)
                 except OSError:
@@ -159,7 +160,7 @@ class MemoryStore:
                     f"conversation_archive.{datetime.now().strftime('%Y%m%d%H%M%S%f')}."
                     f"{uuid4().hex[:8]}.jsonl"
                 )
-                os.replace(self._archive_file, rotated)
+                replace_with_retry(self._archive_file, rotated)
                 self._prune_archive_shards()
             with open(self._archive_file, "a", encoding="utf-8", newline="\n") as handle:
                 handle.write(encoded + "\n")
