@@ -734,3 +734,40 @@ class TestStructuredToolResults:
         assert skipped == []
         assert len(results) == 1
         assert results[0]["structured_content"] == {"url": "https://example.com", "status": "ok"}
+
+
+class TestFetchProxyBypassWiring:
+    """Round-5 N1: _call_fetch must hand the URL to the proxy-aware factory."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_passes_url_to_proxy_aware_factory(self, monkeypatch):
+        import httpx
+
+        import vulnclaw.utils.http_client as http_client_mod
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+
+        seen: list = []
+        # bind the REAL factory before patching: calling the module attribute
+        # from inside the fake would recurse into the patch itself
+        real_factory = http_client_mod.async_http_client
+
+        def fake_async_factory(*, targets=None, trust_env=None, **kwargs):
+            seen.append(targets)
+            return real_factory(
+                targets=targets,
+                trust_env=trust_env,
+                transport=httpx.MockTransport(
+                    lambda req: httpx.Response(200, text="loopback-body")
+                ),
+                **kwargs,
+            )
+
+        monkeypatch.setattr(http_client_mod, "async_http_client", fake_async_factory)
+        result = await manager.call_tool("fetch", {"url": "http://127.0.0.1:59876/x"})
+        assert result["ok"] is True, result
+        assert seen == ["http://127.0.0.1:59876/x"]
