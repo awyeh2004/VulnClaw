@@ -1985,18 +1985,17 @@ def ctf2(
     goal = (
         f"Solve CTF2 challenge '{name}' (category {category}, difficulty "
         f"{difficulty}) on practice {practice_id}.\n"
-        f"Its ref is {ref_token} -- pass that exact string as `ref` when calling "
-        f"the platform_* tools; the platform is taken from the ref, so there is no "
-        f"separate platform id to choose.\n"
-        f"Achieve the flag, then submit it with platform_submit(ref=\"{ref_token}\", "
-        f"flag=...). Challenge description follows:\n{description}\n"
+        f"REF: {ref_token}\n"
+        f"Pass that exact string as `ref` to the platform_* tools -- the platform "
+        f"comes from the ref, so there is no separate platform id to choose. Submit "
+        f"the flag with platform_submit once it is known.\n"
+        f"Challenge description follows:\n{description}\n"
         f"Do not attempt to fetch files from or attack ctf2*.dasctf.com hosts. "
         f"Solve from the description "
         + (
-            f"and, if a dynamic target is required, start it with "
-            f"platform_start_env(ref=\"{ref_token}\"), then poll "
-            f"platform_read_env until it reports the target as usable, and inspect "
-            f"the authored target before attacking it."
+            "and, if a dynamic target is required, start it with platform_start_env, "
+            "poll platform_read_env until it reports the target as usable, and "
+            "inspect the authored target before attacking it."
             if requires_env
             else "(this challenge needs no running environment)."
         )
@@ -2099,20 +2098,18 @@ def gcs(
     goal = (
         f"Solve the West Lake Sword Competition challenge '{name}' "
         f"(difficulty {difficulty}; score: {score_text} points).\n"
-        f"Its ref is {gcs_ref} -- pass that exact string as `ref` when calling the "
-        f"platform_* tools.\n"
-        f"Achieve the flag, then submit it with "
-        f"platform_submit(ref=\"{gcs_ref}\", flag=...). Challenge description "
-        f"follows:\n{description}\n{hint}\n"
-        f"Use platform_read(ref=\"{gcs_ref}\") to fetch the description and "
-        f"attachment links, then platform_read_env for the target endpoints. "
+        f"REF: {gcs_ref}\n"
+        f"Pass that exact string as `ref` to the platform_* tools -- the platform "
+        f"comes from the ref. Use platform_read for the description and attachment "
+        f"links, platform_read_env for the target endpoints, and platform_submit "
+        f"once the flag is known.\n"
+        f"Challenge description follows:\n{description}\n{hint}\n"
         + (
-            f"The environment needs initialization: call "
-            f"platform_start_env(ref=\"{gcs_ref}\"), then poll platform_read_env "
-            f"until the endpoints are published, attack them, submit the flag, then "
-            f"call platform_stop_env(ref=\"{gcs_ref}\") to release quota."
+            "The environment needs initialization: call platform_start_env, poll "
+            "platform_read_env until the endpoints are published, attack them, submit "
+            "the flag, then call platform_stop_env to release quota. "
             if needs_init
-            else "No environment initialization required; attack the provided endpoints directly, then submit the flag."
+            else "No environment initialization required; attack the provided endpoints directly, then submit the flag. "
         )
         + " Follow the competition rules for the flag format."
     )
