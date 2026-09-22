@@ -20,6 +20,7 @@ from vulnclaw.traffic.models import (
     TrafficRecord,
 )
 from vulnclaw.traffic.store import TrafficStore
+from vulnclaw.utils.http_client import http_client as make_http_client
 
 
 class ReplayError(Exception):
@@ -73,7 +74,10 @@ def replay_request(
     client_kwargs: dict[str, Any] = {"timeout": timeout}
     if transport is not None:
         client_kwargs["transport"] = transport
-    with httpx.Client(**client_kwargs) as client:
+    # The replay target is whatever URL the capture happened to record — very
+    # often an internal host. Route it through the proxy-aware factory so a
+    # running system proxy cannot silently turn a replay into "unreachable".
+    with make_http_client(targets=request.url, **client_kwargs) as client:
         http_response = client.request(
             request.method,
             request.url,

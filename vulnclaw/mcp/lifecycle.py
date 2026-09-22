@@ -1479,6 +1479,8 @@ class MCPLifecycleManager(ProbeMixin):
         try:
             import httpx
 
+            from vulnclaw.utils.http_client import async_http_client
+
             request = self._prepare_fetch_request(args)
 
             jar = getattr(self, "_fetch_cookies", None)
@@ -1486,8 +1488,13 @@ class MCPLifecycleManager(ProbeMixin):
                 jar = httpx.Cookies()
                 self._fetch_cookies = jar
 
+            # The fetch target is model-chosen and routinely an internal host;
+            # the proxy-aware factory keeps a running system proxy from turning
+            # it into a silent "unreachable".
+            fetch_targets = (request.get("kwargs") or {}).get("url")
             try:
-                async with httpx.AsyncClient(
+                async with async_http_client(
+                    targets=fetch_targets,
                     verify=request["verify_tls"],
                     timeout=request["timeout"],
                     follow_redirects=request["follow_redirects"],
@@ -1498,7 +1505,8 @@ class MCPLifecycleManager(ProbeMixin):
             except httpx.TransportError as exc:
                 if request["verify_tls"] and _is_tls_verification_error(exc):
                     request = {**request, "verify_tls": False, "tls_retry": True}
-                    async with httpx.AsyncClient(
+                    async with async_http_client(
+                        targets=fetch_targets,
                         verify=False,
                         timeout=request["timeout"],
                         follow_redirects=request["follow_redirects"],

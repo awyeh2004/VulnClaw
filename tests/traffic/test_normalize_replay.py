@@ -109,3 +109,37 @@ def test_replay_issues_with_overrides_and_records_manual_replay(tmp_path):
     assert len(store.entries()) == 2
     replayed = store.view(record.request_id)
     assert "boom" in replayed["response_text"]
+
+
+def test_replay_passes_target_url_to_proxy_aware_factory(tmp_path, monkeypatch):
+    """Round-5 N1: replay targets are captured URLs (often internal) and must
+    reach the proxy-aware factory so a system proxy can't fake 'unreachable'."""
+    import vulnclaw.traffic.replay as replay_mod
+    from vulnclaw.utils.http_client import http_client as real_factory
+
+    store = TrafficStore(tmp_path / "evidence" / "traffic")
+    capture = TrafficCapture(
+        store, ScopeChecker([Target(host="app.test")], mode=ScopeMode.STRICT)
+    )
+    original = capture.capture(
+        CapturedExchange(
+            request=CapturedRequest(
+                method="GET", url="http://app.test/item", headers={"Host": "app.test"}
+            ),
+            response=CapturedResponse(status=200, body=b"one"),
+        ),
+        source="proxy",
+    )
+
+    captured_kwargs: dict = {}
+
+    def factory(*, timeout=None, transport=None, **kwargs):
+        captured_kwargs.update(kwargs)
+        return real_factory(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok")),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(replay_mod, "make_http_client", factory)
+    replay_request(store, original, overrides={"url": "http://10.20.30.40/admin"})
+    assert captured_kwargs.get("targets") == "http://10.20.30.40/admin"
