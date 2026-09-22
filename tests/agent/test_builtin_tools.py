@@ -320,6 +320,69 @@ class TestBuiltinPythonExecute:
         assert "request=GET https://example.com/app/select.php" in result
         assert 'params={"id":"1"}' in result
         assert "flag{batch}" in result
+
+    async def test_http_probe_batch_splits_clients_by_proxy_need(self, monkeypatch):
+        """A mixed batch must not send its internal spec through the system proxy.
+
+        Round-6 review: the whole batch derived trust_env from base_url, and
+        targets_need_direct() is an EVERY test — so a spec whose raw_url pointed at
+        an internal host while base_url was public still went to the proxy, and
+        internal targets reached through a proxy are simply reported unreachable.
+        One client per group is the fix (the factory's documented remedy).
+        """
+        import vulnclaw.agent.builtin_tools as builtin_tools
+        from vulnclaw.utils.http_client import bypass_proxy_for
+
+        class DummyResponse:
+            status_code = 200
+            text = "ok"
+            content = b"ok"
+            headers = {"content-type": "text/plain"}
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **kwargs):
+                response = DummyResponse()
+                response.url = url
+                return response
+
+        seen_targets: list[list[str]] = []
+
+        def fake_factory(*, targets=None, **kwargs):
+            seen_targets.append(list(targets or []))
+            return DummyClient()
+
+        monkeypatch.setattr(builtin_tools, "make_http_client", fake_factory)
+        monkeypatch.setattr(
+            builtin_tools, "enforce_host_path_constraints", lambda *a, **k: None
+        )
+        monkeypatch.setattr(builtin_tools, "enforce_port_constraints", lambda *a, **k: None)
+
+        result = await builtin_tools.execute_http_probe_batch(
+            DummyAgent(),
+            {
+                "base_url": "https://example.com/app/",
+                "requests": [
+                    {"raw_url": "http://10.1.2.3/status", "label": "internal"},
+                    {"url": "select.php", "label": "public"},
+                ],
+            },
+        )
+
+        assert "http_probe_batch results" in result
+        assert len(seen_targets) == 2, seen_targets
+        internal_group = next(g for g in seen_targets if any("10.1.2.3" in t for t in g))
+        public_group = next(g for g in seen_targets if any("example.com" in t for t in g))
+        # The internal group is direct-only and the public group keeps the proxy.
+        assert all(bypass_proxy_for(t) for t in internal_group)
+        assert not any(bypass_proxy_for(t) for t in public_group)
+        assert "http://10.1.2.3/status" in internal_group
+        assert "https://example.com/app/select.php" in public_group
         assert "body_length=" in result
         assert "body:" in result
         assert "Same-body groups" in result
