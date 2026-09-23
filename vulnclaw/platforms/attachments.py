@@ -15,11 +15,20 @@ Why the insurance matters: a RE/pwn challenge *is* its attachment. Measured on
 "不一样的flag" (Easy RE), the solve downloaded its 9 KB zip from the platform's file
 host as the first step -- correct, but it makes the whole run depend on that host
 being reachable at solve time.
+
+Why both callers verify TLS: an attachment is a file this tool then analyses, unpacks
+and (for pwn/RE) executes. The batch command used to pass ``verify=False``, which
+accepts ANY certificate for that file; the declared size is no defence because an
+on-path attacker chooses it. The host serves a valid DigiCert chain, so verification
+costs nothing here. Operators behind a TLS-inspecting proxy keep a way out that does
+NOT weaken the download: point ``SSL_CERT_FILE``/``SSL_CERT_DIR`` at the interceptor's
+CA -- and a certificate failure now says exactly that (``_describe_download_error``).
 """
 
 from __future__ import annotations
 
 import os
+import ssl
 from dataclasses import dataclass
 
 from vulnclaw.platforms import base
@@ -68,6 +77,43 @@ def resolve_url(attachment: base.Attachment, adapter: object | None = None) -> s
     return f"{str(base_url).rstrip('/')}{url}"
 
 
+def _is_certificate_failure(exc: BaseException) -> bool:
+    """Whether an exception chain is a TLS certificate-verification failure.
+
+    httpx wraps the ssl error, so the type alone is not enough -- the chain and the
+    OpenSSL verifier string both have to be inspected.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if "CERTIFICATE_VERIFY_FAILED" in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+#: Appended to a certificate failure. Verification is ON on purpose, so the operator
+#: needs the legitimate way out rather than an in-code bypass: an interceptor's CA
+#: belongs in the trust store (`SSL_CERT_FILE`/`SSL_CERT_DIR`), which keeps integrity
+#: checking while accommodating interception. Turning verification off instead would
+#: accept ANY certificate for a file we are about to analyse -- and often execute.
+_CERT_HINT = (
+    " -- certificate verification FAILED, and that is intentional. Downloaded "
+    "artifacts get analysed and often executed, so verification stays on. If you are "
+    "behind a TLS-inspecting proxy or a self-signed internal host, point SSL_CERT_FILE "
+    "(or SSL_CERT_DIR) at its CA instead of disabling verification."
+)
+
+
+def _describe_download_error(exc: BaseException) -> str:
+    """A download failure message, actionable when TLS is the cause."""
+    detail = f"{type(exc).__name__}: {exc}"
+    return f"{detail}{_CERT_HINT}" if _is_certificate_failure(exc) else detail
+
+
 def download_attachment(
     client: object,
     attachment: base.Attachment,
@@ -80,6 +126,10 @@ def download_attachment(
 
     Never raises: a download failure is a reportable value, because the caller is
     usually mid-flow and a missing attachment must degrade rather than abort.
+
+    The caller owns the client and therefore the TLS policy. Both current callers
+    verify; see the module docstring for why artifact downloads are the wrong place to
+    disable it.
     """
     label = str(getattr(attachment, "name", "") or "attachment")
     url = resolve_url(attachment, adapter)
@@ -108,7 +158,7 @@ def download_attachment(
                     handle.write(chunk)
                     written += len(chunk)
     except Exception as exc:  # noqa: BLE001 - reported, not raised
-        return AttachmentDownload(name=label, url=url, error=f"{type(exc).__name__}: {exc}")
+        return AttachmentDownload(name=label, url=url, error=_describe_download_error(exc))
 
     # Verify what the platform told us, when it told us anything. CTF2 publishes no
     # md5 (verified), so size is the available check -- and it catches a truncated
