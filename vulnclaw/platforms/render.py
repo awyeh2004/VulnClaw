@@ -39,6 +39,19 @@ TOOL_READ_ENV = "platform_read_env"
 
 RAW_LIMIT = 4000
 
+# The transports say whether a TLS wrapper is needed; they do NOT say what to
+# speak once connected.  For a web challenge that difference is the whole task, so
+# the renderer reads the service kind off the URL scheme it already has.
+_HTTP_SCHEMES = ("http", "https")
+
+
+def _url_scheme(endpoint: Any) -> str:
+    """The scheme of an endpoint's URL, lowercased, or ``""`` without one."""
+    url = str(getattr(endpoint, "url", "") or "")
+    if "://" not in url:
+        return ""
+    return url.split("://", 1)[0].strip().lower()
+
 
 def _format_raw(raw: Mapping[str, Any] | Any, limit: int = RAW_LIMIT) -> str:
     """Pretty-print the platform payload, truncated for LLM consumption."""
@@ -127,7 +140,26 @@ def _render_running(info: EnvInfo) -> list[str]:
                 "       s = ctx.wrap_socket(raw, server_hostname=host)",
             ]
         elif endpoint.transport == TRANSPORT_TCP:
-            lines.append(f"endpoint: {endpoint.display()}  (transport: tcp — plain TCP is fine)")
+            scheme = _url_scheme(endpoint)
+            if scheme in _HTTP_SCHEMES:
+                # Measured: CTF2's web targets publish `http://host:80` with no
+                # nc_ssl, so the transport is legitimately `tcp` -- and the old
+                # wording said "plain TCP is fine", which invites a bare socket
+                # against a web challenge.  `tcp` answers "no TLS wrapper needed",
+                # not "raw protocol", so name the service.
+                lines.append(
+                    f"endpoint: {endpoint.display()}  "
+                    f"(transport: tcp — HTTP service, no TLS wrapper needed)"
+                )
+                lines += [
+                    f"   → Speak {scheme.upper()} (curl / requests / a browser). A bare",
+                    f"     socket gets no banner from a web server, which looks like a",
+                    f"     dead service.",
+                ]
+            else:
+                lines.append(
+                    f"endpoint: {endpoint.display()}  (transport: tcp — plain TCP is fine)"
+                )
         else:
             lines.append(f"endpoint: {endpoint.display()}  (transport: not reported)")
             lines += [
