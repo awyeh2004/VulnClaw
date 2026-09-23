@@ -167,9 +167,40 @@ password 即 flag。
 | 路径停滞保护是否触发 | ❌ **未被触发**：整个 run 只有 5 个 LLM step（31 次工具调用），远未到阈值 8。保护逻辑仍未在真实 run 里跑过 |
 
 run 结束原因：`platform_submit` 返回 `[platform_submit_disabled]`（提交默认关闭），
-agent 因此 `ask_user` 并释放了环境。**即 flag 已拿到但未提交验证平台是否接受**——
-这是唯一还悬着的一环，需要用户决定是否打开
-`competition.allow_flag_submission: true`。
+agent 因此 `ask_user` 并释放了环境。
+
+### 9.1 提交验证：被平台的人机验证挡住（未完成）
+
+用户批准打开提交闸后，用已拿到的 flag 走真实 `submit_flag_via` 路径，**仍未能确认**。
+实测过程与结果：
+
+| 检查 | 结果 |
+|---|---|
+| 该题的提交前置条件 | `requires_running_target_for_submit = true`（`max_attempts = 0`，即不限次） |
+| 目标起起来后再提交 | **仍然 400** —— 所以不是"没起环境"这个前置条件的问题 |
+| Open API `/practice/<pid>/challenges/<cid>/submit/` | 400 `INVALID_REQUEST`。不给 `confirmation` 时 params 提示 `{"confirmation": true}`；给了之后 params 为 `null`（另一处校验失败）→ **字段名没写错** |
+| 会话 API 同一路径 | **HTTP 429 + 验证码**：`{"data":{"risk_action":"challenge","risk_challenge":{"image":"data:image/png;base64,..."}}}` |
+| 会话 API `/challenges/<cid>/submit/` | 404（路由不存在） |
+
+**结论：CTF2 把 flag 提交放在人机验证（风控）之后，自动化提交走不通。** flag
+`CTF2{9f113b92-cb26-424a-8003-aa8ef322e092}` 至今**未经平台确认**，需在浏览器里手动提交。
+
+我**没有**去解那个验证码，也不会：这是平台对**计分动作**的反自动化控制，工具去绕过
+它越界了。另一种可能读法照实说明：这次风控也可能是我今天反复 start/release 触发限流
+后的临时升级，而不一定是永久闸门——但两种读法下"交给人在浏览器提交"都是对的，所以
+无需先区分就能行动。
+
+顺手修掉的两个**信息错误**（都不影响功能，所以任何测试都不会变红）：
+
+1. 提交闸的拒绝文案让人去设 `VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION=true`，
+   而 `_overlay_env` **从来没读过这个变量**——照做的人看到一模一样的拒绝，会以为闸门
+   坏了而不是变量被忽略。已补上处理，并加了"文案 advertise 的名字 == overlay 真正读的
+   名字"的守护测试（两者分居两个文件，是这类 bug 的温床）。
+2. 验证码响应没有顶层 `error`，原先只报 `429 Too Many Requests`——这是最坏的读法：它
+   暗示"慢点重试"，而对着人机验证重试永远不可能成功、只会像在规避风控。新增
+   `_risk_control_note()` 明确说出 HUMAN-VERIFICATION、**不要**循环重试、去浏览器提交。
+
+目标环境已释放（确认 `state=none`）。
 
 ## 10. 渲染措辞：HTTP 目标不是"裸 TCP"
 
@@ -230,7 +261,10 @@ endpoint: http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80
    守卫挡下，当时选择跳过）。
 5. **`finding_parser.confirmed_markers` 与 `ctf_mode.detect_verification_success`**
    可能语义重复，需要先确认语义再合并。
-6. **flag 未提交验证**：见 §9 末尾。
+6. ~~flag 未提交验证~~ —— 已尝试，被平台风控挡住且不可自动化；改由人在浏览器提交，
+   见 §9.1。**这一项不再是"待做"，而是"已查明做不到"。**
+7. **Open API 提交路由为何 400 仍未定论**：`confirmation` 给了之后 params 为 `null`，
+   说明还有第二处校验失败。继续探这个接口会继续加激风控，因此**主动停止**，没有查下去。
 
 ## 13. 未查明：设计文档为何消失
 
@@ -243,4 +277,5 @@ endpoint: http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80
   `tmp-*` 目录都活着）。
 
 **结论：触发者未查明。** 但无论原因，结论一样——**设计文档必须放在受版本控制的
-路径**。这就是它现在在 `docs/` 的原因。
+路径**。这就是它现在在仓库根目录（而不是已被 `git add -f` 硬塞进 `docs/`）的原因，
+详见提交 `6ac4bee`。
