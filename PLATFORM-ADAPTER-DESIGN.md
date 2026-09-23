@@ -293,6 +293,117 @@ endpoint: http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80
 - 不是 conftest 的 prune（豁免逻辑正确，且我的 3 个 `.txt`/`.py` 文件与几百个
   `tmp-*` 目录都活着）。
 
-**结论：触发者未查明。** 但无论原因，结论一样——**设计文档必须放在受版本控制的
+**结论：触发者未查明。** 但无论原因，结论一样——**设计文档必须放在受约束的
 路径**。这就是它现在在仓库根目录（而不是已被 `git add -f` 硬塞进 `docs/`）的原因，
 详见提交 `6ac4bee`。
+
+---
+
+## 14. 路径停滞保护：一次真实的"构造停滞"验证与由此发现的漏洞
+
+### 14.1 为什么要构造
+
+停滞保护至今**没有在真实解题里触发过**：两次成功 run 分别只用 3 和 5 个 step，
+离阈值 8 差得远。它是当时风险最高的未验证机制，所以专门构造了一次。
+
+### 14.2 构造方法（可复现）
+
+靶机：一个**故意无产出**的本地 HTTP 服务（`127.0.0.1:18871`）——任何路径、任何方法、
+任何参数、任何请求体，都返回**同一个 92 字节响应**（实测 `/`、SQLi payload、目录
+穿越、`/flag` 四者的 sha256 完全一致）。它不是死端口：连接立刻成功，所以"停滞"
+是**缺少进展**，不是超时。
+
+为了在一次有界的 run 内看到事件，`competition.stall_turns` 调到 3（阈值本就是可配
+的旋钮）；停滞本身是**真实的**——agent 在 15 分钟、53 条 evidence 里对目标零进展。
+
+### 14.3 实测结果：保护**没有**拦住它，而且能解释为什么
+
+run 的表现：8000+ 路径爆破、10 万级目录穿越变体、408 个 HTTP 方法、568 个 Host 名、
+TLS/条件头/重复请求/协议升级全套 fuzz，结论每次都是"响应完全相同"。然后它**换了
+方向而不是停下**——开始搜本机文件系统找 flag（`E:\vulnclaw`、`C:\vulnclaw`、harness
+的 work/report 目录），命中的全是测试文件和以前几次解题的日志。
+
+15 分钟内**没有任何 `ask_user`**。原因（读代码 + 事件顺序对上）：
+
+**漏洞 1：把"新开 angle"当成进展。** 指纹原本是
+`(confirmed_facts, len(angles), decided_angles, last_lock)`。agent 在此期间
+`blackboard_set_lock` 一次、`create_angle` 三次、`miss_angle` 两次——**每次注册都把
+`path_stall_streak` 归零**。注册 angle 是一个**无限、免费**的动作，所以一个不停开
+新战线的 agent 可以**永久**压住守门器，尽管它离目标一点没近。
+
+**漏洞 2：只要有 open angle 就永远不升级给用户。** `ask` 的唯一条件之一是
+`_no_path_open_angles() == 0`。既然 agent 能无限注册 angle，这个条件**永远不成立**，
+于是即使 streak 真的涨上去，也只会反复 hint（而且 hint 还受 `hint_sent` 限制只发
+一次），**永远不会**回到操作者——正好违背"当其他路也走不下去了返回给我们确认"这个
+原始意图。
+
+**漏洞 3：hint 对操作者不可见。** `stall_guard_message` 只经
+`add_correction_hint()` 与 `context.add_user_message()` 进入 **agent 的 prompt**；
+`emit()` 只在 `--stream` 下接线（否则 CLI 传 `on_event=None`）。所以控制台里
+**看不到守门器介入过**——agent 被告知了，人没有。这本身就是缺陷：被干预的 run 和
+单纯卡住的 run，对操作者完全一样。
+
+### 14.4 修法
+
+1. **指纹不再计入"注册 angle"**（`_path_progress_fingerprint` 去掉 `len(angles)`）。
+   进展 = 新确认事实 **或** 新决定的 angle（HIT/MISS）**或** LOCK 变化。开一个面只是
+   *承诺*去看，**解决**它才算进展。
+2. **hint 被无视后即使还有 open angle 也要升级**（`_stall_guard_decision` 新增分支）。
+   措辞保持诚实：报出"N 个 angle 仍处于 open 且从未被决定，黑板无法区分它们值得
+   追还是已被排除"，**不**再声称"没有未尝试的路径了"。
+3. **hint 与 ask 都对操作者可见**：新增 `_notify_operator()` + 两个 sink 的
+   `on_notice()`（终端打印黄字，TUI 发一条 log 事件），并额外 `emit("stall_guard", ...)`。
+
+### 14.5 测试怎么改的（这点必须说清楚）
+
+有两条**旧测试断言的正是漏洞本身**，它们是这套机制看起来"已经验过"的原因：
+
+- `test_a_new_angle_changes_it` 断言注册 angle 会改变指纹 → 改成
+  `test_opening_an_angle_is_not_progress` 断言**不会**；
+- `test_an_open_angle_means_a_path_is_left` 的后半句断言 hint 之后**必须
+  `("silent", "")`** → 改成 `test_an_ignored_hint_with_angles_still_open_does_ask`
+  断言必须 `ask` 且措辞不许overclaim。
+
+这两条不是我"改测试让它通过"，而是**它们固化的行为被实测证伪了**；改动理由都写在
+测试 docstring 里。另外新增 `tests/agent/test_stall_guard_visibility.py`（9 例）
+覆盖 `_notify_operator` 与两个 sink 的 `on_notice`。
+
+### 14.6 复跑验证（A/B，已完成）
+
+同一靶机、`stall_turns=2`、`--max-steps 8` 重跑，**三条都验到了**，run 按设计提前结束：
+
+```
+[stall guard] Path stall: this path has produced no new confirmed fact and no angle
+decision for 2 turns. Record the current angle as a MISS on the blackboard and try a
+DIFFERENT angle rather than probing this surface again. ...
+
+[stall guard] handing back to the operator: The current path has not advanced for 3
+turns, and nudging it toward a different angle changed nothing. 3 angle(s) on the
+blackboard are open and never decided, so nothing there distinguishes a path worth
+pursuing from one already ruled out. Give a concrete next step or scope, or confirm
+that the run should stop.
+
+⊘ 未达成 — steps=8 evidence=49 tools=51
+```
+
+逐条对应：
+
+| 修补 | 实测证据 |
+|---|---|
+| 1. 开 angle 不算进展 | 旧逻辑下这一轮的三次 `create_angle` 会把 streak 清零；新逻辑下 streak 正常累计到 2 并触发 |
+| 2. hint 可见 | 出现了 `[stall guard] ...` 行（修补前控制台**完全没有任何信号**） |
+| 3. hint 被无视后即使有 open angle 也升级 | 第 3 轮以 **3 个 angle 仍 open** 的状态交回操作者 —— 旧代码在这里会永久 `silent` |
+
+而且 **agent 对 hint 做出了预期反应**：收到提示后立刻 `blackboard_miss_angle` 并把方向换成"Host/vhost 枚举"，即"告诉它这条路难走、让它先走别的路"这个原始意图成立，且**没有终止 run**。
+
+### 14.7 复跑暴露的第 4 个问题（已修）
+
+同一次复跑的末行暴露了措辞自相矛盾：
+
+- handback 消息说 "3 angle(s) ... are open and never decided"，
+- 而 run 摘要的 `reason` 说 "stalled with no untried path remaining"。
+
+同一件事的两行互相打架。原因是 loop 里 `reason` 只有二分（thin / 否则即"没有未尝试的路径"），而升级分支现在有第三种情形。已抽成 `_stall_handback_reason()` 三值（外加"没有黑板可判断"这第四种），并加了"reason 与消息不得矛盾"的测试。
+
+至此**停滞保护可以说是验证过了**（单元 + 一次真实 A/B）。仍未覆盖的是：`stall_turns` 取默认值 8 时的长时间 run 行为——本次为了在有界 run 内看到事件用了 2。
+

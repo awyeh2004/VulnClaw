@@ -22,6 +22,7 @@ from vulnclaw.agent.solver import (
     _no_path_coverage_thin,
     _path_progress_fingerprint,
     _stall_guard_decision,
+    _stall_handback_reason,
     _stall_turns,
 )
 
@@ -54,11 +55,30 @@ class TestFingerprintTracksProgress:
         assert node is not None
         assert _path_progress_fingerprint(FakeAgent(bb)) != before
 
-    def test_a_new_angle_changes_it(self):
+    def test_opening_an_angle_is_not_progress(self):
+        """Registering an angle is a PROMISE to look, not a result.
+
+        This test used to assert the opposite, and that expectation was the defect.
+        Measured against a deliberately inert target: an agent registered four angles
+        and decided two across 15 minutes and 53 tool results with zero progress, and
+        because each registration moved the fingerprint the stall streak reset every
+        time -- so the guard could never speak. An unbounded, free action must not be
+        able to mask a stall.
+        """
         bb = _bb()
         before = _path_progress_fingerprint(FakeAgent(bb))
-        bb.create_angle("SSRF to loopback on internal web ports")
-        assert _path_progress_fingerprint(FakeAgent(bb)) != before
+        for index in range(6):
+            bb.create_angle(f"angle {index} nobody will ever decide")
+        assert _path_progress_fingerprint(FakeAgent(bb)) == before
+
+    def test_angle_spam_cannot_hold_the_fingerprint_open(self):
+        """The full evasion: open angles AND a decided one, repeatedly."""
+        bb = _bb()
+        agent = FakeAgent(bb)
+        baseline = _path_progress_fingerprint(agent)
+        for index in range(5):
+            bb.create_angle(f"surface {index}")
+        assert _path_progress_fingerprint(agent) == baseline
 
     def test_deciding_an_angle_changes_it(self):
         """HIT or MISS is progress: the path was actually resolved."""
@@ -161,7 +181,8 @@ class TestStallGuardDecision:
         assert action == "ask"
         assert "no untried angle remains" in message
 
-    def test_an_open_angle_means_a_path_is_left(self):
+    def test_an_open_angle_earns_a_hint_before_a_handback(self):
+        """First firing nudges; it does not stop the run."""
         bb = _bb()
         bb.create_angle("SSRF to loopback on internal web ports")
         action, message = _stall_guard_decision(
@@ -169,11 +190,29 @@ class TestStallGuardDecision:
         )
         assert action == "hint"
         assert "DIFFERENT angle" in message
-        # ...and it does not repeat itself every turn.
-        again = _stall_guard_decision(
+
+    def test_an_ignored_hint_with_angles_still_open_does_ask(self):
+        """The other half of the measured evasion.
+
+        This used to assert ``("silent", "")``: an open angle was taken as proof that
+        a path remained, so after one hint the guard went quiet forever. Since an
+        agent can mint angles without limit, "an untried angle remains" is always
+        true and the handback could never happen -- exactly the "other paths also led
+        nowhere, come back to the operator" case the guard exists for.
+
+        The wording must not overclaim: it reports the open-and-undecided count and
+        says the blackboard cannot distinguish them.
+        """
+        bb = _bb()
+        bb.create_angle("SSRF to loopback on internal web ports")
+        action, message = _stall_guard_decision(
             FakeAgent(bb), streak=9, hint_sent=True, thin_windows=0
         )
-        assert again == ("silent", "")
+        assert action == "ask"
+        assert "1 angle(s)" in message
+        assert "open and never decided" in message
+        # Honest premise: it must NOT claim the search space is exhausted.
+        assert "no untried angle remains" not in message
 
     def test_a_resolved_angle_with_none_open_does_ask(self):
         """This is the case the guard exists for: the path was tried and exhausted."""
@@ -189,3 +228,41 @@ class TestStallGuardDecision:
     def test_no_blackboard_is_not_treated_as_thin(self):
         """Without a blackboard there is nothing to judge, so do not block."""
         assert _no_path_coverage_thin(FakeAgent()) is False
+
+
+class TestHandbackReasonMatchesTheMessage:
+    """The reason line and the question must not contradict each other.
+
+    Measured in the verifying run: the handback asked about "3 angle(s) ... open and
+    never decided" while the run summary said "no untried path remaining". Both lines
+    describe the same event, so a wrong one is a false statement to the operator.
+    """
+
+    def test_open_angles_report_the_undecided_angles_reason(self):
+        bb = _bb()
+        bb.create_angle("surface A")
+        bb.create_angle("surface B")
+        reason = _stall_handback_reason(FakeAgent(bb))
+        assert reason == "stalled with angles registered but none decided"
+        assert "no untried path" not in reason
+
+    def test_no_open_angles_reports_the_exhausted_reason(self):
+        bb = _bb()
+        angle = bb.create_angle("file:// wrappers")
+        bb.miss_angle(angle.id)
+        assert _stall_handback_reason(FakeAgent(bb)) == "stalled with no untried path remaining"
+
+    def test_an_empty_board_reports_the_empty_board_reason(self):
+        assert _stall_handback_reason(FakeAgent(_bb())) == "stalled with an empty blackboard"
+
+    def test_without_a_blackboard_it_does_not_claim_exhaustion(self):
+        """No blackboard means "cannot tell", not "everything tried".
+
+        `_no_path_coverage_thin` returns False when there is no blackboard (it cannot
+        judge, so it does not block) and `_no_path_open_angles` then reports 0 -- so
+        without its own branch this would report exhaustion purely from having nothing
+        to look at.
+        """
+        reason = _stall_handback_reason(FakeAgent())
+        assert reason == "stalled with no blackboard to judge coverage from"
+        assert "no untried path" not in reason

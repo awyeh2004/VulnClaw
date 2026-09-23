@@ -605,15 +605,24 @@ def _path_progress_fingerprint(agent: AgentState) -> tuple:
     new nodes) stayed quiet, and the existing observation-only guard never fired
     because the agent was actively probing rather than rereading saved evidence.
 
-    What counts as progress is a change of theory or of coverage:
+    What counts as progress is a change of theory or of *coverage that was
+    resolved*:
 
     * a newly CONFIRMED fact (knowledge advanced),
-    * a newly decided angle -- HIT or MISS (the path was actually resolved),
-    * a newly OPEN angle (a genuinely different surface is being explored),
+    * a newly decided angle -- HIT or MISS (a path was actually resolved),
     * a different LOCK (the working theory changed).
 
     Proposed-but-unconfirmed facts, intents and one-off probes therefore do NOT
     count, which is precisely the "busy but stuck" pattern.
+
+    REGISTERING an angle does not count either, and that line was measured the
+    hard way. The first version included ``len(angles)``, i.e. merely *opening* an
+    angle was progress. A verifying run against a deliberately inert local target
+    then showed an agent can evade the guard indefinitely by inventing new angles:
+    over 15 minutes and 53 tool results it registered four angles, decided two, and
+    each registration reset the streak to zero -- while producing exactly zero
+    progress toward the goal. Opening a surface is a *promise* to look; only
+    resolving it is progress.
     """
     bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
     if bb is None:
@@ -627,7 +636,7 @@ def _path_progress_fingerprint(agent: AgentState) -> tuple:
     angles = [n for n in nodes if angle_type is not None and n.type == angle_type]
     decided = sum(1 for n in angles if n.status != proposed)
     locks = [n.id for n in nodes if lock_type is not None and n.type == lock_type]
-    return (len(bb.confirmed_facts()), len(angles), decided, locks[-1] if locks else "")
+    return (len(bb.confirmed_facts()), decided, locks[-1] if locks else "")
 
 
 def _no_path_coverage_thin(agent: AgentState) -> bool:
@@ -699,21 +708,89 @@ def _stall_guard_decision(
     if _no_path_open_angles(agent) == 0:
         return "ask", (
             f"The current path has not advanced for {streak} turns "
-            "(no confirmed fact, decided angle or new angle), and no untried angle "
+            "(no confirmed fact and no angle decided), and no untried angle "
             "remains on the blackboard. Provide a new hypothesis or scope, or confirm "
             "that the run should stop."
         )
 
     if not hint_sent:
         return "hint", (
-            f"Path stall: this path has produced no new confirmed fact, decided angle "
-            f"or new angle for {streak} turns. Record the current angle as a "
+            f"Path stall: this path has produced no new confirmed fact and no angle "
+            f"decision for {streak} turns. Record the current angle as a "
             "MISS on the blackboard and try a DIFFERENT angle rather than probing this "
             "surface again. If you keep repeating similar probes, also consider that a "
             "throttling front makes results look uninformative -- prefer one slower, "
             "decisive probe over many more of the same."
         )
-    return "silent", ""
+
+    # The nudge was already given and the path STILL has not advanced, while angles
+    # remain open. This used to return "silent" -- i.e. an open angle was treated as
+    # proof that a path was left to try, so the guard never handed back.
+    #
+    # Measured: that is evadable without limit. Against a deliberately inert target
+    # an agent registered four angles and decided two over 15 minutes / 53 tool
+    # results while making no progress at all; because opening an angle reset the
+    # streak (and kept at least one open), the guard could neither nudge twice nor
+    # ever ask. "An untried angle remains" is therefore NOT evidence of a live path
+    # when the agent can mint angles at will.
+    #
+    # The wording stays honest: it reports how many angles are open and undecided
+    # and says that the blackboard cannot distinguish them, rather than claiming the
+    # search space is exhausted.
+    open_angles = _no_path_open_angles(agent)
+    return "ask", (
+        f"The current path has not advanced for {streak} turns, and nudging it toward a "
+        f"different angle changed nothing. {open_angles} angle(s) on the blackboard are "
+        f"open and never decided, so nothing there distinguishes a path worth pursuing "
+        f"from one already ruled out. Give a concrete next step or scope, or confirm "
+        f"that the run should stop."
+    )
+
+
+def _stall_handback_reason(agent: AgentState) -> str:
+    """Why the guard handed back. Must match what is actually known.
+
+    Three outcomes, not two. The escalation fires both when every angle has been
+    decided and when angles remain open but nothing has been decided for the whole
+    stall window -- so "no untried path remaining" is only true in the first case.
+    Measured in the verifying run: the handback message said "3 angle(s) ... are open
+    and never decided" while this summary said "no untried path remaining", i.e. the
+    two lines of the same event contradicted each other.
+
+    A missing blackboard is its own case: ``_no_path_coverage_thin`` deliberately
+    returns False there ("cannot judge, do not block") and ``_no_path_open_angles``
+    then reports 0, which together would claim exhaustion on the strength of having
+    nothing to look at.
+    """
+    bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
+    if bb is None:
+        return "stalled with no blackboard to judge coverage from"
+    if _no_path_coverage_thin(agent):
+        return "stalled with an empty blackboard"
+    if _no_path_open_angles(agent) == 0:
+        return "stalled with no untried path remaining"
+    return "stalled with angles registered but none decided"
+
+
+def _notify_operator(stream_sink: Any, message: str) -> None:
+    """Show a guard message to the OPERATOR, not only to the model.
+
+    The guard's whole purpose is to change the run's course; an intervention the
+    operator cannot see is indistinguishable from a run that is simply stuck. Before
+    this existed, a measured 15-minute stall produced no visible signal at all: the
+    hint went into the agent's prompt, and `emit()` is only wired under `--stream`
+    (the CLI passes ``on_event=None`` otherwise), so nothing reached the console.
+
+    Best-effort on purpose: a sink that cannot render a notice must never break a
+    solve.
+    """
+    notify = getattr(stream_sink, "on_notice", None)
+    if not callable(notify):
+        return
+    try:
+        notify(message)
+    except Exception:  # noqa: BLE001 - rendering must not abort the run
+        pass
 
 
 def _auto_review_blackboard(agent: AgentState, state: AgentState) -> list[str]:
@@ -1828,18 +1905,26 @@ async def _solve_impl(
             state.add_correction_hint(stall_message)
             stall_guard_message = f"[path stall] {stall_message}"
             path_stall_hint_sent = True
+            emit("stall_guard", {
+                "action": "hint",
+                "streak": path_stall_streak,
+                "message": stall_message,
+            })
+            _notify_operator(stream_sink, f"[stall guard] {stall_message}")
             if _no_path_coverage_thin(agent):
                 path_stall_thin_windows += 1
         elif stall_action == "ask":
             state.ask_user(stall_message)
             needs_user = True
-            # The reason must match what is actually known: an empty blackboard is
-            # "nothing recorded", never "everything tried".
-            reason = (
-                "stalled with an empty blackboard"
-                if _no_path_coverage_thin(agent)
-                else "stalled with no untried path remaining"
-            )
+            # The reason must match what is actually known -- see
+            # _stall_handback_reason, which is three-way for exactly this reason.
+            reason = _stall_handback_reason(agent)
+            emit("stall_guard", {
+                "action": "ask",
+                "streak": path_stall_streak,
+                "message": stall_message,
+            })
+            _notify_operator(stream_sink, f"[stall guard] handing back to the operator: {stall_message}")
             emit("ask_user", {"question": stall_message, "reason": reason})
             stop_for_stall = True
 
