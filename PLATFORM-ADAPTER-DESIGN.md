@@ -504,4 +504,76 @@ that the run should stop.
 两份旧列表的独有标记都能被唯一谓词识别、标记不重复、内联副本不得复活（源码断言）、
 `_is_negated` 的窗口边界，以及抽取侧的反转案例。
 
+---
+
+## 16. 联调覆盖：测了哪些层、补了哪些、哪些**故意不测**
+
+### 16.1 补的两块（提交路径夹具 + 真实适配器联调）
+
+**① 提交路径的实测夹具。** 唯一不可逆的动作，此前是证据最薄的一处：请求体是**推断**出来
+的，而四种平台**响应**从没录成夹具——只以手抄字典的形式散在两个测试文件里。手抄样本正是
+当初 4 个字段名出错的成因。现已逐字录进 `tests/platforms/ctf2_payloads.py` 第 4 段
+provenance：
+
+| 夹具 | 面 | 要点 |
+|---|---|---|
+| `SUBMIT_ACCEPTED_PAYLOAD` | Open API | `accepted=true, attempt=1, is_solved=true` |
+| `SUBMIT_INVALID_REQUEST_PAYLOAD` | Open API | `INVALID_REQUEST`, `params=null` |
+| `SUBMIT_INVALID_REQUEST_HINT_PAYLOAD` | Open API | `params={"confirmation": true}` ← 平台在要这个字段 |
+| `SUBMIT_RISK_CONTROL_PAYLOAD` | 会话 API 429 | `risk_action=challenge` + 验证码（**图片 base64 故意截断**，断言的是形状不是像素） |
+| `SUBMIT_ROUTE_NOT_FOUND_PAYLOAD` | 会话 API | `/challenges/<cid>/submit/` 无此路由 |
+
+两个测试文件里的手抄副本已改为引用夹具（同一份实测形状只留一处，与
+`FLAG_PREFIX_PATTERNS`、验证标记那两次同一原则）。新增
+`tests/platforms/test_ctf2_submit_payloads.py`（12 例）把**两层**钉住：
+
+- **适配器层**：四种响应各自读成什么（`success: false` 绝不读成受理——生产路径上它们先被
+  client 抛错挡住，但一个宽容的读取器会因此在**被拒的请求上**标记题目已解决）；
+- **策略层**（`submit_flag_via` 的记账，此前只在实盘验证过、没有测试守）：受理 → 消耗一次
+  尝试并记 `accepted`；400/404/风控 → `record_error`，**一次都不消耗**，同一 flag 之后仍可
+  重投。夹具还通过**真实的** `_raise_for_status` 生成异常，而不是手写异常消息。
+
+**② 真实适配器跑 `competition solve`。** 原有测试用的是 `_StubAdapter`，于是
+`token → registry.adapter_for → 真实 parse_ref → 真实 _pair() → 真实 read_challenge`
+这条缝无人覆盖：stub 的 `parse_ref` 会返回作者想象的形状，真实解析器与 `_pair`/CLI 之间的
+不一致因此不可见。新增 `tests/cli/test_competition_solve_real_adapter.py`（6 例）：
+
+- 真实 `_pair` 映射经 CLI 钉住（`group`→practice id、`id`→challenge id；`stage` ref 按
+  文档把 stage id 放进 practice 槽位）；
+- 录下来的题名/类别/难度/`needs_env` 确实进了 goal；
+- 真实 `extract_attachments` 出来的嵌套 `files[].file.original_name` 确实传到了预下载；
+- **stub 永远测不到的反向用例**：`ctf2:daily` 没有 challenge id，真实 `_pair` 拒绝它
+  （`CTF2 needs both a daily id and a challenge id`）→ 必须在**agent 启动之前** `Exit(1)`。
+
+顺带把 `FakeClient` 从 `test_ctf2_adapter.py` 挪到 `tests/platforms/ctf2_fakes.py`，两个测试
+文件共用，避免跨测试模块 import（收集顺序与同名模块都是隐患）。
+
+### 16.2 故意**不**做的：实盘端到端进 suite
+
+理由：需要凭据 + 配额，且正常使用就会撞上 429 与风控验证码（今天就撞到了）——放进 suite 只会
+让测试变脆并消耗平台限额。实盘检查保持**手动、刻意**（如 §9 那次真解题）。
+
+同时**做不到**的：平台侧的**受理逻辑**（人机验证；以及 BabySQL 那道连平台自己前端都交不上
+的题）。没有任何测试能覆盖它，这一点只能承认。
+
+### 16.3 现有覆盖的分层地图
+
+| 层 | 覆盖方式 | 保真度 |
+|---|---|---|
+| refs / normalize / render | 单测（纯函数） | 精确 |
+| 适配器归一化 | 单测 + **实测 payload**（7 个 + key 集合清单） | 高 |
+| registry（注册/开关/adapter_for） | 真实类 + stub client | 高 |
+| 提交路径 | 单测 + **实测 5 种响应**（本轮新增） | 高 |
+| 中立工具面 / schema 上限 | 单测 + token 快照 | 高 |
+| client 生命周期（超时/关闭/事件循环重绑） | 单测 | 高 |
+| CLI → 真实适配器 | 单测（本轮新增） | 高 |
+| CLI → solve → agent → 工具 → 适配器（整条链） | **仅实盘** | — |
+| 真实 HTTP / 平台受理判定 | **仅实盘 / 不可测** | — |
+
+规律：**所有真正花掉时间的问题都在"假货模拟不到的那条缝"上**——真实字段名、真实异步生命
+周期、真实传输、真实 Typer 调用约定。本轮补的两块正是把其中**离线可复现**的部分（响应形状、
+真实解析+映射）挪进了测试；剩下的两块（整条链、平台受理）在离线条件下无法复现，故明确保留
+为手动实盘。
+
+
 
