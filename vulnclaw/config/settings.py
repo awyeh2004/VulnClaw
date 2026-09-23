@@ -321,6 +321,8 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
         Subagent:   ENABLED, MAX_TASKS_PER_CALL, MAX_CONCURRENT, MAX_STEPS_PER_CHILD,
                     CHILD_MAX_TOOL_ROUNDS, MAX_TOTAL_PER_SOLVE, MAX_DEPTH,
                     MERGE_MAX_EVIDENCE_PER_CHILD, RESULT_MAX_CHARS
+        Competition: COMPETITION__ALLOW_FLAG_SUBMISSION (or the single-underscore
+                    spelling) -- the flag-submission gate's own recommended switch
     """
     # ── LLM ──────────────────────────────────────────────────────────
     if v := os.environ.get("VULNCLAW_LLM_API_KEY"):
@@ -479,6 +481,21 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
                 field,
                 getattr(config.subagent, field),
             )
+    # ── Competition: the flag-submission gate ────────────────────────
+    # The refusal message that `platform_submit` returns tells the caller to set
+    # exactly this env var -- and until this handler existed, nothing read it, so
+    # following the instruction changed nothing and the tool kept refusing.  An
+    # instruction that silently does not work is worse than no instruction: it
+    # costs the caller a round trip and makes them doubt the gate rather than the
+    # variable.  Both spellings are accepted, matching the recon block below.
+    for env_name in (
+        "VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION",
+        "VULNCLAW_COMPETITION_ALLOW_FLAG_SUBMISSION",
+    ):
+        if v := os.environ.get(env_name):
+            config.competition.allow_flag_submission = v.lower() in ("1", "true", "yes", "on")
+            break
+
     # ── Recon: space-mapping API keys ────────────────────────────────
     # Accept both the short form (FOFA_KEY) and the prefixed form
     # (VULNCLAW_RECON_FOFA_KEY); short form wins if both are set.
