@@ -735,9 +735,13 @@ class GCSPLatformConfig(BaseModel):
     tools_enabled: bool = Field(
         default=False,
         description=(
-            "Expose the GCS platform tools (gcs_*) to the agent. OFF by default: "
-            "the integration is legacy, and an agent solving a challenge on "
-            "another platform would otherwise reach for gcs_submit_flag."
+            "DEPRECATED. Expose the GCS platform tools (gcs_*) to the agent. OFF by "
+            "default: the integration is legacy, and an agent solving a challenge on "
+            "another platform would otherwise reach for gcs_submit_flag. "
+            "Prefer competition.expose_legacy_tool_names, which covers the legacy "
+            "names of EVERY platform in one switch instead of only GCS -- this field "
+            "is still honoured (the two are OR-ed) so existing configs keep working, "
+            "but new configuration should not use it."
         ),
     )
 
