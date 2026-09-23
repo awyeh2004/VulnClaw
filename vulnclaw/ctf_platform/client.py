@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 
 import httpx
 
@@ -174,6 +175,48 @@ def _session_headers() -> dict[str, str]:
     }
 
 
+def _risk_control_note(response: httpx.Response) -> str:
+    """Describe the platform's risk-control demand, if this response is one.
+
+    Measured 2026-09-23 on a flag submission to a real practice challenge: the
+    session API answered **HTTP 429** with
+
+        {"data": {"risk_action": "challenge",
+                  "risk_challenge": {"id": "...", "image": "data:image/png;base64,..."}}}
+
+    i.e. a CAPTCHA. Without this check the response has no top-level ``error``
+    object, so the caller saw a bare "429 Too Many Requests" -- which reads as
+    "slow down and retry", the single worst response to a human-verification gate:
+    retrying can never succeed and looks like an attempt to evade the control.
+
+    The note is deliberately instructional and deliberately refuses to help
+    automate it: this is an anti-automation control on the *scored* action, so the
+    only correct move is to hand it to a human.
+    """
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - a non-JSON body is simply not risk control
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return ""
+    action = data.get("risk_action")
+    if not action:
+        return ""
+
+    challenge = data.get("risk_challenge")
+    captcha = isinstance(challenge, Mapping) and bool(challenge.get("image"))
+    detail = "a CAPTCHA image" if captcha else "an unspecified human check"
+    return (
+        f"the platform's risk control answered risk_action={str(action)!r} with {detail}. "
+        f"This is a HUMAN-VERIFICATION gate on the scored action: it cannot be satisfied "
+        f"by an automated client, so DO NOT retry in a loop. Submit the flag in the "
+        f"browser instead."
+    )
+
+
 def _raise_for_status(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
@@ -184,6 +227,9 @@ def _raise_for_status(response: httpx.Response) -> None:
     except Exception:
         payload_text = response.text[:300]
         detail = payload_text
+    risk = _risk_control_note(response)
+    if risk:
+        raise RuntimeError(f"CTF2 API {response.status_code}: {risk}")
     raise RuntimeError(
         f"CTF2 API {response.status_code}: {detail or response.reason_phrase}"
     )
