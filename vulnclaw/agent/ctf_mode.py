@@ -16,32 +16,45 @@ if TYPE_CHECKING:
 #     claiming a flag;
 #   * finding_parser imports FLAG_PREFIX_PATTERNS (the prefix subset, WITHOUT the
 #     generic catch-all) to spot flag literals in model output and record them as
-#     notes.
+#     notes;
+#   * playbook._fingerprint_flags builds its redaction regex from the same names.
 #
 # They used to be maintained separately, and the copy in finding_parser had already
-# drifted down to 3 of these 17 prefixes -- so a DASCTF{} / BUUCTF{} / CTFshow{} flag
-# mentioned in a response was never recorded as a note.
-FLAG_PREFIX_PATTERNS = [
+# drifted down to 3 of these prefixes -- so a DASCTF{} / BUUCTF{} / CTFshow{} flag
+# mentioned in a response was never recorded as a note. playbook.py then became the
+# third copy and drifted differently (see below), which is why the names are now a
+# tuple that the patterns are DERIVED from: a fourth copy is no longer expressible.
+FLAG_PREFIX_NAMES: tuple[str, ...] = (
     # Chinese CTF platforms
-    r"(DASCTF\{[^}]+\})",
-    r"(NSSCTF\{[^}]+\})",
-    r"(BUUCTF\{[^}]+\})",
-    r"(CTFshow\{[^}]+\})",
-    r"(GXCTF\{[^}]+\})",
-    r"(D0g3\{[^}]+\})",
-    r"(HDCTF\{[^}]+\})",
-    r"(ISCTF\{[^}]+\})",
-    r"(SCTF\{[^}]+\})",
-    r"(HCTF\{[^}]+\})",
-    r"(ACTF\{[^}]+\})",
+    "DASCTF",
+    "NSSCTF",
+    "BUUCTF",
+    "CTFshow",
+    "GXCTF",
+    "D0g3",
+    "HDCTF",
+    "ISCTF",
+    "SCTF",
+    "HCTF",
+    "ACTF",
+    # The platform this tool actually drives: its flags are CTF2{...}, and this name
+    # was MISSING from every list. `CTF{}` cannot cover it because `CTF2{` has a "2"
+    # where the brace would have to be, so a CTF2 flag matched only the loose generic
+    # `word{...}` catch-all -- which note extraction deliberately excludes. Measured:
+    # both playbooks written by real runs on 2026-09-23 kept a CTF2 flag in cleartext.
+    "CTF2",
     # International CTF platforms
-    r"(CTF\{[^}]+\})",
-    r"(FLAG\{[^}]+\})",
-    r"(flag\{[^}]+\})",
-    r"(Flag\{[^}]+\})",
+    "CTF",
+    "FLAG",
+    "flag",
+    "Flag",
     # Capitalized variants
-    r"(DASctf\{[^}]+\})",
-    r"(Nssctf\{[^}]+\})",
+    "DASctf",
+    "Nssctf",
+)
+
+FLAG_PREFIX_PATTERNS = [
+    "(" + re.escape(name) + r"\{[^}]+\})" for name in FLAG_PREFIX_NAMES
 ]
 
 # Deliberately kept OUT of the prefix list: it matches ANY word{...}, which is

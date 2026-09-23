@@ -94,6 +94,93 @@ def test_capture_fingerprints_full_flags(tmp_playbooks):
     assert "flag{abcd…mnop}" in stored
 
 
+class TestTheFingerprintGateActuallyRedacts:
+    """Why a green test above did NOT catch the broken gate.
+
+    The old rule was `len(inner) > 12 -> fingerprint, else keep the match unchanged`.
+    The test above uses a SIXTEEN-character body, which lands on the passing side of
+    that boundary -- so the gate looked fine while every flag body of 12 characters or
+    fewer was written to disk in full. Measured on the playbooks real runs produced on
+    2026-09-23: 7 of 10 real flag shapes leaked, including `flag{222441144222}` (the
+    flag submitted and ACCEPTED that day) and every `CTF2{...}`.
+    """
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "flag{222441144222}",       # 12 chars: the boundary that leaked
+            "flag{0123456789ab}",       # 12 chars
+            "flag{0123456789abc}",      # 13 chars: just over the old boundary
+            "flag{abcd}",               # 4 chars
+            "flag{abcd1234}",           # 8 chars
+            "flag{this_Is_a_EaSyRe}",   # 16 chars: the case that did pass
+        ],
+    )
+    def test_no_body_length_is_written_in_full(self, flag):
+        out = pb._fingerprint_flags(f"CONFIRMED: {flag} (accepted)")
+        assert flag not in out, f"{flag} survived the hygiene gate"
+        assert "…" in out
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            # The platform this tool drives. `CTF{}` cannot cover it: `CTF2{` has a "2"
+            # where the brace would have to be, so the old two-name copy never matched.
+            "CTF2{9f113b92-cb26-424a-8003-aa8ef322e092}",
+            "DASCTF{abcdef123456}",
+            "BUUCTF{abcdef123456}",
+            "NSSCTF{abcd-1234-ef56}",
+            "CTFshow{abcdef123456}",
+            "ISCTF{abcdef123456}",
+        ],
+    )
+    def test_platform_prefixes_are_redacted_too(self, flag):
+        out = pb._fingerprint_flags(flag)
+        assert flag not in out, f"{flag} is not covered by the redaction regex"
+        assert "…" in out
+
+    def test_it_still_leaves_ordinary_prose_alone(self):
+        text = "the service returned 200 and a JSON body"
+        assert pb._fingerprint_flags(text) == text
+
+    def test_the_regex_is_derived_from_the_one_canonical_list(self):
+        """A fourth hand-maintained copy of the prefix list must not be expressible."""
+        from vulnclaw.agent.ctf_mode import FLAG_PREFIX_NAMES
+
+        for name in FLAG_PREFIX_NAMES:
+            assert pb._fingerprint_flags(f"{name}{{abcdefghijkl}}") != f"{name}{{abcdefghijkl}}", name
+
+    def test_adding_a_name_to_the_canonical_list_is_honoured(self, monkeypatch):
+        """The gate reads the shared tuple, so this file cannot drift behind it."""
+        import vulnclaw.agent.ctf_mode as ctf_mode
+
+        monkeypatch.setattr(pb, "FLAG_PREFIX_NAMES", (*ctf_mode.FLAG_PREFIX_NAMES, "NEWPREFIX"))
+        monkeypatch.setattr(
+            pb,
+            "_FLAG_FINGERPRINT_RE",
+            __import__("re").compile(
+                "(" + "|".join(__import__("re").escape(n) for n in pb.FLAG_PREFIX_NAMES)
+                + r")\{([^{}]{1,80})\}",
+                __import__("re").IGNORECASE,
+            ),
+        )
+        assert "NEWPREFIX{abcdefghijkl}" not in pb._fingerprint_flags("NEWPREFIX{abcdefghijkl}")
+
+
+def test_save_playbook_redacts_before_writing(tmp_playbooks):
+    """The gate has to work on the model-initiated path too, not only capture_run_notes."""
+    ack = pb.save_playbook(
+        name="maze",
+        fingerprint="fp",
+        steps="LOCK: 5x5 maze.\nCONFIRMED: flag = flag{222441144222} accepted.\n" + "x" * 80,
+        status="validated",
+    )
+    assert "error" not in ack, ack
+    stored = (tmp_playbooks / f"{ack['slug']}.md").read_text(encoding="utf-8")
+    assert "flag{222441144222}" not in stored
+    assert "flag{2224…4222}" in stored
+
+
 def test_target_fingerprint_stable_for_binary(tmp_path):
     binary = tmp_path / "chall.elf"
     binary.write_bytes(b"\x7fELF" + b"A" * 64)
