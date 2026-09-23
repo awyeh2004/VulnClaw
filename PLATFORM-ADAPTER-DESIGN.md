@@ -164,7 +164,7 @@ password 即 flag。
 |---|---|
 | 旧工具名已从 schema 隐藏 | ✅ 全程只用 `platform_read` / `platform_start_env` / `platform_read_env` / `platform_stop_env` / `platform_submit`，**没有出现 `unknown tool`**（playbook 里残留的旧名字也没有造成误调） |
 | URL scheme 回退出 transport | ⚠️ 生效但**措辞错**，见 §10（已修） |
-| 路径停滞保护是否触发 | ❌ **未被触发**：整个 run 只有 5 个 LLM step（31 次工具调用），远未到阈值 8。保护逻辑仍未在真实 run 里跑过 |
+| 路径停滞保护是否触发 | ❌ **本次 run 未触发**：整个 run 只有 5 个 LLM step（31 次工具调用），远未到阈值 8。**该机制后来专门构造真实停滞场景验过并修好，见 §14** |
 
 run 结束原因：`platform_submit` 返回 `[platform_submit_disabled]`（提交默认关闭），
 agent 因此 `ask_user` 并释放了环境。
@@ -269,19 +269,35 @@ endpoint: http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80
    `sys.modules`——后者会因为这个不变量管不着的原因而失败。`builtin_tools.py` 是
    `agent/` 下**唯一**还剩的平台导入者，这一点也被一个显式测试钉住（等遗留工具面删掉时
    它会开始失败，届时应当**刻意**删除该测试）。
-2. **路径停滞保护未在真实 run 里验证过**：本次 run 只 5 步，没到阈值。
-   已知它依赖 `_no_path_open_angles(agent) == 0` 才升级到 `ask_user`，这条分支也
-   没被真实触发过。
-3. **`_competition_solve` 的 ref 解析测试**用了 stub adapter；真实 adapter 的
-   `parse_ref` 与 CLI 的联调仍未测。`[重写时无法核实]` 是否有意如此。
-4. **`gcs.tools_enabled` 的 schema 描述**还没补弃用说明（一次编辑被 fs-observation
-   守卫挡下，当时选择跳过）。
-5. **`finding_parser.confirmed_markers` 与 `ctf_mode.detect_verification_success`**
-   可能语义重复，需要先确认语义再合并。
+2. ~~**路径停滞保护未在真实 run 里验证过**~~ —— **已完成**（`3b30c1b`）。构造了一个真实的
+   无产出靶机跑 A/B，并因此发现保护本身有三个漏洞（开 angle 算进展 / 有 open angle 永不
+   升级 / hint 对操作者不可见），全部修掉并在复跑中验到，见 §14。
+3. ~~**`_competition_solve` 的 ref 解析测试用了 stub adapter**~~ —— **已完成**（`2af8bdf`）。
+   新增 `tests/cli/test_competition_solve_real_adapter.py`：真实 `CTF2Adapter` 经真实 registry
+   跑通 `token → parse_ref → _pair() → read_challenge → 附件抽取`，并钉住 stub 永远测不到的
+   反向用例（`ctf2:daily` 必须在 agent 启动前 `Exit(1)`）。见 §16.1②。
+4. ~~**`gcs.tools_enabled` 的 schema 描述还没补弃用说明**~~ —— **已完成**（`e69f38b`）。
+   标为 DEPRECATED 并指向 `competition.expose_legacy_tool_names`（一个开关覆盖所有平台的
+   遗留名），且说明两者是 OR、旧配置继续可用。
+5. ~~**`finding_parser.confirmed_markers` 与 `ctf_mode.detect_verification_success` 可能语义
+   重复**~~ —— **已查明并处理**（`398c0fc`）。结论是**不重复**（一个抽取事实、一个判断真假），
+   所以**没有整并**；但底下查出两层真问题：词汇表其实被维护了三份，以及两份实现都不处理否定
+   （`无法验证成功`/`not confirmed` 会被读成"验证成功"，而该信号会让 run 提前结束）。见 §15。
 6. ~~flag 未提交验证~~ —— 已尝试，被平台风控挡住且不可自动化；改由人在浏览器提交，
    见 §9.1。**这一项不再是"待做"，而是"已查明做不到"。**
 7. **Open API 提交路由为何 400 仍未定论**：`confirmation` 给了之后 params 为 `null`，
    说明还有第二处校验失败。继续探这个接口会继续加激风控，因此**主动停止**，没有查下去。
+   **保持停止**——这不是待办，是一个有意的决定。
+8. ~~**`intel/osint.py:520` 的 `check_ssl` 是死参数**~~ —— **我判断错了，已撤回**（见 §17.3）。
+   `check_ssl` **确实被使用**（第 573 行：它决定要不要读证书签发者作为指纹信号），而第 520 行
+   的 `verify=False` 属于 §17.2 的"被测目标"豁免，是刻意的。**所以本文档没有开放的待办。**
+9. ~~**批量下载的 `verify=False`**~~ —— **已完成**（`5e97205`）。它是**下载后要被分析、甚至
+   被执行**的附件，因此校验必须开；同一次盘点发现全库 15 处 `verify=False` 性质不同（被测
+   目标那 13 处是功能正确性、不该改），见 §17。
+
+> **维护提醒**：这一节的条目**做完就要当场划掉**。2026-09-23 出现过一次真实后果——第 2~5 项
+> 其实早已完成，但文档仍写着"未做"，导致我自己在核对"原先顺序"时被这份过期清单带偏。
+> 一份会说假话的断点清单比没有清单更坏。
 
 ## 13. 未查明：设计文档为何消失
 
@@ -588,7 +604,7 @@ provenance：
 | `report/verifier.py` | 11 | **被测目标**（发送验证 payload） | **保留** |
 | `agent/recon_tools.py`、`agent/builtin_tools.py` | 2 | **被测目标**（探测） | **保留** |
 | `mcp/lifecycle.py`、`mcp/_probe_mixin.py` | 2 | 本地/自建 MCP 服务 | **保留** |
-| `intel/osint.py:520` | 1 | **公网** OSINT/指纹接口 | 待办（见下） |
+| `intel/osint.py:520` | 1 | **被测目标**（指纹抓取） | **保留**：`check_ssl` 另有用处，见 §17.3 |
 
 ### 17.1 为什么批量下载必须验
 
@@ -610,12 +626,24 @@ provenance：
 工具来说是错的——那会让"目标不可达"变成"目标不可测"。这是**功能正确性**，不是疏忽。
 （如果哪天要收，正确做法是给"目标流量"一个显式策略开关，而不是逐处硬改。）
 
-### 17.3 顺带发现的一个死参数（待办）
+### 17.3 一次判断错误的撤回：`intel/osint.py` 的 `check_ssl` **不是**死参数
 
-`intel/osint.py:520` 的 `tech_stack_detect(..., check_ssl: bool = True)` **接受
-`check_ssl` 却硬写 `verify=False`**，参数完全没被使用；而该函数 docstring 里还把 "TLS issuer"
-列为指纹依据之一。这与先前 `predownload_attachments` 是**同一类 bug：一个骗人的开关**。
-而且它打的是**公网**接口，不是被测目标，所以不属于 §17.2 的豁免理由。
+盘点时我看到 `tech_stack_detect(..., check_ssl: bool = True)` 的签名里有 `check_ssl`，同一
+函数里又硬写 `verify=False`，就断言"参数完全没被使用"，并把它类比成
+`predownload_attachments` 那种骗人的开关。**这个推断是错的，这里照实撤回。**
+
+`check_ssl` 在第 573 行被使用：它决定要不要调用 `_ssl_issuer_org()` 把**证书签发者**加进指纹
+结果。而第 520 行的 `verify=False` 是 HTTP 抓取那一步，属于 §17.2 的"被测目标"豁免（靶机带
+自签证书是常态，抓不到指纹就等于功能失效）——是刻意的，不是疏忽。
+
+而且这个设计其实是**自洽且克制的**：`_ssl_issuer_org()` 用的是 `ssl.create_default_context()`
+（**默认校验**），并捕获 `ssl.SSLError` 返回空串。也就是说：HTTP 抓取容忍坏证书**以便仍能
+指纹**，而 CA 指纹只在该证书**真的通过校验**时才报告。两件事各得其所。
+
+**教训（值得单独记）**：我从**签名**推断参数未被使用，而没有先 grep 它在函数体内是否被读到。
+这和本项目里反复出现的失误同型——**从"看起来像"推断"就是这样"，而不是去看证据**。上一条
+`predownload_attachments` 是**真的**没被任何地方读（全库 grep 只有声明那一行），这一条不是；
+两者外形相似、结论相反，只有 grep 能分开。
 
 ### 17.4 证书失败必须给出路，而不是只报错
 
