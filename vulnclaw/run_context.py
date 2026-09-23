@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from vulnclaw.config.settings import CONFIG_DIR, ensure_dirs
 from vulnclaw.targets import Target
+from vulnclaw.utils.atomic_write import append_line_durable
 from vulnclaw.utils.atomic_write import atomic_write_text as atomic_write_text_shared
 
 RUN_SCHEMA_VERSION = 1
@@ -109,10 +110,15 @@ class RunContext:
             "kind": kind,
             "payload": payload or {},
         }
-        path = self.run_dir / "events" / "events.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # Durable, via the shared helper. Audit finding E3: this used to be a bare
+        # append with no flush/fsync, while the SAME commit that added fsync to
+        # `agent_graph._persist_event` left this one unsynced -- so a crash could drop
+        # an event that the completion summary (and validate_run_context, which
+        # requires events.jsonl) already relied on.
+        append_line_durable(
+            self.run_dir / "events" / "events.jsonl",
+            json.dumps(event, ensure_ascii=False),
+        )
 
     def update_manifest(self, **updates: Any) -> None:
         self.manifest.update(updates)

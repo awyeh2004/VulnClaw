@@ -35,7 +35,7 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
 
-from vulnclaw.utils.atomic_write import atomic_write_text
+from vulnclaw.utils.atomic_write import append_line_durable, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -681,10 +681,11 @@ class AgentGraph:
         if self.storage_dir is None:
             return
         path = self.storage_dir / EVENTS_FILE
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event.model_dump(mode="json"), ensure_ascii=False) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        # Through the shared durable-append helper rather than a local copy of it:
+        # `run_context.append_event` had the identical logic WITHOUT the fsync, and the
+        # two drifted until an audit noticed (E3). One implementation means the next
+        # fix lands in both.
+        append_line_durable(path, json.dumps(event.model_dump(mode="json"), ensure_ascii=False))
 
     def _persist_snapshot(self) -> None:
         if self.storage_dir is None:
