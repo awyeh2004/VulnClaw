@@ -415,11 +415,31 @@ that the run should stop.
 
 ### 14.8 这一轮顺带暴露的、与停滞保护无关的两个额外发现
 
-1. **`competition.predownload_attachments` 是死配置。** 它在 `config/schema.py` 里声明为
-   "At match start, download all challenge attachments so a slow backend never blocks
-   analysis"，但**全代码库没有任何一处读它**（`grep` 只命中声明那一行）。而 RE 题完全依赖
-   附件——按语义本该"开赛时批量下好"的东西，实际上只有 `competition download` 子命令会做。
-   要么接上、要么删掉；留着一个骗人的开关比没有更糟。
+1. **`competition.predownload_attachments` 曾是死配置 —— 已接上。** 它在
+   `config/schema.py` 里声明为 "At match start, download all challenge attachments so a
+   slow backend never blocks analysis"、**默认 True**，但全代码库没有任何一处读它（`grep`
+   只命中声明那一行）；能力其实存在，只是被埋在内联在 `competition download` 命令里的
+   那段代码中。**留一个骗人的开关比没有更糟**——它让人以为保险已经上了。
+
+   处理方式：**接上，而不是删掉**（一个文档化的、默认开的保险功能，删掉是更破坏性的选择）。
+   - 把那段内联下载逻辑抽成 `vulnclaw/platforms/attachments.py`（`download_attachment` /
+     `resolve_url` / `safe_name` / `attachment_dir`），**批量命令与新路径共用同一份实现**，
+     避免"批量下一套、解题下另一套"的漂移；
+   - `ctf2()` 与 `_competition_solve()` 在把目标交给 agent **之前**按该开关预下载本题附件，
+     并把**本地路径**写进 goal（agent 因此完全不必访问文件托管站）；
+   - 全程 best-effort：失败只降级成"agent 自己去下"（即这个改动之前的行为），**绝不让
+     保险弄坏一次解题**。
+
+   抽取代码时**自己引入并当场抓到一个回归**：`AttachmentDownload.ok` 对"尺寸不符"也是
+   False，于是 `if not result.ok` 会把"已写入但可能被截断"的文件判成**失败**，而原内联
+   版本是 `[warn]` 且计入 ok。已恢复原语义（保留文件、warn、计 ok），并加了三个测试把
+   "成功 / 硬失败 / 尺寸不符"三种结果钉开——**抽取代码正是这种静默行为改变最容易藏身的地方**。
+
+   真实验证：对 `不一样的flag` 的实际附件跑通整条新路径——9204 字节与平台声明的 size
+   **完全一致**、magic 为 `PK\x03\x04`、CJK 题名在文件名里完整保留、TLS 校验保持开启
+   （文件托管站证书有效）。顺带记录：批量命令里那个 `verify=False` 是**既有**行为，为
+   不改变已跑通的路径而保留，已就地加注说明并列为后续单独处理项。
+
 2. **卡住的 agent 会去翻本机找答案**（§14.2/§14.3 的现象，与停滞保护无关的真漏洞）——
    已按"答案必须来自目标"修掉：prompt 规则 + `python_execute` 机械兜底，见提交 `1ba36bf`。
 
