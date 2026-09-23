@@ -2471,19 +2471,18 @@ def _competition_solve(cfg: Any, ref: str) -> None:
     goal = (
         f"Solve {challenge.name} (category {challenge.category or 'unknown'}, "
         f"difficulty {challenge.difficulty or 'unknown'}).\n"
-        f"Its ref is {token} -- pass that exact string as `ref` to the platform_* "
-        f"tools; the platform is taken from the ref.\n"
-        f"Achieve the flag, then submit it with "
-        f"platform_submit(ref=\"{token}\", flag=...). "
+        f"REF: {token}\n"
+        f"Pass that exact string as `ref` to every platform_* tool -- the platform "
+        f"comes from the ref, so there is no separate platform id to choose. "
         + (
-            f"This challenge needs a running environment: start it with "
-            f"platform_start_env(ref=\"{token}\"), then poll platform_read_env until "
-            f"it reports the target as usable, and release it with "
-            f"platform_stop_env(ref=\"{token}\") when done. "
+            "This challenge needs a running environment: platform_start_env to "
+            "start it, platform_read_env until it reports the target as usable, "
+            "then platform_stop_env to release it when done. "
             if challenge.needs_env
             else "This challenge needs no running environment. "
         )
-        + f"Challenge description follows:\n{challenge.description}"
+        + "Submit the flag with platform_submit once it is known.\n"
+        f"Challenge description follows:\n{challenge.description}"
     )
     # Every optional flag is passed explicitly: solve() is a Typer command, so a
     # direct Python call leaves un-passed parameters as truthy OptionInfo sentinels.
