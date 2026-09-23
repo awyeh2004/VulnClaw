@@ -23,6 +23,7 @@ import pytest
 
 from vulnclaw.utils.atomic_write import (
     RETRY_ATTEMPTS,
+    append_line_durable,
     atomic_write_text,
     replace_with_retry,
 )
@@ -156,3 +157,93 @@ class TestAtomicWriteText:
         atomic_write_text(Path(tmp_path / "b.txt"), "2")
         assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "1"
         assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "2"
+
+
+class TestFdopenFailureDoesNotLeak:
+    """Audit finding F1: `os.fdopen` sat OUTSIDE the try that cleans up.
+
+    `os.open` creates the file and returns a descriptor; if `os.fdopen` then raised (an
+    unknown encoding -> LookupError, or an interrupt landing between the two calls),
+    nothing closed the descriptor and nothing removed the temp file -- contradicting the
+    docstring's "temp file removed on any failure". The fd belongs to the function until
+    `fdopen` takes it over.
+    """
+
+    def test_no_temp_file_litter_when_fdopen_raises(self, tmp_path):
+        target = tmp_path / "x.txt"
+        with patch(
+            "vulnclaw.utils.atomic_write.os.fdopen", side_effect=LookupError("bad encoding")
+        ):
+            with pytest.raises(LookupError):
+                atomic_write_text(target, "content", encoding="not-a-codec")
+
+        assert not target.exists()
+        assert [p.name for p in tmp_path.iterdir()] == [], "the temp file leaked"
+
+    def test_the_descriptor_is_closed_when_fdopen_raises(self, tmp_path):
+        """Closing matters as much as the file: a leaked fd is unbounded per call."""
+        opened: list[int] = []
+        closed: list[int] = []
+        real_open, real_close = os.open, os.close
+
+        def spy_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        def spy_close(fd, *args, **kwargs):
+            closed.append(fd)
+            return real_close(fd, *args, **kwargs)
+
+        with patch("vulnclaw.utils.atomic_write.os.open", side_effect=spy_open), patch(
+            "vulnclaw.utils.atomic_write.os.close", side_effect=spy_close
+        ), patch(
+            "vulnclaw.utils.atomic_write.os.fdopen", side_effect=LookupError("nope")
+        ):
+            with pytest.raises(LookupError):
+                atomic_write_text(tmp_path / "x.txt", "content")
+
+        assert opened, "the test did not exercise the real os.open"
+        assert closed == opened, "the descriptor created for the temp file leaked"
+
+
+class TestAppendLineDurable:
+    """Audit finding E3: fsync was added to one event log and not the other."""
+
+    def test_it_fsyncs(self, tmp_path):
+        real_fsync = os.fsync
+        seen: list[int] = []
+
+        def spy(fd):
+            seen.append(fd)
+            return real_fsync(fd)
+
+        with patch("vulnclaw.utils.atomic_write.os.fsync", side_effect=spy):
+            append_line_durable(tmp_path / "events.jsonl", '{"a":1}')
+
+        assert seen, "append_line_durable must fsync; that is the whole point"
+
+    def test_it_appends_rather_than_truncates(self, tmp_path):
+        path = tmp_path / "events.jsonl"
+        append_line_durable(path, '{"n":1}')
+        append_line_durable(path, '{"n":2}')
+
+        assert path.read_text(encoding="utf-8") == '{"n":1}\n{"n":2}\n'
+
+    def test_a_missing_newline_is_added(self, tmp_path):
+        """Otherwise a caller that forgot one would glue two records together."""
+        path = tmp_path / "events.jsonl"
+        append_line_durable(path, '{"n":1}')
+        append_line_durable(path, '{"n":2}\n')
+
+        assert path.read_text(encoding="utf-8").count("\n") == 2
+
+    def test_it_creates_missing_parents(self, tmp_path):
+        path = tmp_path / "nested" / "events" / "events.jsonl"
+        append_line_durable(path, "x")
+        assert path.read_text(encoding="utf-8") == "x\n"
+
+    def test_it_takes_an_already_serialised_line(self, tmp_path):
+        """Module contract: serialisation stays with the caller, so it takes a str."""
+        with pytest.raises(TypeError):
+            append_line_durable(tmp_path / "x.jsonl", {"a": 1})

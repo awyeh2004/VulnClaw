@@ -32,7 +32,13 @@ import time
 import uuid
 from pathlib import Path
 
-__all__ = ["atomic_write_text", "replace_with_retry", "RETRY_ATTEMPTS"]
+__all__ = [
+    "atomic_write_text",
+    "append_line_durable",
+    "replace_with_retry",
+    "mkdtemp_sibling",
+    "RETRY_ATTEMPTS",
+]
 
 #: How many times to retry a sharing violation before giving up. Measured
 #: behaviour: a scanner's handle lives for milliseconds, so a handful of short
@@ -105,11 +111,18 @@ def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.parent / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
 
-    handle = os.fdopen(
-        os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600),
-        "w",
-        encoding=encoding,
-    )
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        # `os.fdopen` used to sit OUTSIDE the try below, so anything it raised (an
+        # unknown encoding -> LookupError, or an interrupt landing between these two
+        # calls) leaked the descriptor AND the temp file -- contradicting the "temp
+        # file removed on any failure" contract stated above. The fd belongs to this
+        # function until `fdopen` takes it over, so close it here on failure.
+        handle = os.fdopen(fd, "w", encoding=encoding)
+    except BaseException:
+        os.close(fd)
+        _remove_quietly(tmp)
+        raise
     try:
         with handle:
             handle.write(text)
@@ -120,11 +133,48 @@ def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -
     except BaseException:
         # The rename is the commit point: before it, the target is untouched and
         # the temp file is pure litter.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        _remove_quietly(tmp)
         raise
+
+
+def _remove_quietly(path: str | Path) -> None:
+    """Unlink, ignoring the case where it was already gone."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def append_line_durable(path: str | Path, line: str, *, encoding: str = "utf-8") -> None:
+    """Append one line durably: flush + fsync before returning.
+
+    Takes an ALREADY-SERIALISED line, like the rest of this module (see the design note
+    above -- serialisation stays with the caller, so this module never depends on a
+    caller's data model).
+
+    ONE implementation on purpose. The identical "append one event line" logic existed in
+    two places, and when fsync was added to one of them (`agent_graph._persist_event`) the
+    other (`run_context.append_event`) kept writing through the OS cache -- so a crash
+    could drop an event that a snapshot, or the completion summary and
+    `validate_run_context`, already relied on. A shared helper removes the class of drift
+    rather than the single instance.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not isinstance(line, str):
+        # Explicit, because the sibling `atomic_write_text` has the same contract and a
+        # caller passing a dict here would otherwise get an AttributeError from
+        # `str.endswith` deep in the body rather than a statement of the contract.
+        raise TypeError(
+            f"append_line_durable takes an already-serialised line (str), got "
+            f"{type(line).__name__}; use json.dumps(...) at the call site"
+        )
+    if not line.endswith("\n"):
+        line = f"{line}\n"
+    with open(target, "a", encoding=encoding) as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def mkdtemp_sibling(path: str | Path) -> tuple[int, str]:
