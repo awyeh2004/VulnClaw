@@ -23,27 +23,48 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Optional
 
+from vulnclaw.agent.ctf_mode import FLAG_PREFIX_NAMES
 from vulnclaw.config.settings import CONFIG_DIR
 
 MIN_PLAYBOOK_CHARS = 80  # minimum steps length (prevents 3-line low-effort entries)
-# Case-insensitive: Flag{...}/CTf{...} variants must also be fingerprinted.
-_FLAG_FINGERPRINT_RE = re.compile(r"(flag|ctf)\{([^{}]{4,80})\}", re.IGNORECASE)
+
+# Built FROM the one canonical prefix list instead of keeping a local copy. This file
+# used to carry `(flag|ctf)\{...\}`, a two-name copy of an eighteen-name list, which is
+# the same drift that once left finding_parser on 3 of 17 prefixes. Two consequences,
+# both measured on the playbooks real runs wrote on 2026-09-23:
+#
+#   * `CTF2{...}` -- the format of the platform this tool drives -- did not match at
+#     all, so BabySQL's per-instance flag was stored in full;
+#   * `DASCTF{...}`/`BUUCTF{...}` matched only from the inner "CTF{".
+_FLAG_FINGERPRINT_RE = re.compile(
+    "(" + "|".join(re.escape(name) for name in FLAG_PREFIX_NAMES) + r")\{([^{}]{1,80})\}",
+    re.IGNORECASE,
+)
 
 
 def _fingerprint_flags(text: str) -> str:
-    """Replace full flag values with first4…last4 fingerprints.
+    """Replace full flag values with an unsubmittable fingerprint.
 
-    Cross-instance hygiene: flags rotate per container instance; storing the
-    full value lets a future run mistakenly resubmit a stale flag. The
-    fingerprint preserves enough structure for the model to recognise the
-    pattern while preventing accidental resubmission.
+    Cross-instance hygiene: flags rotate per container instance, and storing the full
+    value means a future run can resubmit a stale one -- measured on BabySQL, whose flag
+    is generated per instance. The fingerprint keeps the shape recognisable while
+    removing the value.
+
+    ALWAYS redacts. The previous rule was `if len(inner) > 12: fingerprint, else: return
+    the match unchanged`, which left any flag body of 12 characters or fewer in
+    cleartext -- including `flag{222441144222}`, the flag submitted and ACCEPTED on
+    2026-09-23, which is sitting in a validated playbook offered to future runs of that
+    challenge. A hygiene gate whose stated purpose is "prevent stale resubmission" cannot
+    keep full values for a length range, and 12 was not even principled: the fingerprint
+    form `first4…last4` is 9 characters, so a 12-character body fingerprints fine.
     """
-
     def _fp(m: re.Match) -> str:
         prefix, inner = m.group(1), m.group(2)
-        if len(inner) > 12:
+        if len(inner) > 8:
             return f"{prefix}{{{inner[:4]}…{inner[-4:]}}}"
-        return m.group(0)
+        # Too short to keep both ends without keeping everything: keep the prefix only,
+        # so the model can still tell a flag was found here.
+        return f"{prefix}{{…}}"
 
     return _FLAG_FINGERPRINT_RE.sub(_fp, text)
 
