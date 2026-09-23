@@ -21,7 +21,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from vulnclaw.agent.ctf_mode import FLAG_PREFIX_NAMES
 from vulnclaw.config.settings import CONFIG_DIR
@@ -229,6 +229,84 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
             }
         )
     return result
+
+
+# Identity of the *kind* of challenge, as opposed to one concrete instance.
+_CLASS_TAG_RE = re.compile(r"\[([^\[\]]{2,40})\]")
+_CLASS_CVE_RE = re.compile(r"CVE-\d{4}-\d{3,7}", re.IGNORECASE)
+_CLASS_LABEL_RES = (
+    re.compile(r"category\s+([A-Za-z\u4e00-\u9fff][\w\u4e00-\u9fff\-]*)", re.IGNORECASE),
+    re.compile(r"difficulty\s+([A-Za-z\u4e00-\u9fff][\w\u4e00-\u9fff\-]*)", re.IGNORECASE),
+)
+_CLASS_QUOTED_RE = re.compile(r"['\"]([^'\"]{3,60})['\"]")
+
+
+def challenge_class_signature(goal: str) -> str:
+    """A port-free identity of the *kind* of challenge, used as a second lookup key.
+
+    Measured 2026-09-23: a note learned on ``[Weblogic]CVE-2017-10271`` scored only
+    0.222 against ``[Weblogic]CVE-2018-2628`` (a different vulnerability entirely),
+    yet it transferred exactly what mattered -- the exposed surface, the
+    non-blocking-`ProcessBuilder` pitfall, and where the flag can be exfiltrated --
+    and turned a 179s/19-step run into 50s/8 steps.
+
+    The exact-target fingerprint cannot find that kind of note: it embeds the
+    ephemeral endpoint, so on a platform that hands out a new ``host:port`` per
+    instance every run looks like a brand-new target and nothing ever matches.
+    This signature drops the endpoint and keeps the discriminators that DO carry
+    across instances: the bracketed framework tag, the CVE id, the category and
+    difficulty labels, and the quoted challenge title.
+
+    Kept deliberately short: ``Playbook.score`` is the share of the QUERY's tokens
+    found in the note, so padding the query with prose lowers the score. Also note
+    that ``_tokenize`` drops bare numbers, so CVE ids contribute "cve" but not the
+    year/number -- the framework tag and labels are what actually discriminate.
+    """
+    text = str(goal or "")
+    bits: list[str] = [m.group(1).strip() for m in _CLASS_TAG_RE.finditer(text)]
+    bits += [m.group(0).upper() for m in _CLASS_CVE_RE.finditer(text)]
+    for rx in _CLASS_LABEL_RES:
+        match = rx.search(text)
+        if match:
+            bits.append(match.group(1))
+    bits += [m.group(1).strip() for m in _CLASS_QUOTED_RE.finditer(text)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for bit in bits:
+        key = bit.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(bit.strip())
+    return " ".join(out)
+
+
+def lookup_playbook_multi(
+    queries: Sequence[tuple[str, str]], *, limit: int = 3, min_score: float = 0.15
+) -> list[dict[str, Any]]:
+    """Look each ``(kind, query)`` up and merge the hits, best score per slug.
+
+    Returns the same rows as :func:`lookup_playbook` plus ``query_kind`` and
+    ``query``, so a caller can report which key matched -- the hit rate per key is
+    the number worth watching, and it was invisible while only the count was
+    recorded.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for kind, query in queries:
+        if not str(query or "").strip():
+            continue
+        for row in lookup_playbook(query, limit=limit, min_score=min_score):
+            current = best.get(row["slug"])
+            if current is None or row["score"] > current["score"]:
+                merged = dict(row)
+                merged["query_kind"] = kind
+                merged["query"] = query
+                best[row["slug"]] = merged
+    rows = list(best.values())
+    rows.sort(
+        key=lambda r: (r["score"], 0 if r["status"] == "validated" else 1),
+        reverse=True,
+    )
+    return rows[: limit if limit and limit > 0 else 3]
 
 
 def save_playbook(

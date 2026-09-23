@@ -793,6 +793,93 @@ def _notify_operator(stream_sink: Any, message: str) -> None:
         pass
 
 
+def _inject_prior_playbooks(
+    *,
+    origin: str,
+    goal: str,
+    runtime: Any,
+    stream_sink: Any,
+    emit: Callable[[str, dict], None],
+) -> int:
+    """Inject auto-matched prior-run notes into the system prompt. Returns hits.
+
+    Two keys are tried, and the merge keeps the best score per note:
+
+    * ``target`` — the exact-target fingerprint (same challenge, new session).
+    * ``class`` — :func:`playbook.challenge_class_signature`, which is port-free,
+      so a platform handing out a new ``host:port`` per instance can still reuse a
+      note learned on a *sibling* challenge of the same kind. Measured
+      2026-09-23 on CTF2: the class key turned a Weblogic run from 179s/19 steps
+      into 50s/8 steps, and the note that transferred was a different CVE.
+
+    Every hit and its score is both emitted (stream) and pushed to the operator
+    notice sink, because the hit rate per key is the metric worth watching and it
+    was invisible while only a count was recorded.
+
+    Best-effort by contract: the caller wraps it, but it also never raises on a
+    missing playbook dir or an unusable notice sink.
+    """
+    from vulnclaw.agent.playbook import (
+        challenge_class_signature,
+        format_playbook_list,
+        lookup_playbook_multi,
+        target_fingerprint,
+    )
+
+    queries: list[tuple[str, str]] = []
+    fingerprint = target_fingerprint(origin, goal)
+    if fingerprint:
+        queries.append(("target", fingerprint))
+    signature = challenge_class_signature(goal)
+    if signature:
+        queries.append(("class", signature))
+    if not queries:
+        return 0
+
+    matches = lookup_playbook_multi(queries, limit=2)
+    if not matches:
+        _notify_operator(
+            stream_sink,
+            "[playbook] no prior notes matched (queries: "
+            + ", ".join(kind for kind, _ in queries)
+            + ")",
+        )
+        return 0
+
+    runtime.prior_playbook_brief = (
+        "\n\n# Prior-run notes (auto-matched: this target, or the same challenge "
+        "class)\n"
+        + format_playbook_list(matches)
+        + "\nReplay confirmed steps where still applicable. A class match is a "
+        "sibling challenge, not this one: the vulnerability may differ, so "
+        "re-verify the surface. Flag values are fingerprinted because they rotate "
+        "per instance — never resubmit stored ones; re-read the flag."
+    )
+    emit(
+        "playbook_injected",
+        {
+            "matches": len(matches),
+            "hits": [
+                {
+                    "slug": m["slug"],
+                    "score": m["score"],
+                    "query_kind": m.get("query_kind", ""),
+                }
+                for m in matches
+            ],
+        },
+    )
+    _notify_operator(
+        stream_sink,
+        "[playbook] injected "
+        + "; ".join(
+            f"{m['slug']} score={m['score']} ({m.get('query_kind', '?')})"
+            for m in matches
+        ),
+    )
+    return len(matches)
+
+
 def _auto_review_blackboard(agent: AgentState, state: AgentState) -> list[str]:
     """Run the Review-Arbiter over the blackboard unconditionally.
 
@@ -1673,26 +1760,12 @@ async def _solve_impl(
             else:
                 runtime.auto_skill_input = goal
             # Deterministic playbook reuse — code-guaranteed, not left to model
-            # initiative (past runs skipped lookup_playbook entirely). Matches
-            # for this exact target are injected into every system prompt.
+            # initiative (past runs skipped lookup_playbook entirely).
             try:
-                from vulnclaw.agent.playbook import (
-                    format_playbook_list,
-                    lookup_playbook,
-                    target_fingerprint,
+                _inject_prior_playbooks(
+                    origin=origin, goal=goal, runtime=runtime,
+                    stream_sink=stream_sink, emit=emit,
                 )
-
-                fp = target_fingerprint(origin, goal)
-                matches = lookup_playbook(fp, limit=2) if fp else []
-                if matches:
-                    runtime.prior_playbook_brief = (
-                        "\n\n# Prior-run notes for this exact target (auto-matched)\n"
-                        + format_playbook_list(matches)
-                        + "\nReplay confirmed steps where still applicable. Flag "
-                        "values are fingerprinted because they rotate per "
-                        "instance — never resubmit stored ones; re-read the flag."
-                    )
-                    emit("playbook_injected", {"matches": len(matches)})
             except Exception:
                 pass
     except Exception:
