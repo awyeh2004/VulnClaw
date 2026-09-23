@@ -28,6 +28,17 @@ from vulnclaw.config.settings import CONFIG_DIR
 
 MIN_PLAYBOOK_CHARS = 80  # minimum steps length (prevents 3-line low-effort entries)
 
+# Where a note came from. Two kinds exist and they are not equally valuable:
+# a curated note is a technique the model chose to write down (it carries the
+# transferable parts -- the exposed surface, the pitfall, the exfil path), while an
+# auto note is capture_run_notes() dumping the run's LOCK/CONFIRMED lines. Auto notes
+# are numerous and near-duplicates of each other, and because their fingerprint is
+# built from the same goal text the query uses, they score HIGH. Without the reserve
+# in lookup_playbook_multi they fill every slot and push the curated note out.
+SOURCE_AUTO = "auto"
+SOURCE_CURATED = "curated"
+AUTO_NOTES_PREFIX = "AutoNotes"
+
 # Built FROM the one canonical prefix list instead of keeping a local copy. This file
 # used to carry `(flag|ctf)\{...\}`, a two-name copy of an eighteen-name list, which is
 # the same drift that once left finding_parser on 3 of 17 prefixes. Two consequences,
@@ -116,7 +127,12 @@ class Playbook:
     steps: str = ""
     scripts: str = ""
     updated_at: str = ""
+    source: str = SOURCE_CURATED  # "auto" for auto-captured run notes
     _tokens: set[str] = field(default_factory=set, repr=False)
+
+    @property
+    def is_auto(self) -> bool:
+        return self.source == SOURCE_AUTO
 
     def tokens(self) -> set[str]:
         if not self._tokens:
@@ -139,11 +155,13 @@ class Playbook:
             "name": self.name,
             "fingerprint": self.fingerprint,
             "status": self.status,
+            "source": self.source,
             "updated_at": self.updated_at,
         }
 
     @classmethod
     def from_frontmatter(cls, slug: str, meta: dict[str, Any], body: str) -> "Playbook":
+        recorded = str(meta.get("source", "") or "").strip().lower()
         return cls(
             slug=slug,
             name=str(meta.get("name", "") or ""),
@@ -152,6 +170,14 @@ class Playbook:
             steps=body or "",
             scripts="",
             updated_at=str(meta.get("updated_at", "") or ""),
+            # Notes written before `source` existed are recognised by the name
+            # capture_run_notes always used, so a legacy store is not silently
+            # reclassified as curated (that would defeat the reserve below).
+            source=recorded or (
+                SOURCE_AUTO
+                if str(meta.get("name", "") or "").strip().startswith(AUTO_NOTES_PREFIX)
+                else SOURCE_CURATED
+            ),
         )
 
 
@@ -223,6 +249,7 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
                 "name": pb.name or pb.slug,
                 "slug": pb.slug,
                 "status": pb.status,
+                "source": pb.source,
                 "score": round(score, 3),
                 "fingerprint": pb.fingerprint,
                 "steps": pb.steps,
@@ -280,6 +307,43 @@ def challenge_class_signature(goal: str) -> str:
     return " ".join(out)
 
 
+def _reserve_curated_representation(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Keep a curated note in the result when auto-captured notes crowd it out.
+
+    Measured 2026-09-23 on a real store: the useful note for a Weblogic challenge
+    scored 0.250 while an auto note scored 0.727, so the ranking was fine -- but the
+    auto store grows one entry per run, and the moment two of them outscore the
+    curated note the curated note falls off the end of a ``limit=2`` result and the
+    injection silently loses the only note that had carried the technique across
+    challenges (that note turned a 179s/19-step run into 50s/8 steps).
+
+    The rule is deliberately minimal and never shrinks a result set:
+
+    * if at least one curated note matched and the top ``limit`` rows contain none,
+      the last slot is given to the best curated row;
+    * if the store holds only auto notes, nothing changes -- an empty-ish store must
+      not be made emptier.
+
+    Ordering by score is preserved for every other row.
+    """
+    if limit <= 0 or not rows:
+        return rows
+    top = rows[:limit]
+    if any(row.get("source") != SOURCE_AUTO for row in top):
+        return top
+    curated = next((row for row in rows if row.get("source") != SOURCE_AUTO), None)
+    if curated is None:
+        return top
+    return [*top[:-1], curated]
+
+
+# How many rows each key is scanned for before merging. Must exceed the caller's
+# limit: capping per key truncates BEFORE the curated reserve can see a curated note
+# that ranks below the auto notes, which is exactly the case the reserve exists for
+# (measured: two auto notes at 1.0, the useful curated note at 0.5).
+_LOOKUP_SCAN_LIMIT = 50
+
+
 def lookup_playbook_multi(
     queries: Sequence[tuple[str, str]], *, limit: int = 3, min_score: float = 0.15
 ) -> list[dict[str, Any]]:
@@ -290,11 +354,12 @@ def lookup_playbook_multi(
     the number worth watching, and it was invisible while only the count was
     recorded.
     """
+    effective = limit if limit and limit > 0 else 3
     best: dict[str, dict[str, Any]] = {}
     for kind, query in queries:
         if not str(query or "").strip():
             continue
-        for row in lookup_playbook(query, limit=limit, min_score=min_score):
+        for row in lookup_playbook(query, limit=_LOOKUP_SCAN_LIMIT, min_score=min_score):
             current = best.get(row["slug"])
             if current is None or row["score"] > current["score"]:
                 merged = dict(row)
@@ -306,7 +371,7 @@ def lookup_playbook_multi(
         key=lambda r: (r["score"], 0 if r["status"] == "validated" else 1),
         reverse=True,
     )
-    return rows[: limit if limit and limit > 0 else 3]
+    return _reserve_curated_representation(rows, effective)
 
 
 def save_playbook(
@@ -316,6 +381,7 @@ def save_playbook(
     steps: str = "",
     status: str = "draft",
     slug: Optional[str] = None,
+    source: str = SOURCE_CURATED,
 ) -> dict[str, Any]:
     """Persist (or cover-update) a playbook. Returns a small ack dict.
 
@@ -323,6 +389,10 @@ def save_playbook(
     1. steps must be >= MIN_PLAYBOOK_CHARS (prevents 3-line low-effort entries)
     2. must contain at least one of LOCK/CONFIRMED/ANGLES headings (structured)
     3. full flag values are fingerprinted to flag{first4…last4} (cross-instance hygiene)
+
+    ``source`` records whether the note was chosen by the model (curated) or dumped
+    by capture_run_notes (auto). It is persisted in the frontmatter so the
+    curated-reserve rule does not have to infer it from the name forever.
     """
     ensure_dirs()
 
@@ -339,6 +409,7 @@ def save_playbook(
     steps = _fingerprint_flags(stripped)
 
     status = "validated" if status == "validated" else "draft"
+    source = SOURCE_AUTO if str(source or "").strip().lower() == SOURCE_AUTO else SOURCE_CURATED
     slug = slug or _slugify(name)
     from datetime import datetime, timezone
 
@@ -357,6 +428,7 @@ def save_playbook(
         f"name: {name}",
         f"fingerprint: {fingerprint}",
         f"status: {status}",
+        f"source: {source}",
         f"updated_at: {updated_at}",
         "---",
         "",
@@ -364,7 +436,7 @@ def save_playbook(
         "",
     ]
     (PLAYBOOKS_DIR / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
-    return {"slug": slug, "status": status, "name": name}
+    return {"slug": slug, "status": status, "name": name, "source": source}
 
 
 def target_fingerprint(origin: str, goal: str = "") -> str:
@@ -453,6 +525,7 @@ def capture_run_notes(
         fingerprint=target_fingerprint(target, goal),
         steps=steps,
         status=status,
+        source=SOURCE_AUTO,
     )
 
 
