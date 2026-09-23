@@ -139,3 +139,41 @@ def test_gcs_goal_names_the_ref_exactly_once(captured_solve, monkeypatch):
     assert goal.count("gcs:exercise:10662") == 1
     assert "REF: gcs:exercise:10662" in goal
     assert 'ref="gcs:exercise:10662"' not in goal
+
+
+# ── a RE challenge's attachment must not be forbidden ─────────────────────
+#
+# The CTF2 goal used to say "Do not attempt to fetch files from or attack
+# ctf2*.dasctf.com hosts". For a reverse-engineering challenge the attachment IS
+# the challenge, and the platform publishes it on ctf2-files.dasctf.com -- so the
+# blanket ban told the agent not to obtain the challenge at all. Measured on
+# "不一样的flag" (Easy RE, 9 KB zip): the agent had to fetch that URL.
+
+FORBIDDEN_BLANKET_BAN = "Do not attempt to fetch files from or attack"
+
+
+def test_ctf2_goal_permits_downloading_the_challenge_attachment(captured_solve, monkeypatch):
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "不一样的flag", "category": "REVERSE"}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id")
+
+    goal = captured_solve["goal"]
+    assert "attachments" in goal.lower()
+    assert "IS expected" in goal
+
+
+def test_ctf2_goal_still_forbids_attacking_the_platform(captured_solve, monkeypatch):
+    """Lifting the file ban must not lift the 'do not attack the platform' rule."""
+
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "x"}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id")
+
+    goal = captured_solve["goal"]
+    assert FORBIDDEN_BLANKET_BAN not in goal
+    assert "out of bounds" in goal
+    assert "no scanning or" in goal
