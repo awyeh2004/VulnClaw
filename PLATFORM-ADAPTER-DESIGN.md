@@ -443,3 +443,65 @@ that the run should stop.
 2. **卡住的 agent 会去翻本机找答案**（§14.2/§14.3 的现象，与停滞保护无关的真漏洞）——
    已按"答案必须来自目标"修掉：prompt 规则 + `python_execute` 机械兜底，见提交 `1ba36bf`。
 
+---
+
+## 15. "疑似语义重复"那条的结论：不是重复，但底下埋着两层真问题
+
+§12 第 5 项原本的怀疑是「`finding_parser.confirmed_markers` 与
+`ctf_mode.detect_verification_success` 可能语义重复」。**先把语义问清楚，结论是：不重复。**
+
+| | `finding_parser.confirmed_markers` | `detect_verification_success` |
+|---|---|---|
+| 产出 | **抽取事实**（改写 state） | **判断真假**（返回 bool） |
+| 用途 | 往"已确认事实"里记东西 | 决定 `flag_verified`，进而决定 run 是否结束 |
+| 词汇 | **技术层**：`payload 差异`、`SLEEP() 耗时`、`UNION 成功`、`布尔/报错` | **目标层**：`找到flag`、`the flag is`、`提交成功`、`challenge solved` |
+
+两者只在一小部分短语上重叠（"验证成功"、"确认…"），而那种重叠是**对的**：同一句话既可以是
+一条已确认事实，也可以是一次"我已验证 flag"的声明。**整并这两个函数是错的**，所以没并。
+
+但顺着查下去发现两层**真**问题，都在 `ctf_mode` 内部：
+
+### 15.1 词汇表被维护了**三**份（不是两份）
+
+`update_ctf_state` 里还有第三份内联列表（31 条），就在
+`detect_verification_success(response_text) or any(...)` 这个 `or` 的另一侧——而那是该函数
+**唯一**的调用点。实测差异：
+
+- 只在函数里：`the flag is`、`captured`、`成功破解`、`confirms the flag`（8 条）
+- 只在内联表里：`challenge solved`、`got the flag`、`submission successful`、`flag acquired`
+  → 等 10 条
+- 两份重叠 **21** 条
+
+也就是说那个函数的实际贡献只有它独有的 8 条，两份词汇表在**静默漂移**——和 `FLAG_PREFIX_PATTERNS`
+那次一模一样（它的 `finding_parser` 副本已经漂到 3/17）。已合成唯一来源
+`VERIFICATION_CLAIM_MARKERS`，`update_ctf_state` 只调用谓词。
+
+### 15.2 **两份实现都不处理否定**，而子串匹配会把意思**读反**
+
+实测假阳性（原文是在**否认**成功）：
+
+| 文本 | 命中的标记 |
+|---|---|
+| `无法验证成功` | `验证成功` |
+| `尚未验证成功` | `验证成功` |
+| `not confirmed` | `confirmed` |
+| `the flag is not the correct one` | `the flag is` |
+
+后果不只是记错一条：`update_ctf_state` 把它变成 `flag_verified`，而 `flag_verified` 在
+**两轮之后让 run 结束**——也就是**模型刚说完"我没验证成功"，运行器却据此收工**。
+已加否定感知：标记两侧各看一小段窗口（前 24 / 后 12 字符），命中否定线索就不算声明；
+窗口刻意开小，否则"验证成功。未发现其他问题。"这种真声明会被误杀（有测试守着）。
+
+同一类缺陷在事实抽取侧表现为**语义反转**：`未确认该漏洞存在` 命中 `确认.*存在`，产出的
+"已确认事实"是 **`确认该漏洞存在`**——正好相反，而且它会被当成已确认知识写进状态。
+已加同一套否定守卫（顺带把 `re.findall` 换成 `re.finditer`，否则拿不到匹配位置）。
+
+**残留（照实说明）**：否定处理是启发式，不是句法分析。例如 `确认漏洞不存在` 这类
+"否定在匹配区间内部"的写法仍会产出事实——只是那条事实的文本自身就写着"不存在"，
+危害远小于上面那种整体反转。要彻底解决需要句法级判断，不在本次范围内。
+
+测试：`tests/agent/test_verification_claim_markers.py`（38 例）覆盖否认/真声明两侧、
+两份旧列表的独有标记都能被唯一谓词识别、标记不重复、内联副本不得复活（源码断言）、
+`_is_negated` 的窗口边界，以及抽取侧的反转案例。
+
+
