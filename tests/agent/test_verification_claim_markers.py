@@ -78,6 +78,36 @@ class TestDenialsAreNotClaims:
         text = "验证成功。未发现其他问题。"
         assert detect_verification_success(text) is True
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "NOT confirmed",
+            "NOT CONFIRMED",
+            "Not Verified",
+            "NOT verified",
+            "flag is NOT the correct one",
+        ],
+    )
+    def test_an_UPPERCASE_denial_is_still_a_denial(self, text):
+        """Audit finding B1: the cue lists are lowercase and the two callers disagreed.
+
+        `detect_verification_success` lowercases before calling `_is_negated`, while
+        `finding_parser` passes the response verbatim -- so on original-case text a cue
+        like "NOT " never matched and `NOT confirmed` counted as a claim. One helper,
+        opposite answers, depending on the caller. `_is_negated` now lowercases the two
+        windows it inspects, so neither caller has to remember.
+        """
+        assert detect_verification_success(text) is False
+
+    def test_the_helper_itself_is_case_insensitive(self):
+        """Pinned at the helper, because that is where the two callers diverge."""
+        for text, marker in (("NOT confirmed", "confirmed"), ("NOT VERIFIED", "verified")):
+            start = text.lower().index(marker)
+            assert _is_negated(text, start, start + len(marker)) is True, text
+
+    def test_the_helper_still_does_not_over_suppress(self):
+        assert _is_negated("confirmed", 0, len("confirmed")) is False
+
 
 class TestTheVocabularyIsOneList:
     """Both former lists' unique markers must be recognised by the single predicate."""
@@ -147,6 +177,18 @@ class TestTheFactExtractorAlsoRespectsNegation:
 
     def test_a_denial_does_not_become_a_confirmed_fact(self):
         assert self._facts("未确认该漏洞存在") == []
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "not confirmed the vulnerability exists",
+            "NOT confirmed the vulnerability exists",
+            "NOT CONFIRMED vulnerability exists",
+        ],
+    )
+    def test_an_UPPERCASE_denial_does_not_become_a_confirmed_fact(self, response):
+        """This is the caller that exposed B1: it passes the response verbatim."""
+        assert self._facts(response) == []
 
     def test_a_real_confirmation_still_does(self):
         facts = self._facts("已确认该漏洞存在")

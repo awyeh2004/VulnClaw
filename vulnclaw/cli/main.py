@@ -2372,17 +2372,17 @@ def _competition_download(cfg: Any) -> None:
         )
         raise typer.Exit(1)
 
-    work = os.environ.get("VULNCLAW_WORK_DIR", os.path.expandvars(r"%USERPROFILE%\vulnclaw\work"))
-    attach_dir = os.path.join(work, "attachments")
-    os.makedirs(attach_dir, exist_ok=True)
-    console.print(f"[*] Downloading attachments for {len(rows)} challenges -> {attach_dir}")
-
     import httpx
 
-    # Same downloader the per-challenge pre-download uses
-    # (vulnclaw/platforms/attachments.py). Extracted for exactly this reason: the two
-    # paths must not drift into "the batch fetches X, the solve fetches Y".
-    from vulnclaw.platforms.attachments import download_attachment
+    # Same downloader AND the same destination helper the per-challenge pre-download
+    # uses (vulnclaw/platforms/attachments.py). Extracted for exactly this reason: the
+    # two paths must not drift into "the batch fetches X, the solve fetches Y" -- and
+    # the destination used to be a second copy of a Windows-only expression here.
+    from vulnclaw.platforms.attachments import attachment_dir, download_attachment
+
+    attach_dir = attachment_dir()
+    os.makedirs(attach_dir, exist_ok=True)
+    console.print(f"[*] Downloading attachments for {len(rows)} challenges -> {attach_dir}")
 
     ok = 0
     fail = 0

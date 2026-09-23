@@ -169,9 +169,19 @@ _LOOK_AHEAD = 12
 
 
 def _is_negated(text: str, start: int, end: int) -> bool:
-    """Whether a marker occurrence at ``text[start:end]`` is negated nearby."""
-    before = text[max(0, start - _LOOK_BEHIND):start]
-    after = text[end:end + _LOOK_AHEAD]
+    """Whether a marker occurrence at ``text[start:end]`` is negated nearby.
+
+    Case-insensitive, and that is not cosmetic. The cue lists are lowercase and the two
+    callers hand over text in DIFFERENT cases: `detect_verification_success` lowercases
+    first, while `finding_parser` passes the response verbatim. So on original-case text
+    a cue like "NOT " never matched, and `NOT confirmed` read as a success claim -- the
+    very inversion this function exists to prevent, in uppercase form.
+
+    Lowercasing the two WINDOWS rather than the whole string keeps the indices valid,
+    which matters because `.lower()` can change a string's length for some Unicode.
+    """
+    before = text[max(0, start - _LOOK_BEHIND):start].lower()
+    after = text[end:end + _LOOK_AHEAD].lower()
     return any(cue in before for cue in _NEGATION_BEFORE) or any(
         cue in after for cue in _NEGATION_AFTER
     )
