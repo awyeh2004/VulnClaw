@@ -850,10 +850,19 @@ def _inject_prior_playbooks(
         "\n\n# Prior-run notes (auto-matched: this target, or the same challenge "
         "class)\n"
         + format_playbook_list(matches)
-        + "\nReplay confirmed steps where still applicable. A class match is a "
-        "sibling challenge, not this one: the vulnerability may differ, so "
-        "re-verify the surface. Flag values are fingerprinted because they rotate "
-        "per instance — never resubmit stored ones; re-read the flag."
+        + "\nHow to use these notes:\n"
+        "- The challenge's OWN stated vulnerability class wins. A note matched by "
+        "challenge class is a SIBLING challenge, not this one: on 2026-09-23 a "
+        "note about Weblogic XMLDecoder deserialization was injected into a "
+        "Weblogic SSRF challenge, and the run dropped SSRF and chased the note's "
+        "path instead.\n"
+        "- Before adopting a sibling note's path, VERIFY its stated premise on "
+        "THIS target (hit the endpoint it names, confirm the version/route it "
+        "relies on). If the premise does not hold on this instance, discard that "
+        "path and attack the vulnerability the challenge actually asks for.\n"
+        "- Replay only steps you have confirmed still apply. Flag values are "
+        "fingerprinted because they rotate per instance — never resubmit stored "
+        "ones; re-read the flag."
     )
     emit(
         "playbook_injected",
@@ -864,6 +873,8 @@ def _inject_prior_playbooks(
                     "slug": m["slug"],
                     "score": m["score"],
                     "query_kind": m.get("query_kind", ""),
+                    "vuln_classes": m.get("vuln_classes", []),
+                    "vuln_class_agrees": m.get("vuln_class_agrees", True),
                 }
                 for m in matches
             ],
@@ -873,7 +884,13 @@ def _inject_prior_playbooks(
         stream_sink,
         "[playbook] injected "
         + "; ".join(
-            f"{m['slug']} score={m['score']} ({m.get('query_kind', '?')})"
+            f"{m['slug']} score={m['score']} ({m.get('query_kind', '?')}"
+            + (
+                ""
+                if m.get("vuln_class_agrees", True)
+                else f", CLASS MISMATCH {'/'.join(m.get('vuln_classes') or []) or 'unknown'}"
+            )
+            + ")"
             for m in matches
         ),
     )

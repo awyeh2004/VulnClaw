@@ -119,8 +119,8 @@ def test_a_sibling_challenge_is_injected_and_logged(store):
     )
     assert hits >= 1
     assert "Prior-run notes" in runtime.prior_playbook_brief
-    assert "sibling challenge" in runtime.prior_playbook_brief, (
-        "a class match must warn that the vulnerability may differ"
+    assert "SIBLING challenge" in runtime.prior_playbook_brief, (
+        "a class match must warn that this is not the same challenge"
     )
     # 操作者可见的那一行，带 slug 与分数
     assert any("score=" in n and "(class)" in n for n in notices), notices

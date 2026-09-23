@@ -297,6 +297,12 @@ def challenge_class_signature(goal: str) -> str:
         if match:
             bits.append(match.group(1))
     bits += [m.group(1).strip() for m in _CLASS_QUOTED_RE.finditer(text)]
+    # Vulnerability classes belong in here too. Measured on a real store: with the
+    # challenge name written as "([Weblogic]SSRF)" the bracketed tag is only
+    # "Weblogic", so the whole signature collapsed to one token, every Weblogic note
+    # scored 1.0, and the query declared no class -- which made the class-agreement
+    # rule a no-op on exactly the case it exists for.
+    bits += sorted(vulnerability_classes(text))
     seen: set[str] = set()
     out: list[str] = []
     for bit in bits:
@@ -344,17 +350,67 @@ def _reserve_curated_representation(rows: list[dict[str, Any]], limit: int) -> l
 _LOOKUP_SCAN_LIMIT = 50
 
 
+# Vulnerability classes, so "same framework" is not mistaken for "same problem".
+#
+# Measured 2026-09-23: the class key matched a Weblogic XMLDecoder-deserialization
+# note into a Weblogic **SSRF** challenge. With the signature reduced to a single
+# token ("Weblogic") the note scored 1.0, and the run visibly abandoned the asked-for
+# class (mentions of "ssrf" fell 28 -> 3 while "bea_wls_internal" rose 2 -> 41). It
+# solved anyway, because the note's knowledge was environmental (which path is
+# unauthenticated, where the flag can be exfiltrated) and that transferred.
+#
+# Hence DEMOTE, never exclude: a note whose declared class disagrees stays available
+# as a fallback (it demonstrably helped), but any note that agrees outranks it.
+# A note declaring no class at all is not treated as disagreeing -- silence is not
+# a contradiction, and most curated notes predate this vocabulary.
+_VULN_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
+    "ssrf": ("ssrf", "服务端请求伪造", "server-side request forgery"),
+    "deserialization": ("deserial", "反序列化", "xmldecoder", "marshalsec", "jrmp", "t3 protocol"),
+    "sqli": ("sql injection", "sqli", "sql注入", "sql 注入", "注入点", "boolean-blind"),
+    "rce": ("rce", "命令执行", "code execution", "远程执行", "getshell", "invokefunction"),
+    "xxe": ("xxe", "xml external entity", "外部实体"),
+    "file_read": ("lfi", "文件包含", "path traversal", "目录穿越", "任意文件读取", "file read"),
+    "upload": ("file upload", "文件上传", "上传", "webshell"),
+    "ssti": ("ssti", "template injection", "模板注入"),
+    "auth_bypass": ("weak password", "弱口令", "brute force", "爆破", "未授权", "unauth", "unacc"),
+    "steganography": ("steg", "隐写", "隐写术"),
+    "crypto": ("rsa", "aes", "cipher", "加密", "解密", "密码学"),
+    "reverse": ("reverse", "逆向", "crackme", "disassembl", "反汇编"),
+    "pwn": ("pwn", "pwntools", "heap overflow", "栈溢出", "rop chain"),
+}
+
+
+def vulnerability_classes(text: str) -> frozenset[str]:
+    """Vulnerability classes a text declares, from a fixed vocabulary.
+
+    Deliberately a closed vocabulary rather than a model call: this runs on every
+    lookup and must be deterministic and free. Unknown classes simply do not appear,
+    which degrades to the previous behaviour instead of failing.
+    """
+    low = str(text or "").lower()
+    return frozenset(
+        name for name, needles in _VULN_CLASS_PATTERNS.items()
+        if any(needle in low for needle in needles)
+    )
+
+
 def lookup_playbook_multi(
     queries: Sequence[tuple[str, str]], *, limit: int = 3, min_score: float = 0.15
 ) -> list[dict[str, Any]]:
     """Look each ``(kind, query)`` up and merge the hits, best score per slug.
 
-    Returns the same rows as :func:`lookup_playbook` plus ``query_kind`` and
-    ``query``, so a caller can report which key matched -- the hit rate per key is
-    the number worth watching, and it was invisible while only the count was
-    recorded.
+    Returns the same rows as :func:`lookup_playbook` plus ``query_kind``,
+    ``query``, ``vuln_classes`` and ``vuln_class_agrees``, so a caller can report
+    which key matched and whether the note is about the same KIND of problem -- the
+    hit rate per key is the number worth watching, and it was invisible while only
+    the count was recorded.
+
+    Ranking puts class agreement ahead of raw score: a keyword-overlap score cannot
+    separate "same framework" from "same vulnerability", and the class key is
+    usually a short query (one or two tokens) where everything scores 1.0.
     """
     effective = limit if limit and limit > 0 else 3
+    query_classes = vulnerability_classes(" ".join(q for _, q in queries))
     best: dict[str, dict[str, Any]] = {}
     for kind, query in queries:
         if not str(query or "").strip():
@@ -367,8 +423,29 @@ def lookup_playbook_multi(
                 merged["query"] = query
                 best[row["slug"]] = merged
     rows = list(best.values())
+    for row in rows:
+        # The note's DECLARED identity, not its prose: name and slug are where a
+        # curated note says what it is ("Weblogic CVE-2017-10271 (wls-wsat XMLDecoder
+        # RCE) ..."), while the fingerprint is often just the target string. Reading
+        # only the fingerprint reported an empty class set for notes whose names
+        # plainly state one, which silently disabled this rule on a real store.
+        note_classes = vulnerability_classes(
+            " ".join(
+                str(row.get(field, "") or "")
+                for field in ("name", "slug", "fingerprint")
+            )
+        )
+        row["vuln_classes"] = sorted(note_classes)
+        # Silence is not contradiction: a note naming no class is not demoted.
+        row["vuln_class_agrees"] = (
+            not query_classes or not note_classes or bool(query_classes & note_classes)
+        )
     rows.sort(
-        key=lambda r: (r["score"], 0 if r["status"] == "validated" else 1),
+        key=lambda r: (
+            bool(r.get("vuln_class_agrees", True)),
+            r["score"],
+            0 if r["status"] == "validated" else 1,
+        ),
         reverse=True,
     )
     return _reserve_curated_representation(rows, effective)
