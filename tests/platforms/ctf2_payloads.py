@@ -73,6 +73,37 @@ RANGE_KEEPER_BANNER = (
 NO_TARGET_PAYLOAD: dict = {"data": None, "success": True}
 
 
+# ── third provenance block: a WEB target, recorded live on 2026-09-23 ─────
+#
+# Verbatim from `platform_start_env` on practice challenge "[极客大挑战 2019]BabySQL"
+# (practice b9bbb32f-f186-458f-b90b-12440c0f6aea, challenge
+# 30c90c3e-2227-4263-8218-9494728f4c38), which was solved for real in the same run.
+#
+# Why it matters: this is the payload SHAPE the renderer got wrong.  `nc_ssl` is
+# null, so the scheme fallback correctly resolves the transport to `tcp` (no TLS
+# wrapper needed) -- and the renderer then said "plain TCP is fine", which invites
+# a bare socket against a web challenge.  `access_type` is "http", and the URL
+# scheme is http:// -- both facts the transport vocabulary cannot express, so the
+# renderer must read the scheme.
+WEB_TARGET_URL = "http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80"
+WEB_TARGET_ID = "03ac8797-e3d4-4613-8a16-649e2cda9dc4"
+WEB_EXPIRES_AT = "2026-09-23T09:28:56.045426+08:00"
+
+WEB_RUNNING_PAYLOAD: dict = {
+    "data": {
+        "access_ready": True,
+        "access_type": "http",
+        "access_url": WEB_TARGET_URL,
+        "access_urls": [{"nc_ssl": None, "type": "http", "url": WEB_TARGET_URL}],
+        "created_at": "2026-09-23T08:28:56.045674+08:00",
+        "environment_id": WEB_TARGET_ID,
+        "expires_at": WEB_EXPIRES_AT,
+        "status": "running",
+    },
+    "success": True,
+}
+
+
 # ── second provenance block: field names confirmed live on 2026-09-21 ─────
 #
 # Captured by a READ-ONLY probe against the live platform with a

@@ -94,15 +94,37 @@ class TestExplicitFlagStillWins:
 
 
 class TestHttpTargetIsNoLongerHedged:
-    def test_render_says_plain_tcp_for_an_http_endpoint(self):
+    """The hedge is gone -- but "not hedged" is not the same as "raw TCP".
+
+    This used to assert the render said ``plain TCP`` for an ``http://`` endpoint.
+    That was the hedge's replacement, and it was still wrong in the other
+    direction: a web challenge is not a raw service, and "plain TCP is fine" reads
+    as permission to open a bare socket. What the endpoint actually warrants is
+    "no TLS wrapper needed, and speak HTTP" -- see
+    ``test_env_render.TestWebTargetIsNotCalledPlainRawTcp``.
+    """
+
+    def _head(self) -> str:
         payload = {"data": {"status": "running", "access_type": "http",
                             "access_url": f"http://{HTTP_URL}",
                             "access_urls": [{"type": "http",
                                              "url": f"http://{HTTP_URL}"}]}}
-        head = _head(render_env_info(normalize_target_payload(payload, REF)))
-        assert "plain TCP" in head
+        return _head(render_env_info(normalize_target_payload(payload, REF)))
+
+    def test_render_stops_hedging_about_the_transport(self):
+        head = self._head()
         assert "not reported" not in head
         assert "try TLS" not in head
+
+    def test_render_names_the_transport_it_could_prove(self):
+        head = self._head()
+        assert "transport: tcp" in head
+        assert "no TLS wrapper needed" in head
+
+    def test_render_does_not_call_a_web_target_a_raw_service(self):
+        head = self._head()
+        assert "plain TCP is fine" not in head
+        assert "HTTP service" in head
 
     def test_gcs_endpoints_use_the_scheme_too(self):
         (endpoint,) = gcs_endpoints({"exposeIps": [f"http://{HTTP_URL}"]})

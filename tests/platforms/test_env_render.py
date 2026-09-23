@@ -159,6 +159,100 @@ class TestRunningTargetTransportGuidance:
         assert "expires_at" in _head(render_env_info(_running()))
 
 
+class TestWebTargetIsNotCalledPlainRawTcp:
+    """A live CTF2 web target must not be rendered as a raw TCP service.
+
+    Measured 2026-09-23 on practice challenge ``[极客大挑战 2019]BabySQL``: the target
+    payload was exactly
+
+        {"access_type": "http",
+         "access_url": "http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80",
+         "access_urls": [{"nc_ssl": None, "type": "http", "url": "...:80"}]}
+
+    ``nc_ssl`` is null, so the scheme fallback correctly yields ``tcp`` -- no TLS
+    wrapper needed.  But the renderer then said "plain TCP is fine", which invites
+    a bare socket against a *web* challenge: ``tcp`` answers "no TLS wrapper", not
+    "raw protocol".  Nothing failed loudly, which is exactly why it needs a test.
+    """
+
+    WEB_URL = "http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80"
+
+    def _web(self, url: str = WEB_URL) -> EnvInfo:
+        return EnvInfo(
+            ref=REF,
+            state=base.STATE_RUNNING,
+            complete=True,
+            endpoints=(EnvEndpoint(url=url, host="x.http-ctf2.dasctf.com", port=80,
+                                   transport=base.TRANSPORT_TCP, note="http"),),
+            raw={"data": {"access_type": "http", "access_url": url}},
+        )
+
+    def test_http_target_is_named_an_http_service(self):
+        out = _head(render_env_info(self._web()))
+        assert "HTTP service" in out
+        assert self.WEB_URL in out
+
+    def test_http_target_does_not_invite_a_bare_socket(self):
+        out = _head(render_env_info(self._web()))
+        assert "plain TCP is fine" not in out
+        assert "curl" in out
+        # Still honest about there being no TLS wrapper to apply.
+        assert "no TLS wrapper needed" in out
+
+    def test_http_target_is_not_treated_as_tls(self):
+        """The scheme is ``http://``, so the TLS wrap_socket lecture must not fire."""
+        out = _head(render_env_info(self._web()))
+        assert "TLS-WRAPPED" not in out
+        assert "wrap_socket" not in out
+
+    def test_a_tls_web_target_still_gets_the_tls_warning(self):
+        """``https://`` resolves to TLS, so the scheme branch must not shadow it."""
+        tls_web = EnvInfo(
+            ref=REF,
+            state=base.STATE_RUNNING,
+            complete=True,
+            endpoints=(EnvEndpoint(url="https://x.example.com", transport=base.TRANSPORT_TLS),),
+            raw={},
+        )
+        out = _head(render_env_info(tls_web))
+        assert "TLS-WRAPPED" in out
+        assert "HTTP service" not in out
+
+    def test_a_plain_raw_service_keeps_its_own_wording(self):
+        """No scheme (the measured pwn form: ``host:port``) stays 'plain TCP'."""
+        out = _head(render_env_info(_running(base.TRANSPORT_TCP)))
+        assert "plain TCP is fine" in out
+        assert "HTTP service" not in out
+
+    def test_an_http_target_over_a_nonstandard_port_is_still_http(self):
+        out = _head(render_env_info(self._web("http://host.example.com:8080/app")))
+        assert "HTTP service" in out
+        assert "plain TCP is fine" not in out
+
+    def test_the_real_live_web_payload_renders_as_http(self):
+        """End-to-end on the recorded payload: adapter normalization + render.
+
+        No hand-built EnvInfo here -- this is the exact JSON the platform served,
+        through `normalize_target_payload`, so it also pins that the transport
+        really does come out `tcp` (nc_ssl is null) and that the renderer still
+        names the service from the scheme.
+        """
+        from vulnclaw.platforms.ctf2 import normalize_target_payload
+        from tests.platforms.ctf2_payloads import WEB_RUNNING_PAYLOAD, WEB_TARGET_URL
+
+        info = normalize_target_payload(WEB_RUNNING_PAYLOAD, REF)
+        assert info.state == base.STATE_RUNNING
+        assert info.complete is True
+        assert info.transports() == frozenset({base.TRANSPORT_TCP})
+        assert [ep.url for ep in info.endpoints] == [WEB_TARGET_URL]
+
+        out = _head(render_env_info(info))
+        assert "HTTP service" in out
+        assert "curl" in out
+        assert "plain TCP is fine" not in out
+        assert "TLS-WRAPPED" not in out
+
+
 class TestNoTarget:
     def test_null_state_explains_the_sequence(self):
         info = EnvInfo(ref=REF, state=base.STATE_NONE, complete=False, raw={"data": None,
