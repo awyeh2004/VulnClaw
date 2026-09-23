@@ -747,6 +747,43 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
             )
         return f"[blackboard] intent {node.id} declared: {desc}"
 
+    if tool_name == "blackboard_start_intent":
+        node_id = args.get("node_id", "")
+        if not node_id:
+            return "[!] blackboard_start_intent requires 'node_id'"
+        node = bb.get_node(node_id)
+        if not node:
+            return f"[!] blackboard: node {node_id} not found"
+        if node.type != NodeType.INTENT:
+            return f"[!] blackboard: node {node_id} is not an intent"
+        bb.start_intent(node_id)
+        return f"[blackboard] intent {node_id} marked in_progress"
+
+    if tool_name == "blackboard_reject_intent":
+        node_id = args.get("node_id", "")
+        reason = args.get("reason", "")
+        if not node_id:
+            return "[!] blackboard_reject_intent requires 'node_id'"
+        node = bb.get_node(node_id)
+        if not node:
+            return f"[!] blackboard: node {node_id} not found"
+        bb.reject_intent(node_id, reason=reason)
+        return f"[blackboard] intent {node_id} rejected: {reason}"
+
+    if tool_name == "blackboard_review":
+        # Collect all evidence content for witness checking.
+        evidence_by_id: dict[str, str] = {}
+        state = getattr(getattr(agent, "context", None), "state", None)
+        agent_state = getattr(state, "agent_state", None)
+        if agent_state is not None:
+            for ev in getattr(agent_state, "evidence", []):
+                evidence_by_id[ev.id] = getattr(ev, "content", "") or ""
+        review_results = [f"DAG: {issue}" for issue in bb.validate_dag()]
+        review_results += _run_blackboard_review(bb, evidence_by_id)
+        if not review_results:
+            return "[blackboard review] No actionable findings"
+        return "\n".join(f"[blackboard review] {r}" for r in review_results)
+
     # ── Coverage tracking: LOCK / ANGLES / TENSION ─────────────────────
 
     if tool_name == "blackboard_set_lock":
@@ -802,6 +839,15 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         node = bb.create_tension(desc)
         return f"[blackboard] tension {node.id} recorded: {desc}"
 
+    # Must stay LAST and must stay reachable: without it a name that is
+    # advertised in the schema but missing a branch above falls off the end of
+    # this function and returns None, which the tool loop stringifies to the
+    # literal "None" — a silent no-op the model cannot diagnose. That is exactly
+    # how blackboard_review/start_intent/reject_intent were broken (their
+    # branches had been pasted after an early return in another function, so
+    # three advertised tools answered "None" and no test noticed).
+    return f"[!] unknown blackboard tool: {tool_name}"
+
 
 def _run_blackboard_review(bb: Blackboard, evidence_by_id: dict[str, str]) -> list[str]:
     """Review-Arbiter: analyze blackboard for factual disputes and dead ends.
@@ -840,55 +886,3 @@ def _run_blackboard_review(bb: Blackboard, evidence_by_id: dict[str, str]) -> li
 
     return results
 
-
-def _count_genuine_failures_for_route(intent_node: BlackboardNode, evidence_by_id: dict[str, str]) -> int:
-    """Count how many times this intent led to a genuine failure (not timeout, cancelled, etc).
-    Ported from Muteki's genuine_failures_for_route."""
-    count = 0
-    # In VulnClaw, genuine failures are tool calls with error_type like "timeout", "error"
-    # This is a simplified version — in production, you'd track tool call results per intent
-    return count  # TODO: implement proper failure counting with tool_call_manager records
-
-    if tool_name == "blackboard_review":
-        from vulnclaw.agent.blackboard import _run_blackboard_review
-
-        # Collect all evidence content for witness checking
-        state = getattr(getattr(agent, "context", None), "state", None)
-        agent_state = getattr(state, "agent_state", None)
-        evidence_by_id = {}
-        if agent_state and hasattr(agent_state, "evidence"):
-            for ev in agent_state.evidence:
-                evidence_by_id[ev.id] = getattr(ev, "content", "")
-
-        review_results = [f"DAG: {issue}" for issue in bb.validate_dag()]
-        review_results += _run_blackboard_review(bb, evidence_by_id)
-        if not review_results:
-            return "[blackboard review] No actionable findings"
-        return "\n".join(
-            f"[blackboard review] {result}" for result in review_results
-        )
-
-    if tool_name == "blackboard_start_intent":
-        node_id = args.get("node_id", "")
-        if not node_id:
-            return "[!] blackboard_start_intent requires 'node_id'"
-        node = bb.get_node(node_id)
-        if not node:
-            return f"[!] blackboard: node {node_id} not found"
-        if node.type != NodeType.INTENT:
-            return f"[!] blackboard: node {node_id} is not an intent"
-        bb.start_intent(node_id)
-        return f"[blackboard] intent {node_id} marked in_progress"
-
-    if tool_name == "blackboard_reject_intent":
-        node_id = args.get("node_id", "")
-        reason = args.get("reason", "")
-        if not node_id:
-            return "[!] blackboard_reject_intent requires 'node_id'"
-        node = bb.get_node(node_id)
-        if not node:
-            return f"[!] blackboard: node {node_id} not found"
-        bb.reject_intent(node_id, reason=reason)
-        return f"[blackboard] intent {node_id} rejected: {reason}"
-
-    return f"[!] unknown blackboard tool: {tool_name}"
