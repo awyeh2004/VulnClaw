@@ -107,6 +107,16 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "fixed Windows taskkill fallback for the gated process runner",
     },
+    "vulnclaw/agent/builtin_tools.py:_bg_run:subprocess.run:f04864d1": {
+        "count": 1,
+        # model-reachable: reached from bg_launch, which is now gated. THIS ENTRY IS
+        # THE POINT OF THE ROUND THAT ADDED IT: the site was invisible because the
+        # module is imported as `_sp` (`import subprocess as _sp`), so this check
+        # reported "all spawn sites reviewed" while an unreviewed one existed. The
+        # scanner now resolves import aliases; this key is what it then demanded.
+        "purpose": "background runner for the gated bg_launch path; argv is the "
+                   "validated brute-force/pure-computation command",
+    },
     "vulnclaw/agent/builtin_tools.py:execute_nmap:run_text:23791bbb": {
         "count": 1,
         "purpose": "fixed Windows nmap path lookup (where.exe), via the pinned-codec funnel",
@@ -302,17 +312,82 @@ def _dotted_name(node: ast.AST) -> str | None:
     return None
 
 
-def _call_target(call: ast.Call) -> str | None:
-    name = _dotted_name(call.func)
-    if name is None:
+def _call_target(call: ast.Call, aliases: dict[str, str] | None = None) -> str | None:
+    """The spawn call's canonical name, or None when it is not a spawn.
+
+    The name AS WRITTEN wins when it is itself a known spawn callable, because the
+    allowlist keys embed that spelling (``...:run_text:<hash>``). Only when the written
+    form is unknown do we consult the alias map -- which is what makes an aliased
+    ``_sp.run(...)`` visible as ``subprocess.run``. Checking both, in that order, keeps
+    every existing key valid while closing the alias hole.
+    """
+    raw = _dotted_name(call.func)
+    if raw is None:
         return None
-    if name in _SPAWN_CALLS:
-        return name
-    # subprocess.getoutput("cmd") style is covered above; os.spawn* variants
-    # with suffixes we did not enumerate still end in "spawn" via os.
-    if name.startswith(("os.exec", "os.spawn")):
-        return name
+    if raw in _SPAWN_CALLS or raw.startswith(("os.exec", "os.spawn")):
+        return raw
+    if aliases:
+        resolved = _resolve_aliases(raw, aliases)
+        if resolved != raw and (
+            resolved in _SPAWN_CALLS or resolved.startswith(("os.exec", "os.spawn"))
+        ):
+            return resolved
     return None
+
+
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map every local spelling of a module/callable onto its canonical dotted name.
+
+    WHY THIS EXISTS (round: audit finding A1): the scan matched a dotted chain against
+    ``_SPAWN_CALLS`` textually, so a spawn site was invisible the moment the module was
+    aliased. Measured: ``builtin_tools.py`` contains ``import subprocess as _sp`` and
+    ``_bg_run`` calls ``_sp.run(...)`` -- the site never entered the scan set, so the
+    boundary check reported "26 spawn sites, all inside the reviewed allowlist" while a
+    whole unreviewed spawn site existed in the same file. ``from X import y as z`` has the
+    same hole, and the earlier fix for this class only added ONE bare name (``run_text``)
+    to the set, which does not generalise.
+
+    Handles what the codebase actually uses:
+        import subprocess            -> subprocess       -> subprocess
+        import subprocess as _sp     -> _sp              -> subprocess
+        from subprocess import run   -> run              -> subprocess.run
+        from subprocess import run as r -> r             -> subprocess.run
+        from os import execv         -> execv            -> os.execv
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                canonical = alias.name
+                if alias.asname:
+                    aliases[alias.asname] = canonical
+                    # ``import xml.etree as e`` binds ``e`` to the leaf too, but the
+                    # modules we care about (subprocess, os, pty, asyncio) are top-level.
+                else:
+                    head = canonical.split(".", 1)[0]
+                    aliases.setdefault(head, canonical if "." not in canonical else head)
+        elif isinstance(node, ast.ImportFrom):
+            # Relative imports (level > 0) resolve to this package; they cannot name
+            # stdlib spawn callables, so skip them rather than guessing.
+            if node.level or not node.module:
+                continue
+            for alias in node.names:
+                local = alias.asname or alias.name
+                aliases[local] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _resolve_aliases(name: str, aliases: dict[str, str]) -> str:
+    """Rewrite the HEAD of a dotted name through the alias map.
+
+    Only the head is rewritten: ``_sp.run`` -> ``subprocess.run``, while
+    ``sp.path.join`` keeps its tail.
+    """
+    head, sep, tail = name.partition(".")
+    canonical = aliases.get(head)
+    if canonical is None:
+        return name
+    return f"{canonical}.{tail}" if sep else canonical
 
 
 def scan_file(path: Path) -> list[SpawnSite]:
@@ -322,10 +397,11 @@ def scan_file(path: Path) -> list[SpawnSite]:
     tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     rel = path.relative_to(REPO_ROOT).as_posix()
     scopes = _scope_of(tree)
+    aliases = _import_aliases(tree)
     sites: list[SpawnSite] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            target = _call_target(node)
+            target = _call_target(node, aliases)
             if target is not None:
                 sites.append(
                     SpawnSite(

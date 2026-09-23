@@ -189,6 +189,11 @@ def _host_flag_hunt_reason(code: str) -> str | None:
 
     Requires a broad traversal AND a flag-shaped token: neither alone is a problem,
     and requiring both keeps genuine analysis of a single downloaded artifact working.
+
+    ⚠️ This is a HEURISTIC and it is trivially bypassable -- see
+    ``_SHELL_FLAG_HUNT_REASON`` and the tests that pin the known bypasses. It exists to
+    stop the naive form, not a determined author: the primary control is the prompt rule
+    ("the answer must come from the target"), and this is the mechanical backstop.
     """
     text = code or ""
     if not any(re.search(pattern, text) for pattern in _BROAD_ROOTS):
@@ -196,6 +201,74 @@ def _host_flag_hunt_reason(code: str) -> str | None:
     if not any(re.search(pattern, text) for pattern in _FLAG_SHAPED):
         return None
     return _HOST_FLAG_HUNT_REASON
+
+
+# ── the same intent, on the shell path ──────────────────────────────
+# Audit finding A3: `_host_flag_hunt_reason` had exactly ONE call site, inside
+# python_execute, so the identical intent was completely unguarded when expressed as a
+# shell command (`grep -r`, `findstr /s`, `Select-String -Recurse`, ...). The prompt
+# rule was the only thing standing there. This closes the "zero mechanical
+# interception on that path" half.
+#
+# Same narrow trigger as the Python side: a RECURSIVE search over a BROAD root AND a
+# flag-shaped token. A single-file grep (`strings chal.exe | grep flag{`) has no
+# recursion and stays allowed.
+_SHELL_RECURSIVE = (
+    r"\bgrep\b[^|;&]*\s-(?:[A-Za-z]*[rR])",          # grep -r / -R / -rn / -iR
+    r"\bgrep\b[^|;&]*--recursive",
+    r"\brg\b",                                        # ripgrep is recursive by default
+    r"\bag\b[^|;&]*\s-",
+    r"\bfindstr\b[^|;&]*\s/s\b",
+    r"\bSelect-String\b[^|;&]*-Recurse",
+    r"\bGet-ChildItem\b[^|;&]*-Recurse",
+    r"\bdir\b[^|;&]*\s/s\b",
+    r"\bfind\b[^|;&]*-exec\s+grep",
+)
+_SHELL_BROAD_ROOT = (
+    r"[A-Za-z]:[\\/](?:\s|$|\*|\")",                  # a drive root: E:\ / C:/ 
+    r"(?:^|\s)/(?:\s|$)",                             # POSIX root
+    r"(?:^|\s)~",
+    r"\$HOME",
+    r"[A-Za-z]:[\\/](?:Users|home)\b",
+    r"(?:^|\s)/(?:home|Users|root)\b",
+)
+# Includes the SPLIT form the audit used for the Python side (`/c:fla` + `g{`), because
+# a shell command makes that spelling natural rather than exotic.
+_SHELL_FLAG_SHAPED = (
+    r"flag\s*\{",
+    r"FLAG\s*\{",
+    r"CTF\s*\{",
+    r"[\"']flag[\"']",
+    r"/c:fla\b",
+    r"\bfla\b[\"']?\s*[\"']?g\{",
+)
+_SHELL_FLAG_HUNT_REASON = (
+    "refusing a host-wide search for flag-shaped strings. The answer must come from the "
+    "target, not from this machine: earlier solve reports, other runs' logs and test "
+    "fixtures on disk may contain OTHER challenges' real flags, so reporting one would "
+    "be fabricating a result that still looks evidenced. Local files are for analysis "
+    "only -- to search a downloaded attachment, pass its exact path instead of "
+    "recursing over a directory tree."
+)
+
+
+def _shell_flag_hunt_reason(command: str) -> str | None:
+    """Shell-command counterpart of :func:`_host_flag_hunt_reason`.
+
+    ⚠️ Same caveat, and it must not be lost: this is a HEURISTIC over command text and is
+    bypassable by any reformulation (a variable holding the root, a needle built at
+    runtime, an unknown traversal verb). It stops the naive form; the prompt rule is the
+    primary control. `tests/agent/test_answer_provenance_limits.py` pins the known
+    bypasses as tests so this limitation stays visible.
+    """
+    text = command or ""
+    if not any(re.search(pattern, text, re.IGNORECASE) for pattern in _SHELL_RECURSIVE):
+        return None
+    if not any(re.search(pattern, text) for pattern in _SHELL_BROAD_ROOT):
+        return None
+    if not any(re.search(pattern, text, re.IGNORECASE) for pattern in _SHELL_FLAG_SHAPED):
+        return None
+    return _SHELL_FLAG_HUNT_REASON
 
 
 # ── AST-based sandbox bypass detection ──────────────────────────────
@@ -757,6 +830,12 @@ async def execute_shell_command(agent: AgentContext, args: dict[str, Any]) -> st
     scope_violation = _validate_command_url_scope(agent, command)
     if scope_violation:
         return scope_violation
+    # Answer-provenance guard, mirroring the python_execute side. Audit finding A3: the
+    # identical intent was unguarded here, because the Python-side check is only called
+    # from python_execute.
+    flag_hunt = _shell_flag_hunt_reason(command)
+    if flag_hunt:
+        return f"[!] {flag_hunt}"
 
     try:
         workdir = _resolve_workdir(args.get("workdir") or _default_workdir(agent))
@@ -1414,7 +1493,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     # ── 后台任务（爆破等耗时操作不阻塞）───────────────────────────────────────
     if tool_name in _BG_TOOL_NAMES:
         if tool_name == "bg_launch":
-            return execute_bg_launch(agent, args)
+            return await execute_bg_launch(agent, args)
         return execute_bg_result(agent, args)
 
     # ── OCR（本地 GPU 加载 + 可能的 PowerShell/HTTP 降级链，整体重同步活）
@@ -3754,6 +3833,9 @@ _BG_ALLOWED_PREFIXES = (
     "python3",
     "cmd /c python",
 )
+# The subset of the allowlist above that is an INTERPRETER: those prefixes make the
+# substring blacklist meaningless unless their inline-code flags are refused (A1).
+_BG_INTERPRETER_PREFIXES = ("python", "python3", "cmd /c python")
 # 禁止出现的危险模式（配合前缀二次过滤）
 _BG_BLOCKED_PATTERNS = (
     "|",
@@ -3779,6 +3861,33 @@ def _bg_new_id() -> str:
         return f"bg{_bg_seq}"
 
 
+def _bg_interpreter_inline_code(cmd_raw: str) -> str | None:
+    """Return the offending flag when an interpreter prefix carries inline code.
+
+    Audit finding A1, second half. The prefix allowlist accepts ``python``/``python3``,
+    which makes the substring blacklist beside it decorative: measured,
+    ``python -c "import os;os.system('id')"`` is ACCEPTED here while
+    ``python_execute`` blocks ``os.system(`` outright and sits behind
+    ``safety.enable_python_execute``. So the background path was a way around that
+    policy, not merely an ungated spawn.
+
+    ``-c``/``-m``/bare ``-`` are the inline-code vectors. ``python brute.py words.txt``
+    -- the documented "pure computation" use -- still works, and the launch is gated
+    anyway. A script that itself wants ``-c`` as its own flag loses; that is the safe
+    direction, and the refusal says so.
+    """
+    lowered = " ".join(cmd_raw.lower().split())
+    if not any(
+        lowered == prefix or lowered.startswith(prefix + " ")
+        for prefix in _BG_INTERPRETER_PREFIXES
+    ):
+        return None
+    for token in lowered.split():
+        if token in ("-c", "-m", "--command", "-"):
+            return token
+    return None
+
+
 def _bg_validate_command(cmd_raw: str) -> str | None:
     """Return an error message if the command is not allowed in background, else None."""
     stripped = cmd_raw.strip()
@@ -3788,6 +3897,14 @@ def _bg_validate_command(cmd_raw: str) -> str | None:
     # 前缀白名单
     if not any(lowered.startswith(p) for p in _BG_ALLOWED_PREFIXES):
         return f"command not allowed in background; allowed prefixes: {', '.join(_BG_ALLOWED_PREFIXES)}"
+    # 解释器 + 内联代码 = 绕过 python_execute 的策略（见 A1）
+    inline = _bg_interpreter_inline_code(stripped)
+    if inline:
+        return (
+            f"interpreter flag {inline!r} runs inline code, which bypasses the "
+            f"python_execute sandbox policy; pass a script file instead "
+            f"(e.g. 'python brute.py wordlist.txt')"
+        )
     # 危险模式拦截
     for pat in _BG_BLOCKED_PATTERNS:
         if pat in lowered:
@@ -3824,12 +3941,19 @@ def _bg_run(task_id: str, cmd: list[str], timeout: int) -> None:
             _bg_tasks[task_id]["error"] = str(e)[:500]
 
 
-def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
+async def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
     """Launch a command in the background so the agent can keep working.
 
     Restricted to brute-force / pure-computation commands (hashcat, john, python
     computation). Shell pipelines, downloads, and encoded execution are blocked.
     The agent continues exploring and checks the result later via ``bg_result``.
+
+    Async because it now passes the ExecutionGate, like every other model-reachable
+    process spawn. Audit finding A1: this path had NO gate at all -- the only three
+    ``gate.authorize`` sites were shell/python/nmap -- so a background launch ran an
+    operator-unapproved command, and (via ``python -c``) one that ``python_execute``
+    would have refused outright. The boundary scanner's own contract states that
+    model-reachable spawn sites are exactly the ones the gate must cover.
     """
     cmd_raw = str(args.get("command") or args.get("cmd") or "").strip()
     if not cmd_raw:
@@ -3837,6 +3961,31 @@ def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
     blocked = _bg_validate_command(cmd_raw)
     if blocked:
         return f"[!] bg_launch rejected: {blocked}"
+
+    # ── ExecutionGate: per-request operator approval ─────────────────────
+    from vulnclaw.agent.exec_gate import GateRequest, get_execution_gate
+
+    model_risk = str(args.get("risk_self_assessment") or "").strip().lower()
+    if model_risk not in ("safe", "review"):
+        model_risk = ""
+    model_reason = str(args.get("assessment_reason") or "").strip()[:300] or (
+        "background command (brute-force / pure computation)"
+    )
+    gate = get_execution_gate(getattr(agent, "config", None))
+    outcome = await gate.authorize(
+        GateRequest(
+            kind="shell",
+            display=cmd_raw,
+            cwd="",
+            model_risk=model_risk,
+            model_reason=model_reason,
+            detail="background task (bg_launch) -- runs detached, output via bg_result",
+        ),
+        run_id=str(getattr(getattr(agent, "runtime", None), "run_id", "") or ""),
+    )
+    if not outcome.approved:
+        return outcome.refusal_text("bg_launch")
+
     # 并发上限
     with _bg_lock:
         running = sum(1 for t in _bg_tasks.values() if t.get("status") == "running")
