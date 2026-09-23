@@ -1,5 +1,16 @@
 """Local forwarding proxy for the DASCTF LLM gateway.
 
+WHY THIS LIVES IN ``vulnclaw/utils/`` AND NOT ``vulnclaw/gcs_platform/``: it has
+nothing to do with the GCS competition API. It sits between the **openai SDK** and
+the **LLM gateway** so that the SDK's fixed ``/chat/completions`` suffix reaches a
+gateway which treats the bare URL as the complete endpoint. Its only caller is
+``vulnclaw/agent/core.py``, where it builds the chat client -- meaning the *agent
+core* used to import this module out of a *platform* package, so the core depended
+on a platform integration it must not care about. Moving it here (design decision
+6 / invariant I7) removes that coupling. ``vulnclaw/utils/`` is the
+neutral-infrastructure package, and this module already imported
+``vulnclaw.utils.http_client``.
+
 The competition gateway URL (``https://llm-gateway.dasctf.com/llm-gateway/
 proxy/e/<token>``) acts as a *complete endpoint*: it accepts the OpenAI
 chat.completions payload directly and does **not** expect the standard

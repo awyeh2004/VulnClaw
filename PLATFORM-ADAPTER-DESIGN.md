@@ -245,13 +245,30 @@ endpoint: http://03ac8797e2ae410f0e8a11dc.http-ctf2.dasctf.com:80
 
 ## 12. 断点：还没做的事
 
-1. **`gateway_proxy` 迁移（决策 6 / 不变量 I7）—— 未开始。**
-   现状：`vulnclaw/gcs_platform/gateway_proxy.py`，被 `vulnclaw/agent/core.py:55`
-   与 `:364`（**agent 核心**）导入，`config/schema.py:729` 仅注释提及；
-   测试在 `tests/gcs_platform/test_gateway_proxy.py` 与
-   `tests/platforms/test_platform_client_timeouts.py`。
-   问题：agent 核心依赖 GCS 平台包，是遗留耦合。
-   ⚠️ 另一会话最近改过它（`b852c6b`、`8cf5be7`），动手前先确认对方不再改。
+1. ~~**`gateway_proxy` 迁移（决策 6 / 不变量 I7）**~~ —— **已完成**（`af…` 见 git log）。
+   从 `vulnclaw/gcs_platform/gateway_proxy.py` 移到 **`vulnclaw/utils/gateway_proxy.py`**。
+
+   ⚠️ **与当初记录的决策有出入，照实说明**：设计时写的目标是 `vulnclaw/config/`。改放
+   `utils/` 的理由是——`vulnclaw/utils/` 是**设计之后**才由另一会话新建的中立基础设施包
+   （`atomic_write.py` / `http_client.py` / `subprocess_text.py`），而 `gateway_proxy` 本来
+   就已经在 `import vulnclaw.utils.http_client`。放 `utils/` 同时满足决策的**意图**
+   （与平台解耦）和包的实际职责；放 `config/` 则会把一个运行时 HTTP 服务器塞进"配置
+   schema/settings"里，还多一层与 settings 的循环导入风险。
+
+   已更新：`agent/core.py`（2 处导入）、`config/schema.py` 的注释、两个测试文件的导入；
+   `tests/gcs_platform/test_gateway_proxy.py` → `tests/utils/test_gateway_proxy.py`。
+
+   新增架构守护 `tests/meta/test_llm_gateway_proxy_is_platform_free.py`（7 例）：
+   模块在 `utils/` 下、两个入口可导入、**旧路径是真的删掉而不是留 shim**（shim 会把
+   错位的模块留在树里并悄悄恢复那条导入，正是要防的事）、平台包内不再提及该文件名、
+   以及 `agent/core.py` 不再引用任何平台包。
+
+   关于"core 是否还会间接拉进平台包"——**会**：`import vulnclaw.agent.core` 仍会通过
+   `vulnclaw/agent/builtin_tools.py`（承载遗留的平台工具面）把 `ctf_platform` 与
+   `gcs_platform` 拉进 `sys.modules`。所以守护测试查的是 **core 自身的引用**，而不是
+   `sys.modules`——后者会因为这个不变量管不着的原因而失败。`builtin_tools.py` 是
+   `agent/` 下**唯一**还剩的平台导入者，这一点也被一个显式测试钉住（等遗留工具面删掉时
+   它会开始失败，届时应当**刻意**删除该测试）。
 2. **路径停滞保护未在真实 run 里验证过**：本次 run 只 5 步，没到阈值。
    已知它依赖 `_no_path_open_angles(agent) == 0` 才升级到 `ask_user`，这条分支也
    没被真实触发过。
