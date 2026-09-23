@@ -490,6 +490,28 @@ class SessionConfig(BaseModel):
         default=240,
         description="Runaway safety cap for model-led solve turns; not a planned workflow length",
     )
+    # ── Model-facing ablation knobs ────────────────────────────────────
+    # Both default ON. They exist to measure what each model-facing aid costs,
+    # because that cost is not free: an A/B against the 2026-09-19 build on three
+    # CTF2 challenges showed the current build spending 1.8x the tool calls and
+    # 2.3x the wall time for the same 3/3 solve rate, and the reasoning-graph
+    # ceremony was one candidate. Hiding the tools + prompt block is the whole
+    # model-facing side of the reasoning graph; the runtime blackboard itself is
+    # left in place so auto-captured run notes and the stall guard keep working.
+    reasoning_graph_enabled: bool = Field(
+        default=True,
+        description=(
+            "Show the model the blackboard_* tools and the reasoning-graph prompt "
+            "block (Blackboard + LOCK/ANGLES/TENSION). Off = plain solve loop."
+        ),
+    )
+    tool_card_enabled: bool = Field(
+        default=True,
+        description=(
+            "Inject the deterministic capability card (external tools detected on "
+            "this host) into the solve system prompt."
+        ),
+    )
     solve_max_model_tokens: int = Field(
         default=6_000_000,
         description=(
