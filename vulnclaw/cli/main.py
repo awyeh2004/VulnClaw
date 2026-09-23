@@ -2386,10 +2386,19 @@ def _competition_download(cfg: Any) -> None:
 
     ok = 0
     fail = 0
-    # NOTE: verify=False here is pre-existing and left alone deliberately, to avoid a
-    # behavior change in a path that works; the newer pre-download path verifies.
-    # Revisit separately -- the file host serves a valid DigiCert chain.
-    with httpx.Client(timeout=60, verify=False) as client:
+    # verify=True, deliberately. This used to be `verify=False`, which accepted ANY
+    # certificate for a file we then analyse -- and for pwn/RE challenges, execute. The
+    # declared size is no defence: an on-path attacker picks the size.
+    #
+    # Turning it on is safe: the file host serves a valid DigiCert chain, confirmed by
+    # fetching a real attachment with verification (the pre-download path, and a plain
+    # urllib request, which verifies by default).
+    #
+    # An operator behind a TLS-inspecting proxy has a legitimate way out that keeps
+    # verification ON -- point SSL_CERT_FILE/SSL_CERT_DIR at the interceptor's CA -- and
+    # `_describe_download_error` tells them so when a certificate failure happens,
+    # instead of leaving a bare SSLError with an in-code bypass as the only option.
+    with httpx.Client(timeout=60, verify=True) as client:
         for token, listed in rows:
             try:
                 adapter = registry.adapter_for(token)

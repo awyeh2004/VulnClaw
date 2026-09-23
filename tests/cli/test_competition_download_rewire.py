@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from vulnclaw.cli import main
@@ -42,7 +43,7 @@ class _Adapter:
         )
 
 
-def _run_batch(monkeypatch, tmp_path, result: att.AttachmentDownload):
+def _run_batch(monkeypatch, tmp_path, result: att.AttachmentDownload, capture_client=None):
     """Drive `competition download` for one challenge with a canned download result."""
     monkeypatch.setattr(
         "vulnclaw.platforms.bootstrap.ensure_adapters", lambda *a, **k: None
@@ -57,6 +58,10 @@ def _run_batch(monkeypatch, tmp_path, result: att.AttachmentDownload):
     )
     monkeypatch.setattr(att, "download_attachment", lambda *a, **k: result)
     monkeypatch.setenv("VULNCLAW_WORK_DIR", str(tmp_path))
+    if capture_client is not None:
+        # The per-attachment download is faked, so the client is only constructed --
+        # enough to inspect the TLS policy it was built with.
+        monkeypatch.setattr(httpx, "Client", capture_client)
 
     printed: list[str] = []
     monkeypatch.setattr(main.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else ""))
@@ -109,3 +114,36 @@ class TestBatchDownloadOutcomes:
         assert "[warn]" in out
         assert "[fail]" not in out
         assert "1 ok, 0 failed" in out
+
+
+class TestTheDownloadClientVerifiesTLS:
+    """`verify=False` used to be here, accepting ANY certificate for the artifact.
+
+    The downloaded file is analysed and often executed (pwn/RE), and the declared size
+    is no defence because an on-path attacker picks it.
+    """
+
+    def test_verification_is_not_disabled(self, monkeypatch, tmp_path):
+        captured: dict = {}
+
+        class _CapturingClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        _run_batch(
+            monkeypatch,
+            tmp_path,
+            att.AttachmentDownload(name="a.zip", url="https://h/a.zip"),
+            capture_client=_CapturingClient,
+        )
+
+        # Asserted as "not disabled" rather than "== True": httpx verifies by default,
+        # so dropping the kwarg entirely would keep the same security property.
+        assert captured.get("verify", True) is not False
+        assert captured["verify"] is True

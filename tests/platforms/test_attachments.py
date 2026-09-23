@@ -10,6 +10,7 @@ CLI and therefore untested.
 from __future__ import annotations
 
 import os
+import ssl
 
 import pytest
 
@@ -162,3 +163,66 @@ class TestDownloadAttachment:
 
         assert result.ok
         assert target.is_dir()
+
+
+class TestCertificateFailuresAreActionable:
+    """Verification stays ON, so a cert failure must say how to proceed.
+
+    An attachment is a file this tool analyses and (for pwn/RE) executes, so the
+    legitimate escape hatch for an intercepting proxy is its CA in the trust store —
+    not an in-code `verify=False`. A bare SSLError would leave the operator with no
+    stated option except disabling verification.
+    """
+
+    @staticmethod
+    def _cert_error() -> ssl.SSLCertVerificationError:
+        return ssl.SSLCertVerificationError(
+            1, "certificate verify failed: unable to get local issuer"
+        )
+
+    def test_a_certificate_failure_explains_the_trust_store_route(self, tmp_path):
+        client = _FakeClient(boom=self._cert_error())
+
+        result = att.download_attachment(
+            client, Attachment(name="a.zip", url="https://h/a.zip"), str(tmp_path)
+        )
+
+        assert not result.ok
+        assert "certificate verification FAILED" in result.error
+        assert "SSL_CERT_FILE" in result.error
+        assert "instead of disabling verification" in result.error
+
+    def test_a_wrapped_certificate_failure_is_still_recognised(self, tmp_path):
+        """httpx raises its own type and chains the ssl error, so the chain is walked."""
+        plain = RuntimeError("connection failed")
+        plain.__cause__ = self._cert_error()
+        by_message = RuntimeError("ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED]")
+
+        for exc in (plain, by_message):
+            result = att.download_attachment(
+                _FakeClient(boom=exc),
+                Attachment(name="a.zip", url="https://h/a.zip"),
+                str(tmp_path),
+            )
+            assert "SSL_CERT_FILE" in result.error, type(exc).__name__
+
+    def test_an_ordinary_failure_does_not_get_the_tls_lecture(self, tmp_path):
+        """Otherwise a DNS blip would send the operator chasing certificates."""
+        result = att.download_attachment(
+            _FakeClient(boom=RuntimeError("connection reset")),
+            Attachment(name="a.zip", url="https://h/a.zip"),
+            str(tmp_path),
+        )
+
+        assert "connection reset" in result.error
+        assert "SSL_CERT_FILE" not in result.error
+        assert "certificate verification" not in result.error
+
+    def test_an_http_error_does_not_get_it_either(self, tmp_path):
+        result = att.download_attachment(
+            _FakeClient(_FakeResponse(500, b"")),
+            Attachment(name="a.zip", url="https://h/a.zip"),
+            str(tmp_path),
+        )
+
+        assert result.error == "HTTP 500"
