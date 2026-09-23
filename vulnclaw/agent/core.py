@@ -52,7 +52,7 @@ from vulnclaw.agent.system_prompt import build_dynamic_system_prompt
 from vulnclaw.agent.tool_call_manager import safe_parse_tool_args
 from vulnclaw.config.schema import VulnClawConfig, resolve_engine
 from vulnclaw.config.settings import make_openai_client
-from vulnclaw.gcs_platform.gateway_proxy import is_gateway_url
+from vulnclaw.utils.gateway_proxy import is_gateway_url
 from vulnclaw.i18n import _
 from vulnclaw.kb.experience import ExperienceStore
 from vulnclaw.target_state.store import save_target_state
@@ -361,7 +361,7 @@ class AgentCore:
                     # The DASCTF gateway treats the bare URL as the complete
                     # endpoint, so route chat.completions through a local proxy
                     # that strips the SDK's "/chat/completions" suffix.
-                    from vulnclaw.gcs_platform.gateway_proxy import (
+                    from vulnclaw.utils.gateway_proxy import (
                         ensure_gateway_proxy_running,
                     )
 

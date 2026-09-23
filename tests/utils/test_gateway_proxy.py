@@ -3,7 +3,7 @@ import threading
 
 import httpx
 
-from vulnclaw.gcs_platform.gateway_proxy import (
+from vulnclaw.utils.gateway_proxy import (
     ensure_gateway_proxy_running,
     is_gateway_url,
 )
@@ -146,7 +146,7 @@ def test_proxy_error_body_does_not_leak_the_gateway_token(monkeypatch):
     httpx puts the request URL into most exception messages, and the real
     upstream is ``https://llm-gateway.dasctf.com/llm-gateway/proxy/e/<token>``.
     """
-    from vulnclaw.gcs_platform import gateway_proxy as gp
+    from vulnclaw.utils import gateway_proxy as gp
 
     token = "SUPERSECRETTOKEN123456"
     upstream = f"https://llm-gateway.dasctf.com/llm-gateway/proxy/e/{token}"

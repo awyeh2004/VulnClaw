@@ -20,7 +20,7 @@ import pytest
 
 from vulnclaw.ctf_platform import client as ctf2_client
 from vulnclaw.gcs_platform import client as gcs_client
-from vulnclaw.gcs_platform import gateway_proxy
+from vulnclaw.utils import gateway_proxy
 
 
 def _recorder(module, payload, monkeypatch):

@@ -726,9 +726,12 @@ class GCSPLatformConfig(BaseModel):
     # gcs_platform/client.py stay usable; set this true to bring the tools back
     # (e.g. if a future competition actually runs on GCS).
     #
-    # NOTE: unrelated to gcs_platform/gateway_proxy.py, which serves the
-    # competition LLM gateway and is wired into core.py's LLM initialisation.
-    # That module must stay regardless of this flag.
+    # NOTE: no longer related to this package at all. The LLM gateway proxy that
+    # used to live at gcs_platform/gateway_proxy.py is now
+    # vulnclaw/utils/gateway_proxy.py -- it serves the competition LLM gateway,
+    # is wired into core.py's LLM initialisation, and must stay regardless of
+    # this flag. See design decision 6 / invariant I7 in
+    # PLATFORM-ADAPTER-DESIGN.md.
     tools_enabled: bool = Field(
         default=False,
         description=(
