@@ -1464,7 +1464,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     # is no tool name that could express the wrong platform (the old
     # ctf2_submit_flag / gcs_submit_flag pair is what let an agent pick wrongly).
     if tool_name in _PLATFORM_TOOL_NAMES:
-        return await dispatch_platform_tool(tool_name, args)
+        return await dispatch_platform_tool(tool_name, args, agent=agent)
 
     if tool_name in CTF_TOOL_NAMES:
         return await dispatch_ctf2_tool(tool_name, args)

@@ -421,7 +421,65 @@ async def _handle_read(args: dict[str, Any]) -> str:
         return f"[platform] reading {ref.token()} failed: {type(exc).__name__}: {exc}"
 
 
-async def _handle_start_env(args: dict[str, Any]) -> str:
+def _register_env_scope(agent: Any, info: Any) -> None:
+    """Authorise the endpoints the platform just handed us, inside the run's scope.
+
+    Measured defect (2026-09-23, CTF2 practice `[Weblogic]CVE-2017-10271`): the
+    run's allowed scope had been derived from the task text, where the only URL
+    is the vulhub ``github.com`` link in the challenge description, so it read
+    ``[github.com]``. ``platform_start_env`` then provisioned the real target on
+    the platform's own host and the scope gate refused it:
+
+        [constraint_violation] Host direct-ctf2.dasctf.com is outside allowed
+        scope [github.com] for target direct-ctf2.dasctf.com
+
+    Both ``shell_command`` and ``python_execute`` were blocked, and the agent —
+    correctly refusing to bypass the control — spent the whole run asking the
+    operator to authorise the target it had been told to attack. Registering the
+    endpoint here is the right place: this is the only code that learns the
+    authorised host from the platform itself rather than by guessing from prose.
+
+    Deliberately narrow: an empty constraint set means nothing is being enforced,
+    so there is nothing to authorise and we must not create enforcement (that
+    would start blocking hosts a run could previously reach, e.g. fetching the
+    public writeup referenced by the description). Only an already-enforcing run
+    gets the endpoint added, and the port is added only when the run constrains
+    ports. Never raises: scope bookkeeping must not break a tool call.
+    """
+    try:
+        constraints = getattr(
+            getattr(agent, "session_state", None), "task_constraints", None
+        )
+        if constraints is None:
+            return
+        if getattr(info, "state", "") != base.STATE_RUNNING:
+            return  # an incomplete payload has no endpoint to authorise yet
+        if constraints.is_empty():
+            return
+        hosts = list(getattr(constraints, "allowed_hosts", []) or [])
+        ports = list(getattr(constraints, "allowed_ports", []) or [])
+        added = False
+        for endpoint in getattr(info, "endpoints", ()) or ():
+            host = str(getattr(endpoint, "host", "") or "").strip().lower()
+            if host and host not in hosts:
+                hosts.append(host)
+                added = True
+            port = getattr(endpoint, "port", None)
+            if ports and port:
+                port = int(port)
+                if port not in ports:
+                    ports.append(port)
+                    added = True
+        if not added:
+            return
+        constraints.allowed_hosts = hosts
+        if ports:
+            constraints.allowed_ports = ports
+    except Exception:  # noqa: BLE001 - scope bookkeeping must never fail a tool call
+        return
+
+
+async def _handle_start_env(args: dict[str, Any], agent: Any = None) -> str:
     resolved = _resolve(args)
     if isinstance(resolved, str):
         return resolved
@@ -433,10 +491,11 @@ async def _handle_start_env(args: dict[str, Any]) -> str:
             f"[platform] starting an environment for {ref.token()} failed: "
             f"{type(exc).__name__}: {exc}"
         )
+    _register_env_scope(agent, info)
     return render_env_info(info)
 
 
-async def _handle_read_env(args: dict[str, Any]) -> str:
+async def _handle_read_env(args: dict[str, Any], agent: Any = None) -> str:
     resolved = _resolve(args)
     if isinstance(resolved, str):
         return resolved
@@ -453,6 +512,7 @@ async def _handle_read_env(args: dict[str, Any]) -> str:
             f"[platform] {ref.token()} has no environment concept on this platform; "
             "attack the static target from the challenge description."
         )
+    _register_env_scope(agent, info)
     return render_env_info(info)
 
 
@@ -601,12 +661,22 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] = {
 PLATFORM_TOOL_NAMES: frozenset[str] = frozenset(_HANDLERS)
 
 
-async def dispatch_platform_tool(tool_name: str, args: dict[str, Any]) -> str:
-    """Route a platform tool call to its handler."""
+async def dispatch_platform_tool(
+    tool_name: str, args: dict[str, Any], *, agent: Any = None
+) -> str:
+    """Route a platform tool call to its handler.
+
+    ``agent`` is keyword-only and optional so the pure tool-face tests can keep
+    calling ``dispatch_platform_tool(name, args)``; the env handlers use it to
+    authorise the endpoint the platform just provisioned (see
+    :func:`_register_env_scope`).
+    """
     from vulnclaw.platforms.bootstrap import ensure_adapters
 
     ensure_adapters()
     handler = _HANDLERS.get(tool_name)
     if handler is None:
         return f"[platform] unknown platform tool: {tool_name}"
+    if tool_name in {"platform_start_env", "platform_read_env"}:
+        return await handler(args, agent)
     return await handler(args)
