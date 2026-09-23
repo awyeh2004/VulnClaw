@@ -102,3 +102,40 @@ def test_the_helper_unwraps_and_passes_through():
     assert main._cli_value(5, 99) == 5
     assert main._cli_value("x", 99) == "x"
     assert main._cli_value(None, 99) is None
+
+
+# ── the goal text must name its ref exactly once ──────────────────────────
+#
+# Every entry point writes the ref into the goal it hands the agent. A ref is long
+# (an 87-char CTF2 token, say) and the agent only has to *echo* it, so writing it
+# into each `platform_*(ref=...)` example as well was pure repeated cost -- and two
+# spellings of one ref is how a model starts inventing a third. Commit 897ff65
+# deduplicated `ctf2`/`gcs`; `competition solve` still repeated it 2-4x until
+# tests/cli/test_competition_solve_ref.py caught it. These guard the other two.
+
+
+def test_ctf2_goal_names_the_ref_exactly_once(captured_solve, monkeypatch):
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "stack", "category": "pwn", "has_container": True}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id")
+
+    token = "ctf2:practice:practice-id:challenge-id"
+    goal = captured_solve["goal"]
+    assert goal.count(token) == 1
+    assert f"REF: {token}" in goal
+    assert f'ref="{token}"' not in goal
+
+
+def test_gcs_goal_names_the_ref_exactly_once(captured_solve, monkeypatch):
+    async def fake_exercise(exercise_id):
+        return {"data": {"name": "some exercise", "isNeedInit": True}}
+
+    monkeypatch.setattr(main, "gcs_exercise", fake_exercise)
+    main.gcs(10662)
+
+    goal = captured_solve["goal"]
+    assert goal.count("gcs:exercise:10662") == 1
+    assert "REF: gcs:exercise:10662" in goal
+    assert 'ref="gcs:exercise:10662"' not in goal
