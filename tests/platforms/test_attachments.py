@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import ssl
+from pathlib import Path
 
 import pytest
 
@@ -142,16 +143,90 @@ class TestDownloadAttachment:
         assert not result.ok
         assert "no URL" in result.error
 
-    def test_size_mismatch_is_flagged_but_the_file_is_kept(self, tmp_path):
-        """A truncated body is the failure that silently breaks analysis later."""
+    def test_a_size_mismatch_discards_the_partial_and_reports_no_path(self, tmp_path):
+        """A truncated artifact must not sit at the canonical path.
+
+        This used to keep the partial file ("the local copy may be truncated") on the
+        strength of "the file was written, so it is worth keeping". Audit finding C1:
+        the module's own docstring says these files get analysed and EXECUTED, so a
+        half-downloaded binary at the canonical path is worse than no file -- and
+        because the write was truncating, it had already destroyed the previous good
+        copy. Now the download lands in a `.part` file that is removed on any failure.
+        """
         client = _FakeClient(_FakeResponse(200, b"short"))
         attachment = Attachment(name="a.zip", url="https://h/a.zip", size=9999)
 
         result = att.download_attachment(client, attachment, str(tmp_path))
 
-        assert result.path, "the partial file must be kept for inspection"
+        assert result.path == "", "a failed download must not hand over a usable path"
         assert "size mismatch" in result.error
+        assert "discarded" in result.error
         assert not result.ok
+        assert os.listdir(tmp_path) == [], "no partial file may be left behind"
+
+
+class TestAFailedDownloadCannotDamageAnExistingCopy:
+    """C1's other half: the write used to be truncating (`open(local, "wb")`)."""
+
+    def test_a_transport_failure_leaves_the_previous_good_file_intact(self, tmp_path):
+        good = tmp_path / "a.zip"
+        good.write_bytes(b"PK\x03\x04 the real, complete archive")
+        client = _FakeClient(boom=RuntimeError("connection reset"))
+
+        result = att.download_attachment(
+            client, Attachment(name="a.zip", url="https://h/a.zip"), str(tmp_path)
+        )
+
+        assert not result.ok
+        assert good.read_bytes() == b"PK\x03\x04 the real, complete archive"
+        assert os.listdir(tmp_path) == ["a.zip"], "the .part file must be cleaned up"
+
+    def test_a_size_mismatch_leaves_the_previous_good_file_intact(self, tmp_path):
+        good = tmp_path / "a.zip"
+        good.write_bytes(b"PK\x03\x04 complete")
+        client = _FakeClient(_FakeResponse(200, b"short"))
+
+        result = att.download_attachment(
+            client, Attachment(name="a.zip", url="https://h/a.zip", size=9999), str(tmp_path)
+        )
+
+        assert not result.ok
+        assert good.read_bytes() == b"PK\x03\x04 complete"
+        assert os.listdir(tmp_path) == ["a.zip"]
+
+    def test_a_successful_download_replaces_the_previous_copy(self, tmp_path):
+        good = tmp_path / "a.zip"
+        good.write_bytes(b"OLD")
+        body = b"PK\x03\x04 NEW"
+        client = _FakeClient(_FakeResponse(200, body))
+
+        result = att.download_attachment(
+            client,
+            Attachment(name="a.zip", url="https://h/a.zip", size=len(body)),
+            str(tmp_path),
+        )
+
+        assert result.ok
+        assert good.read_bytes() == body
+        assert os.listdir(tmp_path) == ["a.zip"], "the .part file must not linger"
+
+
+class TestTheWorkDirectoryIsPlatformNeutral:
+    """Audit finding D1: `%USERPROFILE%` + expandvars is a Windows-only expression."""
+
+    def test_it_does_not_use_a_windows_only_variable_syntax(self):
+        assert "%USERPROFILE%" not in att.work_dir()
+        assert "USERPROFILE" not in att.work_dir()
+
+    def test_it_defaults_under_the_home_directory(self, monkeypatch):
+        monkeypatch.delenv("VULNCLAW_WORK_DIR", raising=False)
+        home = str(Path.home())
+        assert att.work_dir() == str(Path(home) / "vulnclaw" / "work")
+
+    def test_the_override_wins(self, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_WORK_DIR", "/tmp/somewhere")
+        assert att.work_dir() == "/tmp/somewhere"
+        assert att.attachment_dir() == os.path.join("/tmp/somewhere", "attachments")
 
     def test_creates_the_destination_directory(self, tmp_path):
         target = tmp_path / "nested" / "attachments"

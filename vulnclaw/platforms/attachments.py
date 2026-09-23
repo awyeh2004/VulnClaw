@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import ssl
 from dataclasses import dataclass
+from pathlib import Path
 
 from vulnclaw.platforms import base
 
@@ -144,6 +145,13 @@ def download_attachment(
 
     stem = f"{safe_name(challenge_name)}_" if challenge_name else ""
     local = os.path.join(dest_dir, f"{stem}{safe_name(label)}")
+    # Write to a sibling temp file and only `os.replace` on success. A direct
+    # `open(local, "wb")` is truncating: a timeout or a dropped connection on a re-run
+    # destroyed the PREVIOUS good copy and left a partial one at the canonical path --
+    # the exact path whose contents this docstring says get analysed and executed.
+    # `atomic_write` in vulnclaw/utils exists for the same reason; the size check
+    # already lives here, so the temp file is the missing half.
+    partial = f"{local}.part"
     os.makedirs(dest_dir, exist_ok=True)
 
     written = 0
@@ -153,11 +161,12 @@ def download_attachment(
                 return AttachmentDownload(
                     name=label, url=url, error=f"HTTP {response.status_code}"
                 )
-            with open(local, "wb") as handle:
+            with open(partial, "wb") as handle:
                 for chunk in response.iter_bytes(CHUNK):
                     handle.write(chunk)
                     written += len(chunk)
     except Exception as exc:  # noqa: BLE001 - reported, not raised
+        _discard_partial(partial)
         return AttachmentDownload(name=label, url=url, error=_describe_download_error(exc))
 
     # Verify what the platform told us, when it told us anything. CTF2 publishes no
@@ -165,17 +174,55 @@ def download_attachment(
     # body, which is the failure that silently breaks a pwn/RE analysis later.
     declared_size = getattr(attachment, "size", None)
     if declared_size is not None and written != declared_size:
+        # A truncated artifact is worthless for analysis, and leaving it at the
+        # canonical path is how a later step ends up reading half a binary. Discard it
+        # and report NO path, so callers cannot treat it as usable.
+        _discard_partial(partial)
         return AttachmentDownload(
             name=label,
             url=url,
-            path=local,
             size=written,
             error=(
                 f"size mismatch (declared {declared_size}, got {written}) -- "
-                f"the local copy may be truncated"
+                f"discarded the partial file; re-run to fetch it again"
             ),
         )
+
+    try:
+        os.replace(partial, local)
+    except OSError as exc:  # pragma: no cover - same-dir rename, but never fatal
+        _discard_partial(partial)
+        return AttachmentDownload(
+            name=label, url=url, error=f"could not move the download into place: {exc}"
+        )
     return AttachmentDownload(name=label, url=url, path=local, size=written)
+
+
+def _discard_partial(path: str) -> None:
+    """Remove a temp download, ignoring the case where it was never created."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def work_dir() -> str:
+    """The work directory: ``$VULNCLAW_WORK_DIR`` or ``~/vulnclaw/work``.
+
+    Platform-neutral on purpose. This used to be
+    ``os.path.expandvars(r"%USERPROFILE%\\vulnclaw\\work")``, copied from the CLI: on
+    Windows that expands, on POSIX ``%VAR%`` is not expansion syntax, so it silently
+    became a LITERAL relative path containing backslashes and the downloaded artifact
+    landed somewhere that merely looks like a broken path. It only appeared to work
+    because every machine it ran on was Windows.
+
+    ``Path.home()``/``expanduser`` is what the rest of the repo uses
+    (``config/settings.py``, ``web/auth.py``, ``agent/tool_registry.py``).
+    """
+    override = os.environ.get("VULNCLAW_WORK_DIR")
+    if override:
+        return override
+    return str(Path.home() / "vulnclaw" / "work")
 
 
 def attachment_dir() -> str:
@@ -184,10 +231,7 @@ def attachment_dir() -> str:
     Same location the batch command uses, so a pre-downloaded file is found by the
     same analysis steps a match-start batch download would have produced.
     """
-    work = os.environ.get("VULNCLAW_WORK_DIR") or os.path.expandvars(
-        r"%USERPROFILE%\vulnclaw\work"
-    )
-    return os.path.join(work, "attachments")
+    return os.path.join(work_dir(), "attachments")
 
 
 __all__ = [
@@ -196,4 +240,5 @@ __all__ = [
     "download_attachment",
     "resolve_url",
     "safe_name",
+    "work_dir",
 ]
