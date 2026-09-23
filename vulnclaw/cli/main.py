@@ -1982,6 +1982,14 @@ def ctf2(
     # only ever echoes it back, which is what makes picking the wrong platform
     # inexpressible.
     ref_token = f"ctf2:practice:{practice_id}:{challenge_id}"
+    # Match-start insurance, and the reason `competition.predownload_attachments`
+    # finally means something. Best effort: on failure the agent still has the URLs.
+    from vulnclaw.platforms.ctf2 import extract_attachments as _ctf2_attachments
+
+    _cfg = load_config()
+    predownloaded = _predownload_challenge_attachments(
+        _cfg, str(name), _ctf2_attachments(chall_data), _adapter_for_ref(ref_token)
+    )
     goal = (
         f"Solve CTF2 challenge '{name}' (category {category}, difficulty "
         f"{difficulty}) on practice {practice_id}.\n"
@@ -2001,7 +2009,15 @@ def ctf2(
         f"file host IS expected -- take the URLs from platform_read and fetch them. "
         f"What is out of bounds is attacking the platform itself: no scanning or "
         f"probing ctf2*.dasctf.com endpoints, and no guessing at its API. "
-        f"Solve from the description and those attachments "
+        + (
+            # Already fetched for the agent, so it does not need the file host at all.
+            "These are ALREADY DOWNLOADED to local paths, use them directly:\n"
+            + "\n".join(f"  {path}" for path in predownloaded)
+            + "\n"
+            if predownloaded
+            else ""
+        )
+        + f"Solve from the description and those attachments "
         + (
             "and, if a dynamic target is required, start it with platform_start_env, "
             "poll platform_read_env until it reports the target as usable, and "
@@ -2363,12 +2379,16 @@ def _competition_download(cfg: Any) -> None:
 
     import httpx
 
-    def _safe_name(text: str) -> str:
-        cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(text))
-        return cleaned.strip("._") or "attachment"
+    # Same downloader the per-challenge pre-download uses
+    # (vulnclaw/platforms/attachments.py). Extracted for exactly this reason: the two
+    # paths must not drift into "the batch fetches X, the solve fetches Y".
+    from vulnclaw.platforms.attachments import download_attachment
 
     ok = 0
     fail = 0
+    # NOTE: verify=False here is pre-existing and left alone deliberately, to avoid a
+    # behavior change in a path that works; the newer pre-download path verifies.
+    # Revisit separately -- the file host serves a valid DigiCert chain.
     with httpx.Client(timeout=60, verify=False) as client:
         for token, listed in rows:
             try:
@@ -2385,49 +2405,26 @@ def _competition_download(cfg: Any) -> None:
                 continue
             for attachment in challenge.attachments:
                 label = f"{challenge.name}/{attachment.name}"
-                url = attachment.url
-                if not url:
-                    fail += 1
-                    console.print(f"    [fail] {label}: attachment has no URL")
-                    continue
-                if url.startswith("/"):
-                    base = getattr(adapter, "base_url", None)
-                    base = base() if callable(base) else ""
-                    if not base:
-                        fail += 1
-                        console.print(
-                            f"    [fail] {label}: relative URL {url!r} and the "
-                            f"platform exposes no base URL"
-                        )
-                        continue
-                    url = f"{base.rstrip('/')}{url}"
-                local = os.path.join(
-                    attach_dir, f"{_safe_name(challenge.name)}_{_safe_name(attachment.name)}"
+                result = download_attachment(
+                    client,
+                    attachment,
+                    attach_dir,
+                    challenge_name=challenge.name,
+                    adapter=adapter,
                 )
-                try:
-                    written = 0
-                    with client.stream("GET", url, follow_redirects=True) as resp:
-                        if resp.status_code != 200:
-                            fail += 1
-                            console.print(f"    [fail] {label}: HTTP {resp.status_code}")
-                            continue
-                        with open(local, "wb") as fh:
-                            for chunk in resp.iter_bytes(8192):
-                                fh.write(chunk)
-                                written += len(chunk)
-                except Exception as exc:
+                # NOTE the ordering: a size mismatch sets `error` AND leaves `path`,
+                # so `not result.ok` alone would file it as a failure. The original
+                # inline version warned and still counted it as ok -- the file was
+                # written and is worth keeping for inspection -- and that distinction
+                # is preserved here.
+                if result.error and not result.path:
                     fail += 1
-                    console.print(f"    [fail] {label}: {type(exc).__name__}: {str(exc)[:100]}")
+                    console.print(f"    [fail] {label}: {result.error}")
                     continue
-                # Verify what the platform told us, when it told us anything.
-                # CTF2 publishes no md5 (verified), so size is the available check.
-                if attachment.size is not None and written != attachment.size:
-                    console.print(
-                        f"    [warn] {label}: size mismatch (declared {attachment.size}, "
-                        f"got {written}) -- the local copy may be truncated"
-                    )
+                if result.error:
+                    console.print(f"    [warn] {label}: {result.error}")
                 ok += 1
-                console.print(f"    [ok]   {label} -> {os.path.basename(local)}")
+                console.print(f"    [ok]   {label} -> {os.path.basename(result.path)}")
     console.print(f"\n[*] Download complete: {ok} ok, {fail} failed/skipped.")
     if fail:
         console.print(
@@ -2435,6 +2432,85 @@ def _competition_download(cfg: Any) -> None:
             "closing or the schema changed. The ones downloaded are already a "
             "local insurance for analysis."
         )
+
+
+def _adapter_for_ref(ref_token: str) -> Any:
+    """The adapter owning a ref token, or None when it cannot be resolved.
+
+    None is a valid answer here: the pre-download is insurance, and a platform that
+    cannot be resolved should leave the solve to do what it did before rather than
+    failing it.
+    """
+    try:
+        from vulnclaw.platforms import registry
+        from vulnclaw.platforms.bootstrap import ensure_adapters
+        from vulnclaw.platforms.refs import split_token
+
+        ensure_adapters()
+        return registry.adapter_for(ref_token)
+    except Exception:  # noqa: BLE001 - insurance must never break a solve
+        return None
+
+
+def _predownload_challenge_attachments(
+    cfg: Any,
+    challenge_name: str,
+    attachments: Any,
+    adapter: Any,
+) -> list[str]:
+    """Fetch a challenge's attachments before the agent starts. Best effort.
+
+    This is what makes ``competition.predownload_attachments`` real. That field was
+    declared, documented as match-start insurance and defaulted to True while nothing
+    read it; the capability existed only inside the batch ``competition download``
+    command. For a RE/pwn challenge the attachment *is* the challenge, so this is
+    worth having: the agent gets a local path instead of depending on the platform's
+    file host being reachable at solve time.
+
+    Returns the local paths that are actually usable. Never raises and never aborts a
+    solve: a failed pre-download must degrade to "the agent fetches it itself", which
+    is the behavior that worked before this existed.
+    """
+    if not attachments:
+        return []
+    if not bool(getattr(cfg.competition, "predownload_attachments", False)):
+        return []
+
+    import httpx
+
+    from vulnclaw.platforms.attachments import attachment_dir, download_attachment
+
+    dest = attachment_dir()
+    paths: list[str] = []
+    try:
+        # verify stays ON here, unlike the older batch command's client.
+        # ctf2-files.dasctf.com serves a real DigiCert chain (confirmed by fetching an
+        # attachment with default verification), so disabling it would be gratuitous.
+        with httpx.Client(timeout=60.0) as client:
+            results = [
+                download_attachment(
+                    client,
+                    attachment,
+                    dest,
+                    challenge_name=challenge_name,
+                    adapter=adapter,
+                )
+                for attachment in attachments
+            ]
+    except Exception as exc:  # noqa: BLE001 - insurance must never break a solve
+        err_console.print(
+            f"[!] attachment pre-download failed ({type(exc).__name__}: {exc}); "
+            f"the agent can still fetch it from the platform"
+        )
+        return []
+
+    for result in results:
+        if result.ok:
+            paths.append(result.path)
+            console.print(f"[*] attachment ready: {os.path.basename(result.path)}")
+        else:
+            console.print(f"[!] attachment {result.name}: {result.error}")
+    return paths
 
 
 def _competition_solve(cfg: Any, ref: str) -> None:
@@ -2478,6 +2554,12 @@ def _competition_solve(cfg: Any, ref: str) -> None:
         f"[*] Competition solve: {challenge.name} ({token}) | "
         f"stall guard after {stall} unproductive turns"
     )
+    # Same match-start insurance as `vulnclaw ctf2`: see
+    # _predownload_challenge_attachments. Presented as local paths so the agent does
+    # not need the platform's file host at all.
+    predownloaded = _predownload_challenge_attachments(
+        cfg, str(challenge.name), challenge.attachments, adapter
+    )
     goal = (
         f"Solve {challenge.name} (category {challenge.category or 'unknown'}, "
         f"difficulty {challenge.difficulty or 'unknown'}).\n"
@@ -2492,7 +2574,14 @@ def _competition_solve(cfg: Any, ref: str) -> None:
             else "This challenge needs no running environment. "
         )
         + "Submit the flag with platform_submit once it is known.\n"
-        f"Challenge description follows:\n{challenge.description}"
+        + (
+            "Its attachments are ALREADY DOWNLOADED to local paths, use them directly:\n"
+            + "\n".join(f"  {path}" for path in predownloaded)
+            + "\n"
+            if predownloaded
+            else ""
+        )
+        + f"Challenge description follows:\n{challenge.description}"
     )
     # Every optional flag is passed explicitly: solve() is a Typer command, so a
     # direct Python call leaves un-passed parameters as truthy OptionInfo sentinels.
