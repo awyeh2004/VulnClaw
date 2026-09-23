@@ -23,6 +23,7 @@ import pytest
 
 from vulnclaw.config import settings
 from vulnclaw.ctf_platform import client as ctf2
+from tests.platforms import ctf2_payloads
 
 ENV_CANONICAL = "VULNCLAW_COMPETITION__ALLOW_FLAG_SUBMISSION"
 ENV_SINGLE_UNDERSCORE = "VULNCLAW_COMPETITION_ALLOW_FLAG_SUBMISSION"
@@ -87,15 +88,11 @@ def _response(status: int, payload) -> httpx.Response:
 
 
 class TestCaptchaIsNotReportedAsARateLimit:
-    CAPTCHA_429 = {
-        "data": {
-            "risk_action": "challenge",
-            "risk_challenge": {
-                "id": "7e78d670-24ba-4316-9f66-e33cb90b97f2",
-                "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAABACAIAAAA8rMpq",
-            },
-        }
-    }
+    # The recorded live shape, NOT a local copy: the response that the platform
+    # actually served for a submit. Kept in tests/platforms/ctf2_payloads.py so the
+    # submit path has one source of truth for its payloads (the four field names that
+    # were once wrong came from exactly this kind of hand-copied sample).
+    CAPTCHA_429 = ctf2_payloads.SUBMIT_RISK_CONTROL_PAYLOAD
 
     def test_captcha_is_named_as_human_verification(self):
         with pytest.raises(RuntimeError) as excinfo:
@@ -146,13 +143,16 @@ class TestCaptchaIsNotReportedAsARateLimit:
         assert ctf2._raise_for_status(_response(200, {"success": True})) is None
 
     def test_the_invalid_request_hint_is_preserved(self):
-        """The Open API says which field it wants; do not swallow that."""
-        payload = {
-            "error": {"code": "INVALID_REQUEST", "params": {"confirmation": True}},
-            "success": False,
-        }
+        """The Open API says which field it wants; do not swallow that.
+
+        Uses the recorded response rather than a hand-written one: this hint is the
+        only actionable thing the platform says about a rejected submit, and it came
+        from omitting `confirmation`.
+        """
         with pytest.raises(RuntimeError) as excinfo:
-            ctf2._raise_for_status(_response(400, payload))
+            ctf2._raise_for_status(
+                _response(400, ctf2_payloads.SUBMIT_INVALID_REQUEST_HINT_PAYLOAD)
+            )
 
         message = str(excinfo.value)
         assert "INVALID_REQUEST" in message

@@ -258,3 +258,91 @@ OPEN_API_ROUTE_OUTCOMES = {
     "/competitions/": 200,
     "/submissions/": 200,
 }
+
+
+# ── fourth provenance block: the SUBMIT path, recorded live on 2026-09-23 ─────
+#
+# The one IRREVERSIBLE action had the least recorded evidence of anything in this
+# file: its request shape was *inferred* (`{"flag": ..., "confirmation": true}`), and
+# the four platform *responses* below had never been captured as fixtures -- they
+# existed only as hand-copied dictionaries inside two test files. That is the same
+# exposure that produced four wrong field names earlier (hasSolved/is_solved,
+# score/points, files[].name, files[].size), so the responses are recorded verbatim
+# here and both test files now read from this block instead of keeping copies.
+#
+# Provenance: `platform_submit` / direct POSTs against
+# practice b9bbb32f-f186-458f-b90b-12440c0f6aea. ACCEPTED came from the
+# `不一样的flag` solve (challenge 40982610-b3f3-4635-adee-2d4618a97f12); the three
+# rejections were measured on `[极客大挑战 2019]BabySQL`
+# (30c90c3e-2227-4263-8218-9494728f4c38), whose submission is refused no matter what
+# -- including by the platform's own front end.
+
+#: Accepted. Verbatim from platform_submit on `不一样的flag` (+1 point, is_solved).
+SUBMIT_ACCEPTED_PAYLOAD: dict = {
+    "data": {
+        "accepted": True,
+        "attempt": 1,
+        "earned_points": 1,
+        "is_solved": True,
+        "points": 1,
+        "solved_sub_flag_count": 0,
+        "submission_id": "06b08738-1b80-4695-b04f-e8ff6f669828",
+        "total_sub_flag_count": 1,
+    },
+    "success": True,
+}
+
+#: Open API 400 as sent BY US (with `confirmation: true`). `params` is null: the
+#: request was still invalid for a reason the platform did not name.
+SUBMIT_INVALID_REQUEST_PAYLOAD: dict = {
+    "error": {
+        "code": "INVALID_REQUEST",
+        "key": "errors.common.invalid_request",
+        "params": None,
+    },
+    "success": False,
+}
+
+#: Same route, same flag, `confirmation` OMITTED -- and the platform names it. This
+#: is how the required field was discovered, and it confirms our body is not missing
+#: anything the platform is willing to tell us about.
+SUBMIT_INVALID_REQUEST_HINT_PAYLOAD: dict = {
+    "error": {
+        "code": "INVALID_REQUEST",
+        "key": "errors.common.invalid_request",
+        "params": {"confirmation": True},
+    },
+    "success": False,
+}
+
+#: HTTP 429 from the SESSION API with `risk_action: challenge` -- i.e. a CAPTCHA, a
+#: human-verification gate on the scored action. NOTE the body has no top-level
+#: `error`, which is why a naive reader reported it as a plain "429 Too Many
+#: Requests" (the one reading that invites a retry loop); `_risk_control_note` in
+#: ctf_platform/client.py now names it.
+#:
+#: The image is TRUNCATED ON PURPOSE -- it is a base64 PNG of a captcha, so keeping
+#: the full blob in the repository would be pointless bulk. The asserted property is
+#: the SHAPE (`data.risk_challenge.image` is a data: URL), not the pixels.
+SUBMIT_RISK_CONTROL_PAYLOAD: dict = {
+    "data": {
+        "risk_action": "challenge",
+        "risk_challenge": {
+            "id": "7e78d670-24ba-4316-9f66-e33cb90b97f2",
+            "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAABACAIAAAA8rMpq...<truncated>",
+        },
+    }
+}
+
+#: The session API has no `/challenges/<cid>/submit/` route; the real one is nested
+#: under `/practice/<pid>/...`. Recorded so a future "shortcut" route is recognised
+#: as a guess rather than treated as a platform change.
+SUBMIT_ROUTE_NOT_FOUND_PAYLOAD: dict = {
+    "error": {
+        "code": "NOT_FOUND",
+        "key": "errors.common.not_found",
+        "params": {"resource": "route"},
+    },
+    "success": False,
+}
+
