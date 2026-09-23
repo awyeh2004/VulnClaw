@@ -62,83 +62,147 @@ def detect_flag_claim(output: str) -> Optional[str]:
     return None
 
 
+# Markers that mean "the flag is verified / the challenge is solved".
+#
+# SINGLE SOURCE OF TRUTH, and it is a UNION of two lists that used to be maintained
+# separately: `detect_verification_success`'s own list, and a second inline list in
+# `update_ctf_state` OR-ed with it at its only call site. Measured drift between them:
+# "challenge solved" and "got the flag" existed ONLY in the inline list, while
+# "the flag is", "captured" and "成功破解" existed ONLY in the function's list. So the
+# function's real contribution was just its unique entries, and the two vocabularies
+# were silently diverging -- the same failure mode FLAG_PREFIX_PATTERNS had (its copy
+# in finding_parser had drifted to 3 of 17 prefixes).
+VERIFICATION_CLAIM_MARKERS: tuple[str, ...] = (
+    # Chinese
+    "验证成功",
+    "验证通过",
+    "已验证",
+    "复现成功",
+    "确认flag",
+    "flag正确",
+    "提交成功",
+    "flag 获取成功",
+    "flag获取成功",
+    "获取成功",
+    "找到flag",
+    "成功获取",
+    "获取了flag",
+    "拿到了flag",
+    "成功拿到",
+    "成功找到",
+    "解题完成",
+    "解题成功",
+    "成功破解",
+    "验证flag成功",
+    # English
+    "verified",
+    "confirmed",
+    "flag found",
+    "flag is",
+    "the flag is",
+    "captured",
+    "flag captured",
+    "flag verified",
+    "confirms the flag",
+    "verification successful",
+    "verification passed",
+    "flag confirmed",
+    "submission successful",
+    "flag acquired",
+    "successfully obtained",
+    "solved the challenge",
+    "challenge solved",
+    "got the flag",
+    "obtained the flag",
+)
+
+# Negation cues. A marker match only counts as a success claim when it is NOT negated
+# on either side, because a plain substring test gets the meaning EXACTLY backwards on
+# text that denies success. Measured false positives before this existed:
+#   "无法验证成功"            -> contains "验证成功"
+#   "尚未验证成功"            -> contains "验证成功"
+#   "not confirmed"          -> contains "confirmed"
+#   "the flag is not the correct one" -> contains "the flag is"
+# `update_ctf_state` turns this signal into `flag_verified`, which stops the run after
+# two post-flag rounds -- so a denial could end a run the model itself said had failed.
+_NEGATION_BEFORE = (
+    "未",
+    "没有",
+    "没能",
+    "未能",
+    "尚未",
+    "无法",
+    "不能",
+    "并非",
+    "不是",
+    "not ",
+    "never ",
+    "no ",
+    "cannot",
+    "can't",
+    "couldn't",
+    "didn't",
+    "wasn't",
+    "isn't",
+    "unable",
+    "failed to",
+    "without",
+)
+_NEGATION_AFTER = (
+    "不对",
+    "不正确",
+    "不是",
+    "失败",
+    "not ",
+    "is not",
+    "was not",
+    "isn't",
+    "wasn't",
+    "never",
+    "incorrect",
+    "wrong",
+)
+# How far either side to look. Deliberately short: a cue in the NEXT sentence must not
+# suppress a real claim, and the cues that matter sit immediately next to the marker.
+_LOOK_BEHIND = 24
+_LOOK_AHEAD = 12
+
+
+def _is_negated(text: str, start: int, end: int) -> bool:
+    """Whether a marker occurrence at ``text[start:end]`` is negated nearby."""
+    before = text[max(0, start - _LOOK_BEHIND):start]
+    after = text[end:end + _LOOK_AHEAD]
+    return any(cue in before for cue in _NEGATION_BEFORE) or any(
+        cue in after for cue in _NEGATION_AFTER
+    )
+
+
 def detect_verification_success(response_text: str) -> bool:
-    """Detect if the LLM explicitly claims successful flag verification."""
-    text = response_text.lower()
-    markers = [
-        "验证成功",
-        "验证通过",
-        "已验证",
-        "复现成功",
-        "确认flag",
-        "verified",
-        "confirmed",
-        "flag正确",
-        "提交成功",
-        "flag 获取成功",
-        "flag获取成功",
-        "获取成功",
-        "找到flag",
-        "flag found",
-        "成功获取",
-        "获取了flag",
-        "拿到了flag",
-        "成功拿到",
-        "成功找到",
-        "解题完成",
-        "解题成功",
-        "flag is",
-        "the flag is",
-        "captured",
-        "flag captured",
-        "成功破解",
-        "flag verified",
-        "confirms the flag",
-        "验证flag成功",
-    ]
-    return any(marker in text for marker in markers)
+    """Detect if the LLM explicitly claims successful flag verification.
+
+    Negation-aware: a marker inside a denial ("未验证成功", "not confirmed") does not
+    count. See ``_NEGATION_BEFORE``/``_NEGATION_AFTER``.
+    """
+    text = (response_text or "").lower()
+    for marker in VERIFICATION_CLAIM_MARKERS:
+        start = text.find(marker)
+        while start != -1:
+            end = start + len(marker)
+            if not _is_negated(text, start, end):
+                return True
+            start = text.find(marker, end)
+    return False
 
 
 def update_ctf_state(agent: AgentContext, response_text: str, result_should_continue: bool) -> bool:
     """Update flag claim/verification state and return should_continue."""
     if agent.runtime.claimed_flag and not agent.runtime.flag_verified:
-        verification_markers = [
-            "验证成功",
-            "验证通过",
-            "已验证",
-            "复现成功",
-            "确认flag",
-            "verified",
-            "confirmed",
-            "flag正确",
-            "提交成功",
-            "flag 获取成功",
-            "flag获取成功",
-            "获取成功",
-            "找到flag",
-            "flag found",
-            "成功获取",
-            "获取了flag",
-            "拿到了flag",
-            "成功拿到",
-            "成功找到",
-            "解题完成",
-            "解题成功",
-            "verification successful",
-            "verification passed",
-            "flag verified",
-            "flag confirmed",
-            "submission successful",
-            "flag acquired",
-            "successfully obtained",
-            "solved the challenge",
-            "challenge solved",
-            "got the flag",
-            "obtained the flag",
-        ]
-        if detect_verification_success(response_text) or any(
-            marker in response_text.lower() for marker in verification_markers
-        ):
+        # ONE predicate, ONE vocabulary. This used to OR the predicate with a second,
+        # separately-maintained inline list of 31 markers -- the two overlapped on 21
+        # entries and each held markers the other lacked, so the function's only real
+        # contribution was its unique entries and the pair drifted silently. The list
+        # now lives in VERIFICATION_CLAIM_MARKERS and this is its single consumer.
+        if detect_verification_success(response_text):
             agent.runtime.flag_verified = True
 
     if agent.runtime.is_ctf_mode and agent.runtime.claimed_flag and not agent.runtime.flag_verified:

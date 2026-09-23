@@ -290,9 +290,19 @@ class FindingParser:
             r"UNION.*成功|UNION.*有效",
             r"漏洞确认",
         ]
+        # Negation guard. Several of these patterns have no capture group, so
+        # `re.findall` returns the whole match and the whole matched phrase becomes a
+        # "confirmed fact" -- and a plain regex match reads the meaning backwards on a
+        # denial. Measured: "未确认该漏洞存在" matched `确认.*存在` and produced the
+        # confirmed fact "确认该漏洞存在", i.e. the opposite of what was written.
+        from vulnclaw.agent.ctf_mode import _is_negated
+
         for pattern in confirmed_markers:
-            for match in re.findall(pattern, response, re.IGNORECASE):
-                fact = match.strip()[:200]
+            for match in re.finditer(pattern, response, re.IGNORECASE):
+                raw = match.group(1) if match.groups() else match.group(0)
+                if _is_negated(response, match.start(), match.end()):
+                    continue
+                fact = raw.strip()[:200]
                 if fact and hasattr(self.context.state, "add_confirmed_fact"):
                     self.context.state.add_confirmed_fact(fact)
 
