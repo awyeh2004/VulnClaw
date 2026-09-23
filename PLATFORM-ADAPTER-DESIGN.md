@@ -405,5 +405,21 @@ that the run should stop.
 
 同一件事的两行互相打架。原因是 loop 里 `reason` 只有二分（thin / 否则即"没有未尝试的路径"），而升级分支现在有第三种情形。已抽成 `_stall_handback_reason()` 三值（外加"没有黑板可判断"这第四种），并加了"reason 与消息不得矛盾"的测试。
 
-至此**停滞保护可以说是验证过了**（单元 + 一次真实 A/B）。仍未覆盖的是：`stall_turns` 取默认值 8 时的长时间 run 行为——本次为了在有界 run 内看到事件用了 2。
+至此**停滞保护可以说是验证过了**（单元 + 一次真实 A/B）。
+
+关于 `stall_turns` 默认值 8：本次为了在有界 run 内看到事件用了 2，但**默认值不需要再跑一遍
+来确认**——这个旋钮只决定"多久开口"，与判定逻辑无关（逻辑已被单测覆盖，且与阈值无关）。
+8 是从"成功 run 的步数"标定出来的，而现在的实测样本是：两次成功解题 3 / 6 步，`easyre`
+5 步，`不一样的flag` 5 步，BabySQL 5 步——**每一次有产出的 run 都在 8 步以内结束**，所以 8
+仍稳在"任何有进展的连续段"之上。再跑一次默认阈值只会多花时间，不会多出信息。
+
+### 14.8 这一轮顺带暴露的、与停滞保护无关的两个额外发现
+
+1. **`competition.predownload_attachments` 是死配置。** 它在 `config/schema.py` 里声明为
+   "At match start, download all challenge attachments so a slow backend never blocks
+   analysis"，但**全代码库没有任何一处读它**（`grep` 只命中声明那一行）。而 RE 题完全依赖
+   附件——按语义本该"开赛时批量下好"的东西，实际上只有 `competition download` 子命令会做。
+   要么接上、要么删掉；留着一个骗人的开关比没有更糟。
+2. **卡住的 agent 会去翻本机找答案**（§14.2/§14.3 的现象，与停滞保护无关的真漏洞）——
+   已按"答案必须来自目标"修掉：prompt 规则 + `python_execute` 机械兜底，见提交 `1ba36bf`。
 
