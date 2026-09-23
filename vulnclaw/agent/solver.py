@@ -862,6 +862,23 @@ def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     return ""
 
 
+def _reasoning_graph_enabled() -> bool:
+    """Model-facing reasoning-graph switch (see blackboard.reasoning_graph_enabled)."""
+    from vulnclaw.agent.blackboard import reasoning_graph_enabled
+
+    return reasoning_graph_enabled()
+
+
+def _tool_card_enabled() -> bool:
+    """Capability-card switch; fails open so a config error cannot hide real tools."""
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return bool(getattr(load_config().session, "tool_card_enabled", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     constraints = ""
     task_constraints = getattr(getattr(agent, "session_state", None), "task_constraints", None)
@@ -869,7 +886,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         rendered = task_constraints.to_prompt_block()
         if rendered:
             constraints = f"\n\n{rendered}"
-    bb_instruction = (
+    bb_instruction = "" if not _reasoning_graph_enabled() else (
         "\n\n# Blackboard\n"
         "Track reasoning across turns: read `blackboard_summary` first each round. "
         "Record findings with `blackboard_add_fact` — always pass the `evidence_ref` "
@@ -912,7 +929,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     try:
         from vulnclaw.agent.tool_registry import build_tool_card
 
-        tool_card = build_tool_card(state.goal or "") or ""
+        tool_card = (build_tool_card(state.goal or "") or "") if _tool_card_enabled() else ""
     except Exception:
         tool_card = ""
     pwn_local_instruction = ""

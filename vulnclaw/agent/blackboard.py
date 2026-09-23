@@ -667,6 +667,25 @@ def _clause_witnessed(
     return hit / len(tokens) >= _OVERLAP_THRESHOLD
 
 
+def reasoning_graph_enabled() -> bool:
+    """Whether the model is shown the blackboard tools and prompt block.
+
+    Config-only switch (``session.reasoning_graph_enabled``, default True) used to
+    measure the cost of the reasoning-graph ceremony. When it is off the runtime
+    blackboard still exists and still receives whatever the run produces, so
+    auto-captured run notes and the stall guard behave exactly as before; only
+    the model-facing surface (13 tool schemas + the prompt block) disappears.
+
+    Fails open: a config problem must not silently strip tools from a real run.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return bool(getattr(load_config().session, "reasoning_graph_enabled", True))
+    except Exception:  # noqa: BLE001 - never break the tool face on a config error
+        return True
+
+
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
     """Dispatch a blackboard tool call to the blackboard instance bound to this agent."""
     bb = getattr(agent.runtime, "blackboard", None)

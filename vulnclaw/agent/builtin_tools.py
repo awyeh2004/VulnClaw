@@ -493,6 +493,28 @@ def _resolve_workdir(raw_workdir: Any) -> Path:
     return workdir.resolve()
 
 
+def _scratch_dir_if_configured(agent: AgentContext) -> Path | None:
+    """Per-run scratch dir when ``session.solve_work_root`` is set, else None.
+
+    Single source of truth for the scratch path: the tools' default workdir and
+    the staging dir for generated scripts must not drift apart.
+    """
+    try:
+        raw = str(getattr(agent.config.session, "solve_work_root", "") or "").strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    run_id = str(getattr(getattr(agent, "runtime", None), "run_id", "") or "").strip()
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", run_id)[:120] or "manual"
+    try:
+        scratch = (Path(raw).expanduser() / safe).resolve()
+        scratch.mkdir(parents=True, exist_ok=True)
+        return scratch
+    except Exception:
+        return None
+
+
 def _default_workdir(agent: AgentContext) -> Path:
     """Process cwd, or the per-run scratch dir when session.solve_work_root is set.
 
@@ -502,20 +524,30 @@ def _default_workdir(agent: AgentContext) -> Path:
     instead gets its own subdir named by run_id. Any failure falls back to the
     process cwd so a bad path can never take the tools down.
     """
-    try:
-        raw = str(getattr(agent.config.session, "solve_work_root", "") or "").strip()
-    except Exception:
-        raw = ""
-    if not raw:
-        return Path(os.getcwd()).resolve()
-    run_id = str(getattr(getattr(agent, "runtime", None), "run_id", "") or "").strip()
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", run_id)[:120] or "manual"
-    try:
-        scratch = (Path(raw).expanduser() / safe).resolve()
-        scratch.mkdir(parents=True, exist_ok=True)
-        return scratch
-    except Exception:
-        return Path(os.getcwd()).resolve()
+    scratch = _scratch_dir_if_configured(agent)
+    return scratch if scratch is not None else Path(os.getcwd()).resolve()
+
+
+def _payload_script_dir(agent: AgentContext) -> str | None:
+    """Where ``python_execute`` stages the script it is about to run.
+
+    It used to go to the system temp dir (``%TEMP%\\tmpXXXX.py``). Generated
+    payloads living there have two problems, both measured on 2026-09-23 while
+    solving Weblogic CVE-2017-10271: the files are invisible to the rest of a
+    run's artifacts, and an endpoint AV quarantines them mid-run — six
+    `HEUR:Backdoor/JSP.WebShell.a` hits deleted the staged script between write
+    and execute, and the run then spent several turns diagnosing whether
+    ``python_execute`` itself was broken.
+
+    Staging inside the run's scratch dir keeps payloads with the run's other
+    artifacts (auditable, cleaned up with the run) and lets an operator exclude
+    one narrow path in such a product instead of all of ``%TEMP%``.
+
+    Returns None — meaning "use the system temp dir" — when no scratch root is
+    configured or it cannot be created: staging must never fail a run.
+    """
+    scratch = _scratch_dir_if_configured(agent)
+    return str(scratch) if scratch is not None else None
 
 
 def _validate_command_url_scope(agent: AgentContext, command: str) -> str | None:
@@ -2482,6 +2514,15 @@ def build_openai_tools(
         }
     )
 
+    # Model-facing reasoning-graph ablation: the runtime blackboard and every
+    # solver-side consumer stay as they are; only the 13 schemas the model would
+    # otherwise spend calls on are removed. The names are still dispatchable if a
+    # hand-crafted call arrives, which mirrors how allowed_tools pruning behaves.
+    from vulnclaw.agent.blackboard import reasoning_graph_enabled
+
+    if not reasoning_graph_enabled():
+        tools = [t for t in tools if not str(t.get("function", {}).get("name", "")).startswith("blackboard_")]
+
     return tools
 
 
@@ -3461,7 +3502,8 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
             return outcome.refusal_text("python_execute")
 
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, encoding="utf-8"
+            mode="w", suffix=".py", delete=False, encoding="utf-8",
+            dir=_payload_script_dir(agent), prefix="vulnclaw-payload-",
         ) as f:
             preamble = (
                 "import sys, json, re, os, base64, hashlib, itertools, collections, datetime, struct, binascii, textwrap, math, random, string, fractions, decimal, statistics, typing, functools, operator, copy, pprint\n"
