@@ -142,6 +142,62 @@ BLOCKED_PATTERNS: list[str] = [
     r"open\s*\(\s*['\"].*\.vulnclaw",
 ]
 
+# ── host-wide "hunt the answer on disk" detection ───────────────────
+# Measured (2026-09-23): a stalled solve abandoned its inert web target and walked
+# the operator's drives looking for flag-shaped strings -- it grepped E:\vulnclaw and
+# C:\vulnclaw and hit *other* tasks' artifacts (earlier solve reports, other runs'
+# logs, test fixtures), each containing SOME challenge's real flag. The agent's own
+# stated reason was "the harness must run it locally", so it saw this as legitimate.
+#
+# That is not a credentials problem (which the prompt already forbids) but an
+# answer-provenance problem: reporting a flag found in another task's report is a
+# fabricated result that still looks evidenced. The prompt now states the rule; this
+# is the mechanical backstop.
+#
+# Scope is deliberately narrow to avoid blocking real work: it needs BOTH a broad
+# filesystem TRAVERSAL and a flag-SHAPED search token. Grepping one downloaded file
+# (`strings easyre.exe | grep flag`) has no traversal and is untouched -- RE work
+# depends on exactly that.
+_BROAD_ROOTS = (
+    # An optional string prefix matters: the measured call was os.walk(r'C:\vulnclaw'),
+    # and a pattern anchored on the quote right after "(" misses every raw string.
+    r"os\.walk\s*\(\s*[rbfuRBFU]{0,2}['\"](?:[A-Za-z]:[\\/]|/|~)",
+    r"glob\s*\.\s*(?:iglob|glob)\s*\(\s*[rbfuRBFU]{0,2}['\"](?:[A-Za-z]:[\\/]|/|~)",
+    r"\.rglob\s*\(\s*[rbfuRBFU]{0,2}['\"]",
+    r"Path\s*\(\s*[rbfuRBFU]{0,2}['\"](?:[A-Za-z]:[\\/]|/|~)",
+)
+_FLAG_SHAPED = (
+    r"flag\s*\{",
+    r"FLAG\s*\{",
+    r"CTF\s*\{",
+    r"[\"']flag[\"']",
+    r"flag_pattern",
+    r"flag_regex",
+)
+_HOST_FLAG_HUNT_REASON = (
+    "refusing a host-wide search for flag-shaped strings. The answer must come from "
+    "the target, not from this machine: earlier solve reports, other runs' logs, "
+    "state files and test fixtures on disk may contain OTHER challenges' real flags, "
+    "so reporting one would be fabricating a result that still looks evidenced. "
+    "Local files are for analysis only -- to grep a downloaded attachment, pass its "
+    "exact path instead of traversing a directory tree."
+)
+
+
+def _host_flag_hunt_reason(code: str) -> str | None:
+    """Return the refusal reason when `code` hunts the host filesystem for a flag.
+
+    Requires a broad traversal AND a flag-shaped token: neither alone is a problem,
+    and requiring both keeps genuine analysis of a single downloaded artifact working.
+    """
+    text = code or ""
+    if not any(re.search(pattern, text) for pattern in _BROAD_ROOTS):
+        return None
+    if not any(re.search(pattern, text) for pattern in _FLAG_SHAPED):
+        return None
+    return _HOST_FLAG_HUNT_REASON
+
+
 # ── AST-based sandbox bypass detection ──────────────────────────────
 # Regex alone cannot catch dynamic import/loading patterns.
 # This AST checker identifies:
@@ -3252,6 +3308,18 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
                 blocked_reason=pattern,
             )
             return f"[!] Code contains a blocked operation pattern: {pattern}"
+
+    flag_hunt = _host_flag_hunt_reason(code)
+    if flag_hunt:
+        _write_python_audit(
+            agent,
+            purpose=purpose,
+            code=code,
+            mode=mode,
+            outcome="blocked",
+            blocked_reason="host_flag_hunt",
+        )
+        return f"[!] {flag_hunt}"
 
     blocked_pattern = _validate_python_execute_mode(mode, code)
     if blocked_pattern:
