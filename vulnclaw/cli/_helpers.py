@@ -228,6 +228,18 @@ class TerminalStreamSink:
             preview = f"{preview}{hint}"
         _print_styled_plain(self._console, _("cli.tool_result"), preview)
 
+    def on_notice(self, message: str) -> None:
+        """An operator-facing note that is neither model output nor a tool result.
+
+        Exists because the path-stall guard writes into the *agent's* prompt: with
+        no channel of its own, the operator could not see that the guard had
+        intervened, so a stalled run just looked stuck for no stated reason. A
+        measured stall run produced no visible signal of any kind for 15 minutes.
+        """
+        self._console.print()
+        self._status_printed = False
+        self._console.print(Text(str(message or ""), style="bold yellow"), soft_wrap=True)
+
     def on_stream_end(self) -> None:
         self._status_printed = False
         self._console.print()
@@ -277,6 +289,11 @@ class JsonlStreamSink:
         self._flush_all()
         self._emit({"type": "status", "status": str(message or "")})
         self._status_printed = True
+
+    def on_notice(self, message: str) -> None:
+        """Operator-facing note; mirrors TerminalStreamSink.on_notice."""
+        self._flush_all()
+        self._emit({"type": "log", "message": str(message or "")})
 
     def on_thinking_token(self, token: str) -> None:
         if not token:
