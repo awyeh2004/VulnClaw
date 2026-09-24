@@ -174,6 +174,130 @@ class TestTheFingerprintGateActuallyRedacts:
         assert "NEWPREFIX{abcdefghijkl}" not in pb._fingerprint_flags("NEWPREFIX{abcdefghijkl}")
 
 
+class TestNoFieldOfANoteLeaksAFlag:
+    """Round-8 finding R8-5: the write-path gate covered `steps` only.
+
+    Measured on HEAD: `save_playbook(name='DASCTF{222441144222aaaa} title', …)` wrote the
+    flag into the `name:` frontmatter line AND into the filename slug, while `steps` came
+    out fingerprinted. Both surfaces reach a later run -- `format_playbook_list` prints
+    the name straight into the prompt, and the slug is how the note is addressed there --
+    so the leak reopened exactly the cross-instance resubmission channel the gate exists
+    to close. A model marking a note `validated` is holding the flag at that moment; a
+    flag in the title is ordinary behaviour, not a contrived payload.
+    """
+
+    FLAG = "DASCTF{222441144222aaaa}"
+
+    def _stored(self, tmp_playbooks, ack) -> str:
+        return (tmp_playbooks / f"{ack['slug']}.md").read_text(encoding="utf-8")
+
+    def test_the_name_is_fingerprinted(self, tmp_playbooks):
+        ack = pb.save_playbook(
+            name=f"{self.FLAG} titled note",
+            fingerprint="fp",
+            steps="LOCK: x\n" + "y" * 80,
+            status="validated",
+        )
+        assert "error" not in ack, ack
+        stored = self._stored(tmp_playbooks, ack)
+        assert self.FLAG not in stored
+        assert "DASCTF{2224…aaaa}" in stored
+        assert self.FLAG not in ack["name"]
+
+    def test_the_slug_never_carries_the_flag_body(self, tmp_playbooks):
+        ack = pb.save_playbook(
+            name=f"{self.FLAG} titled note",
+            fingerprint="fp",
+            steps="LOCK: x\n" + "y" * 80,
+        )
+        assert "222441144222aaaa" not in ack["slug"], ack["slug"]
+        assert self.FLAG not in " ".join(p.name for p in tmp_playbooks.iterdir())
+
+    def test_a_caller_supplied_slug_is_redacted_too(self, tmp_playbooks):
+        """The slug is the filename; a caller can pass one directly."""
+        ack = pb.save_playbook(
+            name="plain",
+            fingerprint="fp",
+            slug=f"note-{self.FLAG}",
+            steps="LOCK: x\n" + "y" * 80,
+        )
+        assert "222441144222aaaa" not in ack["slug"], ack["slug"]
+
+    def test_the_fingerprint_field_is_covered(self, tmp_playbooks):
+        ack = pb.save_playbook(
+            name="plain",
+            fingerprint=f"target {self.FLAG} real easy",
+            steps="LOCK: x\n" + "y" * 80,
+        )
+        assert self.FLAG not in self._stored(tmp_playbooks, ack)
+
+    def test_a_note_already_on_disk_is_inert_when_read(self, tmp_playbooks):
+        """The write-path fix cannot clean what is already stored -- the read path must.
+
+        Real store, 2026-09-23: notes written before the gate covered their fields still
+        have a full flag in the `name:` line, and those are exactly the notes a future run
+        loads. Redaction is idempotent, so filtering on read is safe for new notes.
+        """
+        (tmp_playbooks / "legacy.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"name: {self.FLAG} legacy note",
+                    "fingerprint: Weblogic CVE-2017-10271 real easy",
+                    "status: validated",
+                    "source: curated",
+                    "---",
+                    "",
+                    f"LOCK: found {self.FLAG} via wls-wsat",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        note = pb.list_playbooks()[0]
+        assert self.FLAG not in note.name
+        assert self.FLAG not in note.steps
+        rendered = pb.format_playbook_list(
+            [{"name": note.name, "slug": note.slug, "status": note.status,
+              "score": 1.0, "steps": note.steps}]
+        )
+        assert self.FLAG not in rendered, "the prompt-facing render must not carry it"
+
+    def test_cover_update_still_matches_a_legacy_cleartext_name(self, tmp_playbooks):
+        """A legacy note must be COVERED, not duplicated into a second file.
+
+        Both sides of the comparison are redacted, so `name='DASCTF{…} note'` still finds
+        the stored `name: DASCTF{…} note` and rewrites it in place -- which is also what
+        cleans that file up.
+        """
+        (tmp_playbooks / "legacy.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"name: {self.FLAG} note",
+                    "fingerprint: fp",
+                    "status: draft",
+                    "source: curated",
+                    "---",
+                    "",
+                    f"LOCK: old body with {self.FLAG}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        ack = pb.save_playbook(
+            name=f"{self.FLAG} note",
+            fingerprint="fp",
+            steps="LOCK: refreshed\n" + "y" * 80,
+            status="validated",
+        )
+        assert ack["slug"] == "legacy", ack
+        assert len(list(tmp_playbooks.iterdir())) == 1, "a duplicate note was created"
+        stored = self._stored(tmp_playbooks, ack)
+        assert self.FLAG not in stored
+
+
 def test_save_playbook_redacts_before_writing(tmp_playbooks):
     """The gate has to work on the model-initiated path too, not only capture_run_notes."""
     ack = pb.save_playbook(

@@ -68,6 +68,11 @@ def _fingerprint_flags(text: str) -> str:
     challenge. A hygiene gate whose stated purpose is "prevent stale resubmission" cannot
     keep full values for a length range, and 12 was not even principled: the fingerprint
     form `first4…last4` is 9 characters, so a 12-character body fingerprints fine.
+
+    Idempotent by construction: the fingerprint form still matches the pattern, so
+    applying this twice is the same as applying it once. The read path
+    (``Playbook.from_frontmatter``) relies on that to filter notes written before the
+    gate covered their fields (round-8 R8-5).
     """
     def _fp(m: re.Match) -> str:
         prefix, inner = m.group(1), m.group(2)
@@ -188,12 +193,19 @@ class Playbook:
     @classmethod
     def from_frontmatter(cls, slug: str, meta: dict[str, Any], body: str) -> "Playbook":
         recorded = str(meta.get("source", "") or "").strip().lower()
+        # Round-8 finding R8-5, read half. Redaction at the WRITE path cannot clean the
+        # files already on disk, and those are exactly the ones a future run loads: the
+        # measured 2026-09-23 store has notes whose `name:` line holds a full flag (the
+        # only surface `_fingerprint_flags` did not cover). Everything that crosses the
+        # disk boundary is therefore redacted here as well -- the function is idempotent,
+        # so a note written by the fixed path is unchanged by this, and a note written
+        # before it becomes inert instead of being offered to the next run verbatim.
         return cls(
             slug=slug,
-            name=str(meta.get("name", "") or ""),
-            fingerprint=str(meta.get("fingerprint", "") or ""),
+            name=_fingerprint_flags(str(meta.get("name", "") or "")),
+            fingerprint=_fingerprint_flags(str(meta.get("fingerprint", "") or "")),
             status=str(meta.get("status", "draft") or "draft"),
-            steps=body or "",
+            steps=_fingerprint_flags(body or ""),
             scripts="",
             updated_at=str(meta.get("updated_at", "") or ""),
             # Notes written before `source` existed are recognised by the name
@@ -592,6 +604,8 @@ def save_playbook(
     1. steps must be >= MIN_PLAYBOOK_CHARS (prevents 3-line low-effort entries)
     2. must contain at least one of LOCK/CONFIRMED/ANGLES headings (structured)
     3. full flag values are fingerprinted to flag{first4…last4} (cross-instance hygiene)
+       in EVERY persisted field -- name, fingerprint, slug and steps (round-8 R8-5;
+       before that only `steps` was covered)
 
     ``source`` records whether the note was chosen by the model (curated) or dumped
     by capture_run_notes (auto). It is persisted in the frontmatter so the
@@ -609,16 +623,29 @@ def save_playbook(
         return {"error": "missing structured headings (LOCK / CONFIRMED / ANGLES)"}
 
     # ── Flag fingerprinting ───────────────────────────────────────────
+    # Round-8 finding R8-5: this covered `steps` ONLY, while `name`, `fingerprint` and
+    # the slug DERIVED from the name were written verbatim. The model holds the flag
+    # exactly when it marks a note validated, so putting it in the title is ordinary
+    # behaviour -- and `format_playbook_list` feeds that name back into a future run's
+    # prompt, reopening the "resubmit a previous instance's flag" channel this gate
+    # exists to close. `capture_run_notes` was never affected (its name is the fixed
+    # AutoNotes prefix); the model-initiated path was.
+    name = _fingerprint_flags(str(name or ""))
+    fingerprint = _fingerprint_flags(str(fingerprint or ""))
     steps = _fingerprint_flags(stripped)
 
     status = "validated" if status == "validated" else "draft"
     source = SOURCE_AUTO if str(source or "").strip().lower() == SOURCE_AUTO else SOURCE_CURATED
-    slug = slug or _slugify(name)
+    # A caller-supplied slug is redacted too: it is the filename, and the filename is
+    # what `list_playbooks` addresses the note by in later runs.
+    slug = _slugify(_fingerprint_flags(str(slug))) if slug else _slugify(name)
     from datetime import datetime, timezone
 
-    # Cover-update: if a same-name playbook exists, keep the same slug.
+    # Cover-update: if a same-name playbook exists, keep the same slug. Both sides are
+    # compared after redaction (the read path redacts `existing.name`), so a note whose
+    # stored name still holds a flag is recognised instead of being duplicated.
     for existing in list_playbooks():
-        if existing.name and existing.name.strip().lower() == (name or "").strip().lower():
+        if existing.name and existing.name.strip().lower() == name.strip().lower():
             slug = existing.slug
             break
     else:
