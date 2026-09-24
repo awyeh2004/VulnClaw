@@ -225,7 +225,14 @@ _SHELL_RECURSIVE = (
     r"\bfind\b[^|;&]*-exec\s+grep",
 )
 _SHELL_BROAD_ROOT = (
-    r"[A-Za-z]:[\\/](?:\s|$|\*|\")",                  # a drive root: E:\ / C:/ 
+    # Any drive-ABSOLUTE path, not only the bare drive root. Round-8 finding R8-2: the
+    # branch used to require whitespace/end/`*`/quote immediately after `E:\`, so the
+    # one shape this guard exists for -- the shape actually measured on 2026-09-23,
+    # `grep -r flag{ E:\vulnclaw` -- was the one shape it let through, while the Python
+    # side (`[A-Za-z]:[\\/]`, no trailing boundary) refused the same intent. A drive
+    # subdirectory is no less "host-wide" than the root: the guard's own remedy is to
+    # pass the exact file, which works identically in both cases.
+    r"[A-Za-z]:[\\/]",
     r"(?:^|\s)/(?:\s|$)",                             # POSIX root
     r"(?:^|\s)~",
     r"\$HOME",
@@ -260,6 +267,11 @@ def _shell_flag_hunt_reason(command: str) -> str | None:
     runtime, an unknown traversal verb). It stops the naive form; the prompt rule is the
     primary control. `tests/agent/test_answer_provenance_limits.py` pins the known
     bypasses as tests so this limitation stays visible.
+
+    Round-8 finding R8-2 narrowed the gap that mattered, though: the broad-root half used
+    to recognise only a BARE drive root, so the measured command itself
+    (`grep -r flag{ E:\\vulnclaw`) was allowed while the Python side refused the same
+    intent. Any drive-absolute path now counts -- see ``_SHELL_BROAD_ROOT``.
     """
     text = command or ""
     if not any(re.search(pattern, text, re.IGNORECASE) for pattern in _SHELL_RECURSIVE):

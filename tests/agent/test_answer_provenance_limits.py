@@ -56,6 +56,68 @@ class TestShellSideIsGuarded:
         assert "analysis only" in reason
 
 
+class TestTheTwoSidesAgree:
+    """Round-8 finding R8-2: the sides were asymmetric on exactly the measured shape.
+
+    The accident's command was `grep -r flag{ E:\\vulnclaw` -- a drive SUBdirectory. The
+    Python side has always refused the equivalent (`os.walk(r'C:\\vulnclaw')` + `flag{`)
+    and has a test pinning it; the shell branch required whitespace/end/`*`/quote right
+    after the drive colon, so only a bare `E:\\` counted and that command sailed through.
+    The shell side is now at least as wide as the Python side, and these tests say so
+    from both directions.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "grep -r flag{ E:\\vulnclaw",                       # the measured command
+            "grep -rn 'flag{' E:\\vulnclaw\\work",              # deeper, quoted
+            "rg 'flag{' E:\\vulnclaw",                          # ripgrep, recursive by default
+            "rg -uu 'CTF{' D:\\GitClone",
+            "findstr /s /i flag{ E:\\vulnclaw\\*",
+            'Select-String -Path "E:\\vulnclaw" -Pattern "flag{" -Recurse',
+            "grep -R 'flag{' C:/Users/me/Downloads",
+        ],
+    )
+    def test_a_drive_subdirectory_is_as_broad_as_the_root(self, command):
+        assert _shell_flag_hunt_reason(command) is not None, command
+
+    def test_the_bare_root_still_is(self):
+        assert _shell_flag_hunt_reason("grep -r flag{ E:\\") is not None
+
+    @pytest.mark.parametrize(
+        ("shell_command", "python_code"),
+        [
+            (
+                "grep -r flag{ E:\\vulnclaw",
+                "import os\nfor r, d, f in os.walk(r'E:\\vulnclaw'):\n"
+                "    if 'flag{' in str(f): print(r)",
+            ),
+            (
+                "rg 'flag{' D:\\GitClone",
+                "import os\nfor r, d, f in os.walk('D:\\\\GitClone'):\n    pass\nprint('flag{')",
+            ),
+        ],
+    )
+    def test_the_same_intent_is_refused_on_both_paths(self, shell_command, python_code):
+        """Neither side may be the softer way to express the same search."""
+        assert _shell_flag_hunt_reason(shell_command) is not None
+        assert _host_flag_hunt_reason(python_code) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # A drive path with no flag-shaped token is ordinary work: still allowed.
+            "findstr /s /m /c:timeout C:\\tools",
+            "grep -rn 'def main' E:\\vulnclaw\\src",
+            "rg 'TODO' D:\\GitClone\\proj",
+        ],
+    )
+    def test_widening_the_root_did_not_drop_the_flag_requirement(self, command):
+        """Both halves of the trigger are still required; only the root got wider."""
+        assert _shell_flag_hunt_reason(command) is None
+
+
 class TestOrdinaryCommandsStillWork:
     """The trigger is deliberately narrow: no recursion, or no broad root, or no flag."""
 
