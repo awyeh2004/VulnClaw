@@ -160,6 +160,67 @@ def test_the_query_carries_the_powered_by_header():
     assert "servlet" in signature.lower() or "jsp" in signature.lower(), signature
 
 
+# ── L6：签名会进运行日志，flag 值不得跟着进去 ─────────────────────────────
+
+class TestTheSignatureNeverCarriesAFlagValue:
+    """审计 L6（初见于 round7 D3）：签名会进 `playbook_refreshed` 事件与操作者通知。
+
+    它由已记录的 HTTP 响应拼成，而响应**可能**包含 flag：提交回执把它回显、页面直接印出
+    它、或模型自己的 stdout。分词器按非字母数字切分，于是 ``flag{222441144222}`` 变成
+    ``flag`` 与 ``222441144222`` 两个"看起来很普通"的词，值就这样进了日志。
+    """
+
+    FLAG = "flag{222441144222aaaa}"
+
+    def _page_with(self, flag: str) -> str:
+        # The flag sits in a body line carrying a marker word, which is the channel that
+        # actually leaked: `_http_body_signals` keeps such a line and the signature-word
+        # regex pulls letter-initial words out of it. (A flag in the status-line title is
+        # NOT extracted -- that title is not read from the status line -- and a body that
+        # is all digits is skipped too, because the word regex needs a leading letter.
+        # Measured pre-fix: `CTF2{9f11…}`, `DASCTF{abcdef123456}` and `HGAME{abcdef123456}`
+        # all reached the signature; `flag{222441144222aaaa}` did not, for that reason.)
+        return _probe_output(
+            url="http://direct-ctf2.dasctf.com:27532/console/login/LoginForm.jsp",
+            title="Weblogic Server Console",
+            server="Weblogic Server 12.2.1.3",
+            body=(
+                "<html><head><title>Weblogic Server Console</title></head><body>"
+                f"<pre>submitted: {flag} -- accepted</pre>"
+                '<a href="/wls-wsat/CoordinatorPortType">wls</a>'
+                "</body></html>"
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "flag{222441144222aaaa}",
+            "CTF2{9f113b92-cb26-424a-8003-aa8ef322e092}",
+            "DASCTF{abcdef123456}",
+            "HGAME{abcdef123456}",          # 未知平台前缀，走 R8-6 的第二层判定
+        ],
+    )
+    def test_no_flag_body_reaches_the_signature(self, flag):
+        signature = pr.probe_signature([_evidence(self._page_with(flag))])
+        assert flag not in signature
+        body = flag[flag.index("{") + 1 : -1]
+        assert body not in signature, signature
+        # 也不能以"碎片"形式存活：指纹保留首尾各 4 字符，中间段必须消失。
+        assert body[4:-4] not in signature, signature
+
+    def test_the_real_discriminators_still_come_through(self):
+        """脱敏不能顺手把签名存在的理由也删掉。"""
+        signature = pr.probe_signature([_evidence(self._page_with(self.FLAG))])
+        assert "Weblogic" in signature
+        assert "CoordinatorPortType" in signature or "wls-wsat" in signature
+
+    def test_a_page_without_a_flag_is_untouched(self):
+        signature = pr.probe_signature([_evidence(WEBLOGIC_PAGE)])
+        assert "Weblogic" in signature and "LoginForm" in signature
+        assert "…" not in signature, signature
+
+
 # ── 真实运行里模型用的工具，不是制式探测工具 ────────────────────────────────
 #
 # 这是第一组冷/热配对实测发现的最严重问题：真实 CTF2 运行里模型调用的是

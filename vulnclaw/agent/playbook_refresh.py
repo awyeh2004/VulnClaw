@@ -264,10 +264,23 @@ def probe_signature(evidence: Sequence[Any], *, max_tokens: int = MAX_PROBE_TOKE
 
     Returns ``""`` when the evidence holds no usable HTTP response, which the caller
     must read as "nothing new to ask" -- never as "replace the brief with nothing".
+
+    Round8 L6 (first raised as round7 D3): the signature is not internal. It is emitted in
+    the ``playbook_refreshed`` event payload and printed in the operator notices, i.e. it
+    is written into the run log. Evidence is a recorded HTTP response, and a response can
+    contain a flag -- a submit reply echoing it, a page that prints it, the model's own
+    stdout. The tokenizer splits on non-alphanumerics, so ``flag{222441144222}`` becomes
+    the ordinary-looking words ``flag`` and ``222441144222`` and the flag body travels
+    into that log. Redacting happens FIRST, at value level: after tokenization the shape
+    is gone and nothing can tell a flag body from a path segment.
     """
+    # The single redaction implementation lives in `playbook` (round8 R8-5/R8-6 fixed it
+    # twice); a second copy here is exactly the drift this repo keeps paying for.
+    from vulnclaw.agent.playbook import _fingerprint_flags
+
     values: list[str] = []
     for raw in _evidence_texts(evidence):
-        values.extend(_signature_values_from_text(raw))
+        values.extend(_signature_values_from_text(_fingerprint_flags(raw)))
     # Split to tokens FIRST, then cap: capping whole values would not bound the query,
     # because one value ("console/login/LoginForm") carries three tokens. Measured on
     # the 40-link fixture: a value-level cap returned 18 values that tokenized into 26.
