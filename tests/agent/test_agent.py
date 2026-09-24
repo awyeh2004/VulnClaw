@@ -1106,6 +1106,36 @@ class TestAgentCore:
         agent = self._make_agent()
         assert agent._detect_target("没有目标的输入") is None
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Round-8 R8-3, the measured case: a glob inside a sentence that FORBIDS
+            # reaching the platform used to yield `dasctf.com`, and a bare domain in
+            # `host_in_scope` authorises every subdomain -- including the platform API
+            # host the sentence was protecting.
+            "no scanning or probing ctf2*.dasctf.com endpoints",
+            "do not touch ctf2*.dasctf.com",
+            "avoid *.internal.example.com",
+        ],
+    )
+    def test_a_glob_is_not_mined_for_a_domain(self, text):
+        agent = self._make_agent()
+        assert agent._detect_target(text) is None, agent._detect_target(text)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("attack direct-ctf2.dasctf.com", "direct-ctf2.dasctf.com"),
+            ("host is ctf2-files.dasctf.com:443 now", "ctf2-files.dasctf.com"),
+            ("看 sub.example.co.uk 这台", "sub.example.co.uk"),
+            ("mail me at bob@example.com", "example.com"),
+        ],
+    )
+    def test_whole_hosts_are_still_detected(self, text, expected):
+        """The lookbehind must reject tails of a token, not legitimate hosts."""
+        agent = self._make_agent()
+        assert agent._detect_target(text) == expected
+
     def test_skill_context_no_input(self):
         """Without user_input, skills should not inject a default workflow."""
         agent = self._make_agent()

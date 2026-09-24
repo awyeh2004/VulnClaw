@@ -160,10 +160,22 @@ def _is_plausible_host(candidate: str) -> bool:
 
 
 def detect_target(user_input: str) -> Optional[str]:
-    """Extract target from user input."""
+    """Extract target from user input.
+
+    Round-8 finding R8-3: the bare-domain pattern used to match a SUFFIX of a larger
+    token, so a glob like ``ctf2*.dasctf.com`` -- which appeared verbatim in the shipped
+    CTF2 goal, inside a sentence FORBIDDING access to the platform -- yielded the
+    registrable domain ``dasctf.com``. That single value is what the run's whole scope was
+    built from, and a bare domain in ``host_in_scope`` authorises every subdomain of it,
+    including the platform's own API host. The lookbehind below refuses any candidate that
+    is the tail of a bigger word/glob (``*``, a word character or a dot before it), which
+    is what makes ``foo.dasctf.com`` behave the same whether it was written whole or
+    inside ``pre*`` noise.
+    """
     for pattern in (
         r"(https?://[a-zA-Z0-9][-a-zA-Z0-9.:]*)",
         r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})",
+        r"(?<![\w*.])"
         r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)",
     ):
         for match in re.finditer(pattern, user_input):

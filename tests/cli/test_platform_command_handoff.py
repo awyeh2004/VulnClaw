@@ -141,6 +141,44 @@ def test_gcs_goal_names_the_ref_exactly_once(captured_solve, monkeypatch):
     assert 'ref="gcs:exercise:10662"' not in goal
 
 
+# ── round-8 R8-3: the ban must not be a scope source ──────────────────────
+#
+# The "do not attack the platform" sentence used to name the host: "no scanning or
+# probing ctf2*.dasctf.com endpoints". With a description that contains no URL,
+# `detect_target` mined `dasctf.com` out of that glob, `host_in_scope` treats a bare
+# domain as covering every subdomain, and the run's scope was therefore derived from a
+# PROHIBITION -- authorising ctf2.dasctf.com, the platform API host, and every other
+# subdomain. The rule stays; the host literal does not.
+
+
+def test_the_platform_ban_names_no_host(captured_solve, monkeypatch):
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "x"}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id")
+
+    goal = captured_solve["goal"]
+    assert "dasctf.com" not in goal, (
+        "a host literal in the goal is a machine-readable scope source; keep the ban "
+        "and drop the domain"
+    )
+
+
+def test_the_shipped_goal_yields_no_scope_from_a_url_less_description(captured_solve, monkeypatch):
+    """The end-to-end shape of the finding: ban sentence -> detected target -> scope."""
+    from vulnclaw.agent.input_analysis import detect_target
+
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "不一样的flag", "category": "REVERSE"}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id")
+
+    goal = captured_solve["goal"]
+    assert detect_target(goal) is None, detect_target(goal)
+
+
 # ── a RE challenge's attachment must not be forbidden ─────────────────────
 #
 # The CTF2 goal used to say "Do not attempt to fetch files from or attack

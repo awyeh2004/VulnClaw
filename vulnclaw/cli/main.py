@@ -2007,8 +2007,15 @@ def ctf2(
         # the challenge's own published files is not.
         f"Downloading this challenge's own published attachments from the platform's "
         f"file host IS expected -- take the URLs from platform_read and fetch them. "
+        # Round-8 finding R8-3: this sentence used to name the host outright ("no
+        # scanning or probing ctf2*.dasctf.com endpoints"). When the challenge
+        # description contains no URL, `detect_target` mined `dasctf.com` out of that
+        # glob, `host_in_scope` treats a bare domain as covering every subdomain, and the
+        # run's scope was therefore derived from a PROHIBITION -- authorising exactly the
+        # platform (ctf2.dasctf.com and friends) the sentence forbade. Naming no host
+        # keeps the rule and stops it from being a machine-readable scope source.
         f"What is out of bounds is attacking the platform itself: no scanning or "
-        f"probing ctf2*.dasctf.com endpoints, and no guessing at its API. "
+        f"probing the platform's own service endpoints, and no guessing at its API. "
         + (
             # Already fetched for the agent, so it does not need the file host at all.
             "These are ALREADY DOWNLOADED to local paths, use them directly:\n"
