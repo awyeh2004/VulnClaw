@@ -799,7 +799,13 @@ def save_playbook(
             break
     else:
         if (PLAYBOOKS_DIR / f"{slug}.md").exists():
-            slug = f"{slug}-{abs(hash(fingerprint)) % 10000}"
+            # A STABLE digest, not `hash(fingerprint)` (round7, still open at round9).
+            # CPython randomises str hashing per process (PYTHONHASHSEED), so the same
+            # collision produced a DIFFERENT slug in every run: the store's "one file per
+            # challenge family, updated in place" rule silently became "write yet another
+            # note", and the duplicate then competes with the original in every lookup.
+            # The digest only has to disambiguate, not be cryptographic.
+            slug = f"{slug}-{sha256(fingerprint.encode('utf-8')).hexdigest()[:4]}"
 
     updated_at = datetime.now(timezone.utc).isoformat()
     lines = [

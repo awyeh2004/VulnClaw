@@ -451,6 +451,85 @@ class TestTheNoteIsWrittenAtomically:
         )
 
 
+class TestTheCollisionSuffixIsStableAcrossProcesses:
+    """Round7's other out-of-scope finding: `abs(hash(fingerprint)) % 10000`.
+
+    CPython randomises `str.__hash__` per process (PYTHONHASHSEED), so the disambiguating
+    suffix differed between runs of the same input. The store's contract is one file per
+    challenge family, updated in place; an unstable suffix turns a collision into a new
+    note every time, and the copy then competes with the original in every lookup.
+
+    Measured with two real subprocesses (different PYTHONHASHSEED), because that is the
+    only way this property can be observed -- inside one process `hash()` is stable.
+    """
+
+    _SCRIPT = """
+import sys
+from vulnclaw.agent import playbook as pb
+ack = pb.save_playbook(name="maze", fingerprint="fp-fixed", steps="LOCK: x\\n" + "y" * 80)
+print(ack["slug"])
+"""
+
+    def _slug_in_a_fresh_process(self, store, root, seed):
+        import os
+        import subprocess
+        import sys
+
+        env = dict(os.environ, PYTHONHASHSEED=seed, VULNCLAW_CONFIG_DIR=str(store.parent))
+        result = subprocess.run(
+            [sys.executable, "-c", self._SCRIPT],
+            cwd=str(root), env=env, capture_output=True, text=True, encoding="utf-8",
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip().splitlines()[-1]
+
+    def test_two_processes_agree_on_the_suffix(self, tmp_path):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        store = tmp_path / "playbooks"
+        store.mkdir(parents=True)
+        # Force the collision branch: a file already owns the un-suffixed slug, and its
+        # name does NOT match the incoming one (or the cover-update branch would win).
+        (store / "maze.md").write_text(
+            "---\nname: some other note\nfingerprint: other\nstatus: draft\nsource: curated\n"
+            "---\n\nLOCK: other\n",
+            encoding="utf-8",
+        )
+
+        # Both processes must write to the same path; clear between runs so the second
+        # one starts from the same state (otherwise the first run's own file is what it
+        # collides with, which is a different assertion).
+        first = self._slug_in_a_fresh_process(store, root, "1")
+        for extra in store.glob("maze-*.md"):
+            extra.unlink()
+        second = self._slug_in_a_fresh_process(store, root, "2")
+
+        assert first.startswith("maze-") and second.startswith("maze-")
+        assert first == second, (first, second)
+
+    def test_the_suffix_is_a_digest_of_the_fingerprint(self, tmp_path, monkeypatch):
+        """Structural: it must not come from `hash()` at all."""
+        from hashlib import sha256
+        from pathlib import Path
+
+        store = tmp_path / "playbooks"
+        store.mkdir(parents=True)
+        monkeypatch.setattr(pb, "PLAYBOOKS_DIR", store)
+        (store / "maze.md").write_text(
+            "---\nname: some other note\nfingerprint: other\nstatus: draft\nsource: curated\n"
+            "---\n\nLOCK: other\n",
+            encoding="utf-8",
+        )
+
+        ack = pb.save_playbook(
+            name="maze", fingerprint="fp-fixed", steps="LOCK: x\n" + "y" * 80
+        )
+        expected = sha256(b"fp-fixed").hexdigest()[:4]
+        assert ack["slug"] == f"maze-{expected}", ack
+        assert Path(store / f"{ack['slug']}.md").is_file()
+
+
 def test_save_playbook_redacts_before_writing(tmp_playbooks):
     """The gate has to work on the model-initiated path too, not only capture_run_notes."""
     ack = pb.save_playbook(
