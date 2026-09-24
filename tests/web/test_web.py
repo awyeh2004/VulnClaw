@@ -1526,8 +1526,27 @@ class TestWebAuthLoopback:
         async def call_next(_req):
             return "PASSED"
 
-        # Loopback client: no token, still allowed through (the shipped frontend).
-        assert await mw.dispatch(_Req("/api/tasks", "127.0.0.1"), call_next) == "PASSED"
+        # Loopback client WITH a loopback Host: the shipped frontend, allowed through.
+        # The Host header is required (round8 C3) -- a loopback peer alone is also what a
+        # DNS-rebinding request looks like, so it cannot be the whole test.
+        assert (
+            await mw.dispatch(
+                _Req("/api/tasks", "127.0.0.1", headers={"Host": "127.0.0.1:3080"}), call_next
+            )
+            == "PASSED"
+        )
+        assert (
+            await mw.dispatch(
+                _Req("/api/tasks", "::1", headers={"Host": "[::1]:3080"}), call_next
+            )
+            == "PASSED"
+        )
+        assert (
+            await mw.dispatch(
+                _Req("/api/tasks", "127.0.0.1", headers={"Host": "localhost:3080"}), call_next
+            )
+            == "PASSED"
+        )
 
         # Non-loopback client without a token: rejected with 401.
         blocked = await mw.dispatch(_Req("/api/tasks", "203.0.113.7"), call_next)
