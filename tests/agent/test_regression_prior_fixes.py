@@ -172,6 +172,69 @@ class TestBuiltinToolSchemaSet:
         assert recon_names <= full_names
 
 
+class TestTheLookupStubFallbackIsNotATypeErrorTrap:
+    """Round7 L7: `except TypeError` around the lookup conflated two different failures.
+
+    The fallback exists for a caller-side stub whose signature lacks `out_blocked`. But
+    `except TypeError` also caught a genuine TypeError raised INSIDE the real lookup, and
+    the retry then (a) ran the lookup a second time and (b) reported `gated=[]` -- so a bug
+    became "the run log says nothing was withheld". The decision is now made from the
+    signature, which cannot be confused with a failure of the call itself.
+    """
+
+    def test_a_stub_without_the_parameter_still_falls_back(self, monkeypatch):
+        from vulnclaw.agent import playbook as pb
+        from vulnclaw.agent import solver
+
+        seen: list[tuple] = []
+
+        def stub(queries, limit=2):          # no out_blocked: the caller-side shape
+            seen.append(("stub", limit))
+            return [{"slug": "note"}]
+
+        monkeypatch.setattr(pb, "lookup_playbook_multi", stub)
+        matches, gated = solver._lookup_prior_playbooks([("probe", "q")])
+        assert matches == [{"slug": "note"}]
+        assert gated == []
+        assert seen == [("stub", 2)]
+
+    def test_a_real_type_error_is_not_swallowed(self, monkeypatch):
+        """The stub accepts the parameter but fails inside: that must propagate."""
+        from vulnclaw.agent import playbook as pb
+        from vulnclaw.agent import solver
+
+        calls: list[bool] = []
+
+        def flaky(queries, limit=2, out_blocked=None):
+            calls.append(out_blocked is not None)
+            if out_blocked is not None:      # fails only on the diagnostics call
+                raise TypeError("internal bug while diagnosing")
+            return [{"slug": "note"}]
+
+        monkeypatch.setattr(pb, "lookup_playbook_multi", flaky)
+        with pytest.raises(TypeError, match="internal bug"):
+            solver._lookup_prior_playbooks([("probe", "q")])
+        assert calls == [True], "the lookup must not be retried after a genuine failure"
+
+    def test_the_real_implementation_is_called_with_diagnostics(self, monkeypatch):
+        from vulnclaw.agent import playbook as pb
+        from vulnclaw.agent import solver
+
+        captured: list[object] = []
+
+        def real(queries, limit=2, out_blocked=None):
+            captured.append(out_blocked)
+            if out_blocked is not None:
+                out_blocked.append({"slug": "withheld", "overlap_tokens": 1})
+            return [{"slug": "note"}]
+
+        monkeypatch.setattr(pb, "lookup_playbook_multi", real)
+        matches, gated = solver._lookup_prior_playbooks([("probe", "q")])
+        assert matches == [{"slug": "note"}]
+        assert gated == [{"slug": "withheld", "overlap_tokens": 1}]
+        assert captured and captured[0] is not None
+
+
 class TestRepetitionGuardRecordsLoop:
     """The repetition guard must persist its firing into cross-turn memory.
 

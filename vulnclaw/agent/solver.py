@@ -875,6 +875,25 @@ def _playbook_stat_line(m: dict) -> str:
     )
 
 
+def _accepts_out_blocked(func: Any) -> bool:
+    """Whether ``func`` takes the ``out_blocked`` diagnostics parameter.
+
+    Caller-side stubs may not (round7 L7). This must be decided from the SIGNATURE, not by
+    catching `TypeError`: that also swallowed a genuine TypeError raised INSIDE the real
+    lookup, after which the retry ran the lookup a second time and reported `gated=[]` --
+    i.e. one bug was converted into the run log stating "nothing was withheld". Asking the
+    signature cannot be confused with a failure of the call itself.
+    """
+    try:
+        import inspect
+
+        return "out_blocked" in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        # No introspectable signature (a C callable): the real implementation is
+        # signature-shaped, so assume the documented call.
+        return True
+
+
 def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
     """Run the merged lookup, returning ``(matches, rows the overlap floor withheld)``.
 
@@ -885,11 +904,10 @@ def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict],
     from vulnclaw.agent.playbook import lookup_playbook_multi
 
     gated: list[dict] = []
-    try:
+    if _accepts_out_blocked(lookup_playbook_multi):
         matches = lookup_playbook_multi(queries, limit=2, out_blocked=gated)
-    except TypeError:  # a caller-side stub without the diagnostics parameter
+    else:  # a caller-side stub without the diagnostics parameter
         matches = lookup_playbook_multi(queries, limit=2)
-        gated = []
     return matches, gated
 
 
