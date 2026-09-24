@@ -70,6 +70,27 @@ class EnvAdapter:
             ),
         )
 
+    async def read_challenge(self, ref):
+        return base.Challenge(
+            ref=ref,
+            name="不一样的flag",
+            category="REVERSE",
+            needs_env=False,
+            attachments=(
+                base.Attachment(
+                    name="challenge.zip", url=f"http://{FILE_HOST}/files/challenge.zip"
+                ),
+            ),
+        )
+
+
+FILE_HOST = "ctf2-files.dasctf.com"
+
+# The platform's own API/service host. It must NOT come into scope merely because an
+# attachment lives on a sibling subdomain (round-8 R8-3/R8-4 are two halves of one thing:
+# stop mining scope out of prose, and register the host the platform actually hands over).
+API_HOST = "ctf2.dasctf.com"
+
 
 @pytest.fixture(autouse=True)
 def _registry(monkeypatch):
@@ -161,3 +182,106 @@ async def test_missing_agent_and_broken_agent_are_harmless():
     assert TARGET_HOST in await dispatch_platform_tool("platform_read_env", {"ref": REF}, agent=broken)
     # An object with no session_state at all must not raise either.
     assert TARGET_HOST in await dispatch_platform_tool("platform_read_env", {"ref": REF}, agent=object())
+
+
+# ── round-8 R8-4: the attachment file host must be registered, not stumbled into ──
+#
+# The env path above was the ONLY scope-registration point either. The file host was
+# therefore reachable purely by accident: it worked when the run's description contained
+# no URL (because the scope then fell back to `dasctf.com` -- itself the R8-3 bug: a
+# prohibition sentence mined for a domain). As soon as the description carried a URL, the
+# scope read `[github.com]` and every fetch of an attachment URL the goal explicitly tells
+# the agent to use was refused, while the pre-download is best-effort and can be disabled
+# or silently degrade. Registering the host the platform itself published is the fix; it
+# follows the same principle as `_register_env_scope`.
+
+READ_REF = "envfake:practice:1:9"
+
+
+@pytest.mark.asyncio
+async def test_read_authorises_the_attachment_file_host():
+    agent = _agent(allowed_hosts=["github.com"])
+    out = await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    assert FILE_HOST in out, "the attachment URL must still be rendered to the model"
+    hosts = agent.session_state.task_constraints.allowed_hosts
+    assert FILE_HOST in hosts and "github.com" in hosts
+
+
+@pytest.mark.asyncio
+async def test_the_scope_gate_stops_refusing_the_attachment_host():
+    """The defect shape: instructing the agent to fetch a host the gate then refuses."""
+    agent = _agent(allowed_hosts=["github.com"])
+    before = enforce_host_path_constraints(agent, host=FILE_HOST)
+    assert before is not None and "outside allowed scope" in before, (
+        "precondition: without registration the attachment host is refused"
+    )
+    await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    assert enforce_host_path_constraints(agent, host=FILE_HOST) is None
+
+
+@pytest.mark.asyncio
+async def test_the_file_host_does_not_authorise_the_platform_api_host():
+    """The two findings must not cancel out: registering the file host is narrow.
+
+    `host_in_scope`'s suffix rule means adding `ctf2-files.dasctf.com` covers that host
+    and its subdomains only -- never the sibling API host. This is what makes R8-4
+    compatible with R8-3 instead of re-introducing it through the back door.
+    """
+    agent = _agent(allowed_hosts=["github.com"])
+    await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    assert enforce_host_path_constraints(agent, host=FILE_HOST) is None
+    refusal = enforce_host_path_constraints(agent, host=API_HOST)
+    assert refusal is not None and "outside allowed scope" in refusal
+
+
+@pytest.mark.asyncio
+async def test_reading_does_not_add_enforcement_to_an_unconstrained_run():
+    agent = _agent()
+    await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    constraints = agent.session_state.task_constraints
+    assert constraints.allowed_hosts == []
+    assert constraints.is_empty()
+
+
+@pytest.mark.asyncio
+async def test_attachment_registration_is_idempotent():
+    agent = _agent(allowed_hosts=["github.com"])
+    await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    await dispatch_platform_tool("platform_read", {"ref": READ_REF}, agent=agent)
+    hosts = agent.session_state.task_constraints.allowed_hosts
+    assert hosts.count(FILE_HOST) == 1
+
+
+@pytest.mark.asyncio
+async def test_reading_without_an_agent_is_harmless():
+    """The pure tool-face call shape keeps working, as for the env handlers."""
+    assert FILE_HOST in await dispatch_platform_tool("platform_read", {"ref": READ_REF})
+    broken = SimpleNamespace(session_state=SimpleNamespace(task_constraints=None))
+    assert FILE_HOST in await dispatch_platform_tool(
+        "platform_read", {"ref": READ_REF}, agent=broken
+    )
+    assert FILE_HOST in await dispatch_platform_tool(
+        "platform_read", {"ref": READ_REF}, agent=object()
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://a.example.com/x.zip", ["a.example.com"]),
+        ("http://b.example.com:8080/x.zip", ["b.example.com"]),
+        ("//c.example.com/x.zip", ["c.example.com"]),
+        ("d.example.com/x.zip", ["d.example.com"]),
+        ("", []),
+        ("not a url at all", []),
+    ],
+)
+def test_attachment_host_extraction_handles_the_url_shapes(url, expected):
+    from vulnclaw.platforms.tools import _attachment_hosts
+
+    challenge = base.Challenge(
+        ref=base.ChallengeRef("envfake", "practice", "1", "9"),
+        name="x",
+        attachments=(base.Attachment(name="x.zip", url=url),) if url else (),
+    )
+    assert _attachment_hosts(challenge) == expected

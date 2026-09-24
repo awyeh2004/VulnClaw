@@ -23,6 +23,7 @@ kill the agent loop, and a mis-addressed ref must tell the model how to fix it.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Awaitable, Callable
 
 from vulnclaw.platforms import base, registry
@@ -410,15 +411,104 @@ def _platform_error(token: str) -> str:
     return "[platform] unexpected state"
 
 
-async def _handle_read(args: dict[str, Any]) -> str:
+async def _handle_read(args: dict[str, Any], agent: Any = None) -> str:
     resolved = _resolve(args)
     if isinstance(resolved, str):
         return resolved
     adapter, ref = resolved
     try:
-        return render_challenge(await adapter.read_challenge(ref))
+        challenge = await adapter.read_challenge(ref)
     except Exception as exc:  # noqa: BLE001
         return f"[platform] reading {ref.token()} failed: {type(exc).__name__}: {exc}"
+    _register_challenge_scope(agent, challenge)
+    return render_challenge(challenge)
+
+
+def _authorise_hosts(agent: Any, hosts: Any) -> bool:
+    """Add hosts the platform itself handed us to an ALREADY-ENFORCING run scope.
+
+    Shared by the env-endpoint path and the attachment path, so the two cannot drift on
+    the rule that matters: an empty constraint set means nothing is being enforced, and
+    adding a host there would START blocking hosts a run could previously reach (the
+    public writeup a description links to, say). Only a run that is already enforcing
+    gets the host. Never raises: scope bookkeeping must not break a tool call.
+    """
+    try:
+        constraints = getattr(
+            getattr(agent, "session_state", None), "task_constraints", None
+        )
+        if constraints is None or constraints.is_empty():
+            return False
+        current = list(getattr(constraints, "allowed_hosts", []) or [])
+        added = False
+        for raw in hosts or ():
+            host = str(raw or "").strip().lower().rstrip(".")
+            if host and host not in current:
+                current.append(host)
+                added = True
+        if added:
+            constraints.allowed_hosts = current
+        return added
+    except Exception:  # noqa: BLE001 - scope bookkeeping must never fail a tool call
+        return False
+
+
+# Host-shaped: letters/digits/hyphens/dots, no spaces or punctuation. Used only for the
+# bare `host/path` attachment form, where there is no scheme to parse.
+_HOST_SHAPE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+
+
+def _attachment_hosts(challenge: Any) -> list[str]:
+    """Hosts of a challenge's published attachments, from the platform's own URLs.
+
+    Only hosts that look like hosts are returned: an attachment row carrying free text
+    (`note` in the URL field, a malformed row) must not put an arbitrary string into the
+    run's allowlist. A row with no usable URL contributes nothing -- the scope gate is
+    the wrong place to guess.
+    """
+    hosts: list[str] = []
+    for attachment in getattr(challenge, "attachments", ()) or ():
+        url = str(getattr(attachment, "url", "") or "").strip()
+        if not url:
+            continue
+        host = ""
+        try:
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(url).hostname or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            host = ""
+        if not host:
+            # A scheme-relative or bare `host/path` form: take the first component, but
+            # validate it -- `urlsplit("not a url at all")` yields no hostname, and the
+            # naive split would happily return the whole sentence.
+            candidate = (
+                url.split("//", 1)[-1].split("/", 1)[0].split("@")[-1].split(":")[0]
+            ).strip().lower()
+            if _HOST_SHAPE_RE.match(candidate) and ("." in candidate or candidate == "localhost"):
+                host = candidate
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _register_challenge_scope(agent: Any, challenge: Any) -> None:
+    """Authorise the attachment file host a challenge's own URLs point at.
+
+    Round-8 finding R8-4. The env-endpoint path was the ONLY scope-registration point, so
+    the file host was reachable purely by accident: it worked only when the run had no URL
+    in its description, because the scope was then derived from `dasctf.com` -- itself the
+    R8-3 bug (a prohibition sentence mined for a domain). Once the description DID contain
+    a URL the scope read `[github.com]` and every fetch of an attachment was refused with
+    `[constraint_violation]`, while the goal instructs the agent to fetch those exact URLs.
+    The pre-download is best-effort and can be switched off or silently degrade, so that
+    refusal left the agent with a challenge it was told to download and could not touch.
+
+    Registering here follows the same principle as :func:`_register_env_scope`: this is
+    code that learns the authorised host from the platform itself rather than by guessing
+    from prose, and the platform is what published the file.
+    """
+    _authorise_hosts(agent, _attachment_hosts(challenge))
 
 
 def _register_env_scope(agent: Any, info: Any) -> None:
@@ -445,6 +535,9 @@ def _register_env_scope(agent: Any, info: Any) -> None:
     public writeup referenced by the description). Only an already-enforcing run
     gets the endpoint added, and the port is added only when the run constrains
     ports. Never raises: scope bookkeeping must not break a tool call.
+
+    The host half is :func:`_authorise_hosts`, shared with the attachment path
+    (:func:`_register_challenge_scope`) so the two cannot drift apart on that rule.
     """
     try:
         constraints = getattr(
@@ -456,24 +549,20 @@ def _register_env_scope(agent: Any, info: Any) -> None:
             return  # an incomplete payload has no endpoint to authorise yet
         if constraints.is_empty():
             return
-        hosts = list(getattr(constraints, "allowed_hosts", []) or [])
+        _authorise_hosts(
+            agent,
+            (getattr(endpoint, "host", "") for endpoint in getattr(info, "endpoints", ()) or ()),
+        )
         ports = list(getattr(constraints, "allowed_ports", []) or [])
+        if not ports:
+            return  # the run constrains no ports, so there is none to authorise
         added = False
         for endpoint in getattr(info, "endpoints", ()) or ():
-            host = str(getattr(endpoint, "host", "") or "").strip().lower()
-            if host and host not in hosts:
-                hosts.append(host)
-                added = True
             port = getattr(endpoint, "port", None)
-            if ports and port:
-                port = int(port)
-                if port not in ports:
-                    ports.append(port)
-                    added = True
-        if not added:
-            return
-        constraints.allowed_hosts = hosts
-        if ports:
+            if port and int(port) not in ports:
+                ports.append(int(port))
+                added = True
+        if added:
             constraints.allowed_ports = ports
     except Exception:  # noqa: BLE001 - scope bookkeeping must never fail a tool call
         return
@@ -660,6 +749,12 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] = {
 
 PLATFORM_TOOL_NAMES: frozenset[str] = frozenset(_HANDLERS)
 
+# Handlers that need the agent: they register what the platform handed us (a provisioned
+# endpoint, a published attachment host) into an already-enforcing run scope.
+_AGENT_AWARE: frozenset[str] = frozenset(
+    {"platform_read", "platform_start_env", "platform_read_env"}
+)
+
 
 async def dispatch_platform_tool(
     tool_name: str, args: dict[str, Any], *, agent: Any = None
@@ -667,9 +762,10 @@ async def dispatch_platform_tool(
     """Route a platform tool call to its handler.
 
     ``agent`` is keyword-only and optional so the pure tool-face tests can keep
-    calling ``dispatch_platform_tool(name, args)``; the env handlers use it to
-    authorise the endpoint the platform just provisioned (see
-    :func:`_register_env_scope`).
+    calling ``dispatch_platform_tool(name, args)``; the handlers listed in
+    ``_AGENT_AWARE`` use it to authorise what the platform just handed us -- the
+    endpoint it provisioned (:func:`_register_env_scope`) or the file host its
+    published attachment URLs point at (:func:`_register_challenge_scope`).
     """
     from vulnclaw.platforms.bootstrap import ensure_adapters
 
@@ -677,6 +773,6 @@ async def dispatch_platform_tool(
     handler = _HANDLERS.get(tool_name)
     if handler is None:
         return f"[platform] unknown platform tool: {tool_name}"
-    if tool_name in {"platform_start_env", "platform_read_env"}:
+    if tool_name in _AGENT_AWARE:
         return await handler(args, agent)
     return await handler(args)
