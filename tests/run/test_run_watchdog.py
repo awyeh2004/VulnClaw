@@ -123,3 +123,41 @@ def test_current_state_survives_a_file_vanishing(watchdog, tmp_path, monkeypatch
 
     monkeypatch.setattr(Path, "stat", _flaky_stat)
     assert watchdog._current_state(run_dir) == run_dir / "t1" / "current.json"
+
+
+class TestStallVerdictDeepWork:
+    """Findings on record turn a silent stall into DEEP_WORK (c03 lesson)."""
+
+    def _run_dir_with_state(self, tmp_path, findings):
+        import json
+        import time
+
+        run_dir = tmp_path / "runs" / "r1"
+        state_dir = run_dir / "targets" / "abc" / "state"
+        state_dir.mkdir(parents=True)
+        state = {"phase": "vuln_discovery", "findings": findings}
+        p = state_dir / "current.json"
+        p.write_text(json.dumps(state), encoding="utf-8")
+        time.sleep(0.01)
+        return run_dir
+
+    def test_findings_turn_stall_into_deep_work(self, watchdog, tmp_path):
+        run_dir = self._run_dir_with_state(
+            tmp_path, [{"title": "RCE candidate (pending)", "confidence": 0.55}]
+        )
+        verdict, detail = watchdog._stall_verdict(run_dir, 1200.0, "state.jsonl", "running")
+        assert verdict == "DEEP_WORK"
+        assert "do NOT kill" in detail
+        assert "RCE candidate" in detail
+
+    def test_no_findings_stays_stuck(self, watchdog, tmp_path):
+        run_dir = self._run_dir_with_state(tmp_path, [])
+        verdict, detail = watchdog._stall_verdict(run_dir, 1200.0, "state.jsonl", "running")
+        assert verdict == "STUCK"
+        assert "do NOT kill" not in detail
+
+    def test_string_findings_do_not_crash(self, watchdog, tmp_path):
+        run_dir = self._run_dir_with_state(tmp_path, ["legacy plain-string finding"])
+        verdict, detail = watchdog._stall_verdict(run_dir, 1200.0, "state.jsonl", "running")
+        assert verdict == "DEEP_WORK"
+        assert "legacy plain-string finding" in detail

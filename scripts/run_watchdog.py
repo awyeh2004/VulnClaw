@@ -435,13 +435,51 @@ how to read the verdict (always the first line of the final block):
   NEEDS_INPUT       the run is WAITING ON YOU. Read the 'question:' line, answer
                     it in the session, then re-check. Do NOT record it finished.
   ENDED:FAILED      the process failed
-  STUCK             no activity for --stall-secs; look for what blocked it
+  DEEP_WORK         silence WITH findings on record — the post-finding reasoning
+                    stretch (exploit construction), the most expensive part of a
+                    run. Do NOT kill; re-check with a wider budget.
+  STUCK             no activity for --stall-secs AND no findings; look for what
+                    blocked it
   NO_RUN_DIR        no run.json appeared; the run name or --home is probably wrong
   TIMEOUT           still running when --max-minutes elapsed; the block shows how far
 
 exit code is always 0 -- the verdict is the first line of stdout, and a non-zero
 exit would be indistinguishable from the watchdog itself failing.
 """
+
+
+def _stall_verdict(run_dir: Path, age: float, source: str, status: str) -> tuple[str, str]:
+    """DEEP_WORK vs STUCK for a run whose activity is older than the budget.
+
+    c03 lesson, encoded: the stretch RIGHT AFTER the first finding is the most
+    expensive reasoning of the run (exploit construction and verification), and
+    it can be silent for many minutes. Killing the run there is exactly how the
+    2nd c03 attempt died — minutes from a breakthrough. With findings on record
+    we report DEEP_WORK so the supervisor widens the budget instead of treating
+    silence as death. Zero findings + silence stays a plain STUCK.
+    """
+    detail = f"no activity for {_fmt_age(age)} (newest: {source})"
+    if status:
+        detail = f"status={status} but " + detail
+    state_path = _current_state(run_dir)
+    findings: list = []
+    if state_path is not None:
+        findings = _read_json(state_path).get("findings") or []
+    if findings:
+        last_raw = findings[-1]
+        last_finding = str(
+            last_raw.get("title") or last_raw.get("description") or "?"
+            if isinstance(last_raw, dict)
+            else last_raw
+        )[:120]
+        detail = (
+            f"{len(findings)} finding(s) on record, last: {last_finding} | "
+            + detail
+            + " — do NOT kill; this is the post-finding reasoning stretch. "
+            "Re-check with a wider --stall-secs / --max-minutes."
+        )
+        return "DEEP_WORK", detail
+    return "STUCK", detail
 
 
 def main() -> int:
@@ -551,16 +589,14 @@ def main() -> int:
 
         # ── stall (age == -1 means unknown, never stale) ────────────────
         if age >= 0 and age > args.stall_secs:
-            detail = f"no activity for {_fmt_age(age)} (newest: {source})"
-            if status:
-                detail = f"status={status} but " + detail
-            if args.verbose and log_path:
+            verdict, detail = _stall_verdict(run_dir, age, source, status)
+            if verdict == "STUCK" and args.verbose and log_path:
                 try:
                     tail = log_path.read_text(encoding="utf-8", errors="replace")[-400:]
                     detail += "\n--- tail ---\n" + tail.strip()
                 except OSError:
                     pass
-            return emit("STUCK", detail)
+            return emit(verdict, detail)
 
         # ── reassurance every 10 minutes (2 lines, cheap) ───────────────
         now = time.time()
