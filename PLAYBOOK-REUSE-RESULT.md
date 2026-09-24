@@ -221,8 +221,29 @@ redirects to login ...`），判别性名字只在 `name`。而 `lookup_playbook
 6. **`fetch` 之外的 MCP 工具输出格式未逐一验证**：现版对任意工具文本做"找 title / 找头 /
    找带斜杠路径"，未识别就返回空（安全降级），但没有为每种 MCP 工具写夹具。
 7. **旧库里那条坏条目没删**（见 §6）：`autonotes-babyfengshui-33c3-2016` 的 fingerprint 仍是
-   `'E:'`。**新的落盘闸只防将来，不改旧数据**——旧条目要么留着（它靠 name 里的
-   `babyfengshui` 还能被"按题名查"的路径召回），要么由人决定迁移/删除，本轮没动它。
+   `'E:'`。**新的落盘闸只防将来，不改旧数据**——旧条目要么留着（
+   ~~它靠 name 里的 `babyfengshui` 还能被"按题名查"的路径召回~~），要么由人决定迁移/删除，
+   本轮没动它。
+
+   > **更正（round7 D1，round9 复核并实测）**：上面那句"靠 name 还能被按题名查召回"**不成立**。
+   > `Playbook.score()` 只数 `self.tokens()`（即 **fingerprint** 的 token），name 不在其中——
+   > name 只进 `identity_tokens()`，而后者只用于 `lookup_playbook_multi` 里的 **overlap 计数**，
+   > 那一步的前提是该行**已经**过了 `score >= min_score` 的门。
+   >
+   > 实测（临时库里复刻这条笔记的确切形状：`fingerprint: E:` + `name: AutoNotes
+   > babyfengshui_33c3_2016`）：
+   >
+   >     note.tokens()                 = set()
+   >     note.identity_tokens()        = ['33c3', 'autonotes', 'babyfengshui']
+   >     _note_is_queryable('E:', name) = False
+   >     lookup_playbook('babyfengshui_33c3_2016')          -> NOT FOUND  score()=0.0
+   >     lookup_playbook('AutoNotes babyfengshui')          -> NOT FOUND  score()=0.0
+   >     lookup_playbook('babyfengshui_33c3_2016 heap UAF')  -> NOT FOUND  score()=0.0
+   >
+   > 即**用它的名字去查也查不到**（`score=0.0 < min_score=0.15`），连它自己的 name 都救不了它；
+   > `list_playbooks()` 之外也没有别的读入口。所以"留着"不等于"还留着一点用"——它只是占位，
+   > 必须由人迁移或删除。这条更正过的事实被
+   > `tests/agent/test_playbook_auto_reuse.py::TestAScoreOfZeroIsUnreachableByNameToo` 守着。
 8. **纯中文目标/题面形成不了 key**：`_tokenize` 只认 ASCII 字母数字，`'中文目标'` →
    `set()`、`'企业合同审批系统 本地文件包含'` → `set()`。所以：
    * 新的落盘闸对"中文 goal + 退化 target"会**拒绝落盘**（旧行为是静默写一条死笔记）——
@@ -279,7 +300,9 @@ redirects to login ...`），判别性名字只在 `name`。而 `lookup_playbook
 * 其余 48 种组合全部落盘且**实测可召回**（用自己的 fingerprint 与同一轮的 `target_fingerprint`
   两种查法都命中），包括真实那条 `target='E:'` + 技术词 goal 的场景；
 * 真实库审计：`ab-config-B`(8) 与 home(70) 两份库，`identity_tokens` 为空的笔记 **0 条**；
-  `fingerprint` 本身 token 为空的只有那 1 条 `'E:'`（它靠 name 尚能被"按题名查"召回）。
+  `fingerprint` 本身 token 为空的只有那 1 条 `'E:'`
+  （~~它靠 name 尚能被"按题名查"召回~~ —— **已证伪，见 §4.7 的更正：`score()` 只数
+  fingerprint 的 token，用它自己的 name 查也是 `score=0.0`、`NOT FOUND`**）。
 
 **[实测] 代价**：闸会让"退化 target + 纯中文/单字符 goal"的组合不再落盘——旧行为是静默写一条
 **永远查不到**的死笔记。也就是说这一轮把缺陷**暴露**成"不写"，而不是修好中文可召回性（见 §4.8）。

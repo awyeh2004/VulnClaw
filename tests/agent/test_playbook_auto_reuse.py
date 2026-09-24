@@ -796,6 +796,68 @@ class TestCaptureRefusesToWriteANoteNobodyCanRecall:
             assert any(h["slug"] == note.slug for h in hits), f"{note.slug} is not recallable"
 
 
+class TestAScoreOfZeroIsUnreachableByNameToo:
+    """round7 D1 correction, measured at round9: the NAME does not rescue such a note.
+
+    `PLAYBOOK-REUSE-RESULT.md` §4.7 and §6 used to say the stale `'E:'` entry "靠 name 里的
+    babyfengshui 还能被按题名查的路径召回". That is false, and the distinction matters for
+    anyone deciding whether a legacy entry can be left in place:
+
+    * `Playbook.score()` counts the QUERY's tokens found in `self.tokens()`, i.e. the
+      FINGERPRINT only;
+    * the name enters `identity_tokens()`, which is consulted for the OVERLAP COUNT in
+      `lookup_playbook_multi` -- a step that runs only for rows that ALREADY cleared
+      `score >= min_score`.
+
+    So a note whose fingerprint tokenizes to nothing is unreachable by every read path,
+    including a query made of its own title.
+    """
+
+    def _legacy_note(self, tmp_playbooks):
+        (tmp_playbooks / "autonotes-babyfengshui-33c3-2016.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: AutoNotes babyfengshui_33c3_2016",
+                    "fingerprint: E:",
+                    "status: draft",
+                    "source: auto",
+                    "---",
+                    "",
+                    "LOCK: heap UAF on the user description pointer; flag in /flag",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    def test_the_name_tokens_are_there_but_do_not_help(self, tmp_playbooks):
+        self._legacy_note(tmp_playbooks)
+        note = pb.list_playbooks()[0]
+        assert note.tokens() == set(), "precondition: the fingerprint tokenizes to nothing"
+        assert "babyfengshui" in note.identity_tokens(), (
+            "the name tokens exist -- they are simply not what score() reads"
+        )
+        assert pb._note_is_queryable("E:", note.name) is False
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "babyfengshui_33c3_2016",
+            "babyfengshui",
+            "AutoNotes babyfengshui",
+            "babyfengshui_33c3_2016 heap UAF",
+            "E:",
+            "heap UAF",
+        ],
+    )
+    def test_no_query_reaches_it(self, tmp_playbooks, query):
+        self._legacy_note(tmp_playbooks)
+        assert pb.lookup_playbook(query, limit=5) == []
+        rows = pb.lookup_playbook_multi([("target", query), ("class", query)], limit=5)
+        assert rows == [], f"{query!r} reached the note: {rows}"
+
+
 def test_solver_prompt_injects_prior_brief():
     from vulnclaw.agent.solver import _system_prompt
 
