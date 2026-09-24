@@ -47,10 +47,104 @@ AUTO_NOTES_PREFIX = "AutoNotes"
 #   * `CTF2{...}` -- the format of the platform this tool drives -- did not match at
 #     all, so BabySQL's per-instance flag was stored in full;
 #   * `DASCTF{...}`/`BUUCTF{...}` matched only from the inner "CTF{".
+#
+# Round-8 finding R8-6: deriving from that list fixed the DRIFT but not the CLOSURE. A
+# list of platform names can never be complete -- the audit named `HGAME{}`, `GWHT{}`,
+# `HTB{}`, `THM{}`, `cyberpeace{}`, `0xGame{}` and `ISCC{}` as real platforms missing
+# from it -- and two shape limits sat on top: a separator spelling (`flag1{`, `flag_{`)
+# did not match at all, and a body longer than 80 characters was left verbatim.
+#
+# The gate therefore no longer depends on knowing the platform:
+#
+#   1. KNOWN prefix (the canonical list, now also allowing a `1`/`_`/`9mm` style
+#      separator before the brace) -> redacted whatever the body looks like;
+#   2. UNKNOWN prefix of flag-ish shape (`SOMEPLATFORM{...}`, possibly digit-leading as
+#      in `0xGame{}`) -> redacted when the body looks like flag material rather than
+#      code. That test is what keeps a note's CSS (`body{color:red}`) or JS
+#      (`else{return}`) intact: a body is treated as a flag only if it is drawn from the
+#      flag charset AND carries a digit, an uppercase letter or a separator -- which
+#      every real flag body does and stylesheet text does not.
+#
+# The body cap is 200, not 80: exceeding a length is not a reason to store a flag.
+_FLAGISH_PREFIX = r"(?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{2,24}"
+_FLAG_BODY_MAX = 200
+# NOTE the extra `(?:...)`: alternation binds loosest, so `known|generic\{body\}`
+# without it would match a bare platform name anywhere in ordinary prose and never
+# require a body -- group(2) would be None and `len(inner)` would raise.
 _FLAG_FINGERPRINT_RE = re.compile(
-    "(" + "|".join(re.escape(name) for name in FLAG_PREFIX_NAMES) + r")\{([^{}]{1,80})\}",
+    r"((?:" + "|".join(re.escape(name) for name in FLAG_PREFIX_NAMES) + r")(?:[0-9_]{0,3})?"
+    r"|" + _FLAGISH_PREFIX + r")"
+    r"\{([^{}]{1," + str(_FLAG_BODY_MAX) + r"})\}",
     re.IGNORECASE,
 )
+# Charset a flag body is drawn from. `:` and `.` are deliberately absent: they are what
+# `color:red` and `1..10` are made of, and a real flag using them still comes through
+# tier 1 above (its prefix is a known platform name).
+_FLAG_BODY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-+=/!@#$%^&*]+$")
+_FLAG_BODY_SIGNAL_RE = re.compile(r"[0-9A-Z_\-+=/]")
+# Identifiers that precede a `{` in ordinary code/stylesheet text. Only consulted for
+# tier 2, where guessing wrong is possible.
+_NON_FLAG_BRACE_WORDS = frozenset(
+    {
+        "body", "html", "head", "media", "font", "keyframes", "supports", "root",
+        "function", "return", "class", "def", "lambda", "import", "format", "print",
+        "dict", "list", "set", "tuple", "map", "filter", "regex", "pattern", "query",
+    }
+)
+
+_KNOWN_PREFIX_CACHE: Optional[tuple[tuple[str, ...], "re.Pattern[str]"]] = None
+
+
+def _known_flag_prefix_re() -> "re.Pattern[str]":
+    """Compiled matcher for tier 1, rebuilt when the canonical list changes.
+
+    Read through the module global rather than captured at import time: the canonical
+    tuple is monkeypatched in tests and may be extended at runtime, and a cached pattern
+    built from a stale tuple would silently stop covering a newly added platform.
+    """
+    global _KNOWN_PREFIX_CACHE
+    names = tuple(FLAG_PREFIX_NAMES)
+    cached = _KNOWN_PREFIX_CACHE
+    if cached is None or cached[0] != names:
+        cached = (
+            names,
+            re.compile(
+                "(?:" + "|".join(re.escape(name) for name in names) + r")(?:[0-9_]{0,3})?",
+                re.IGNORECASE,
+            ),
+        )
+        _KNOWN_PREFIX_CACHE = cached
+    return cached[1]
+
+
+def _is_known_flag_prefix(prefix: str) -> bool:
+    return _known_flag_prefix_re().fullmatch(prefix) is not None
+
+
+def _looks_like_flag_body(inner: str) -> bool:
+    """Whether an unknown-prefix `{...}` body is flag material rather than code.
+
+    Deliberately shape-based, not name-based: this is the half that has to work for a
+    platform nobody has heard of yet. A body qualifies when it is drawn from the flag
+    charset, carries no whitespace, and either contains a digit/uppercase/separator or is
+    long enough (12+) that it is not an ordinary identifier.
+
+    `color:red` (a colon), `return` (no signal character, short), `1..10` (dots) and
+    `deadbeef` (8 lowercase chars) all fail; `9f113b92-cb26-424a`, `abcdef123456` and
+    `abcdefghijklmnop` pass.
+
+    Documented limit: an unknown-prefix body that is both short and signal-free
+    (`GWHT{x}`) is kept. Redacting it would mean mangling `if{ready}`-shaped code, and a
+    sub-12-character lowercase body is not a submittable flag in any observed format.
+    """
+    body = str(inner or "").strip()
+    if not body or len(body) > _FLAG_BODY_MAX:
+        return False
+    if not _FLAG_BODY_CHARSET_RE.match(body):
+        return False
+    if _FLAG_BODY_SIGNAL_RE.search(body) is not None:
+        return True
+    return len(body) >= 12
 
 
 def _fingerprint_flags(text: str) -> str:
@@ -69,6 +163,10 @@ def _fingerprint_flags(text: str) -> str:
     keep full values for a length range, and 12 was not even principled: the fingerprint
     form `first4…last4` is 9 characters, so a 12-character body fingerprints fine.
 
+    Two tiers (round-8 R8-6, see the regex comment): a KNOWN platform prefix is redacted
+    whatever its body looks like, an UNKNOWN one is redacted when the body looks like flag
+    material -- so the gate no longer depends on a list of platform names being complete.
+
     Idempotent by construction: the fingerprint form still matches the pattern, so
     applying this twice is the same as applying it once. The read path
     (``Playbook.from_frontmatter``) relies on that to filter notes written before the
@@ -76,6 +174,10 @@ def _fingerprint_flags(text: str) -> str:
     """
     def _fp(m: re.Match) -> str:
         prefix, inner = m.group(1), m.group(2)
+        if not _is_known_flag_prefix(prefix) and (
+            prefix.lower() in _NON_FLAG_BRACE_WORDS or not _looks_like_flag_body(inner)
+        ):
+            return m.group(0)
         if len(inner) > 8:
             return f"{prefix}{{{inner[:4]}…{inner[-4:]}}}"
         # Too short to keep both ends without keeping everything: keep the prefix only,

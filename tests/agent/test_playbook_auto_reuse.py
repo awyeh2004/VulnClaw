@@ -298,6 +298,104 @@ class TestNoFieldOfANoteLeaksAFlag:
         assert self.FLAG not in stored
 
 
+class TestTheGateDoesNotDependOnKnowingThePlatform:
+    """Round-8 finding R8-6: the prefix list is not, and cannot be, a closed set.
+
+    Deriving the regex from `FLAG_PREFIX_NAMES` fixed the DRIFT (three copies had already
+    diverged) but not the CLOSURE: the audit named `HGAME{}`, `GWHT{}`, `HTB{}`, `THM{}`,
+    `cyberpeace{}`, `0xGame{}` and `ISCC{}` as real platforms missing from it, and the
+    shape limits on top leaked two more ways -- a separator spelling (`flag1{`, `flag_{`)
+    never matched, and a body longer than 80 characters was stored verbatim.
+
+    The gate is now two-tier: a known platform prefix is redacted whatever its body looks
+    like, and an UNKNOWN prefix is redacted when the body looks like flag material. That
+    second tier is what makes the list non-load-bearing.
+
+    `FLAG_PREFIX_NAMES` itself is deliberately left alone: it is also the flag-CLAIM
+    detection list, where `ctf_mode.GENERIC_FLAG_PATTERN` already covers any `word{...}`,
+    so widening it there would change detection, not hygiene.
+    """
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "HGAME{abcdef123456}",
+            "GWHT{abcdef123456}",
+            "HTB{abcdef123456}",
+            "THM{abcdef123456}",
+            "cyberpeace{abcdef123456}",
+            "0xGame{abcdef123456}",          # digit-leading prefix
+            "ISCC{abcdef123456}",
+            "SomePlatformNobodyHasHeardOf{Y3t_a9ain}",
+        ],
+    )
+    def test_an_unknown_platform_prefix_is_still_redacted(self, flag):
+        out = pb._fingerprint_flags(f"CONFIRMED: {flag} accepted")
+        assert flag not in out, f"{flag} survived a list-based gate"
+        assert "…" in out
+
+    @pytest.mark.parametrize("flag", ["flag1{abcdef123456}", "flag_{abcdef123456}",
+                                      "flag2{abcdef123456}", "FLAG_9{abcdef123456}"])
+    def test_a_separator_before_the_brace_no_longer_escapes(self, flag):
+        assert flag not in pb._fingerprint_flags(flag), flag
+
+    def test_a_body_longer_than_the_old_cap_is_redacted(self):
+        """80 was a redaction cap, i.e. a length that made storing a flag acceptable."""
+        for size in (81, 120, 199):
+            body = ("a1" * 120)[:size]
+            flag = f"flag{{{body}}}"
+            assert flag not in pb._fingerprint_flags(flag), size
+
+    def test_a_known_prefix_is_redacted_whatever_the_body_looks_like(self):
+        """Tier 1 does not consult the body -- a platform flag can be any shape."""
+        for flag in ("CTF2{a.b:c}", "flag{hello world}", "DASCTF{!!weird!!}"):
+            assert flag not in pb._fingerprint_flags(flag), flag
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "HGAME{abcdefghijklmnop}",       # long, all lowercase, no separator
+            "THM{thisisaquiteLongBody}",     # long, no digit either
+        ],
+    )
+    def test_a_lowercase_body_is_still_a_flag_when_it_is_long_enough(self, flag):
+        """Some platforms issue all-lowercase flags; length is the tell, not digits."""
+        assert flag not in pb._fingerprint_flags(flag), flag
+
+    def test_a_short_unknown_body_is_left_alone_and_that_is_documented(self):
+        """The documented limit of tier 2: `GWHT{x}` is kept.
+
+        Redacting every `word{short}` would mangle `if{ready}`-shaped code, and a
+        sub-12-character lowercase body is not a submittable flag in any observed format.
+        """
+        assert pb._fingerprint_flags("GWHT{x}") == "GWHT{x}"
+        assert pb._fingerprint_flags("if{ready}") == "if{ready}"
+        assert pb._fingerprint_flags("sha256{deadbeef}") == "sha256{deadbeef}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the page uses body{color:red} and returns 200",
+            "if (x) else{return} nothing",
+            "the regex [a-z]{3} matches the token",
+            "payload {{7*7}} for the SSTI probe",
+            r"python: re.sub(r'\d{4}', '', s)",
+            "bash: for i in array{1..10}; do echo $i; done",
+            "a plain JSON body {\"k\": \"v\"} in the response",
+            "media(min-width:600px){.a{color:red}}",
+        ],
+    )
+    def test_ordinary_code_in_a_note_is_left_alone(self, text):
+        """The unknown-prefix tier must not mangle the scripts a note carries."""
+        assert pb._fingerprint_flags(text) == text
+
+    def test_redaction_is_idempotent(self):
+        """The read path applies it to already-redacted notes; twice must equal once."""
+        for flag in ("HGAME{abcdef123456}", "flag1{abcdef123456}", "flag{222441144222}"):
+            once = pb._fingerprint_flags(flag)
+            assert pb._fingerprint_flags(once) == once, flag
+
+
 def test_save_playbook_redacts_before_writing(tmp_playbooks):
     """The gate has to work on the model-initiated path too, not only capture_run_notes."""
     ack = pb.save_playbook(
