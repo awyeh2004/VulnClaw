@@ -157,3 +157,50 @@ class TestCaptchaIsNotReportedAsARateLimit:
         message = str(excinfo.value)
         assert "INVALID_REQUEST" in message
         assert "confirmation" in message
+
+
+class TestTheRiskBranchKeepsThePlatformsOwnMessage:
+    """Round8 L5: the risk-control branch dropped `detail`, already extracted above.
+
+    With a CAPTCHA there is often nothing else to say, which is why the recorded payload
+    has no top-level `error` (see `ctf2_payloads.SUBMIT_RISK_CONTROL_PAYLOAD`). But when
+    the platform DOES explain itself in the same response, the explanation is the only
+    specific thing in the message, and the risk note alone ("an unspecified human check")
+    is not actionable.
+    """
+
+    def _risk_with_error(self, error):
+        return {
+            "data": {"risk_action": "challenge", "risk_challenge": {"image": "data:,"}},
+            "error": error,
+        }
+
+    def test_the_platform_message_is_appended_to_the_risk_note(self):
+        with pytest.raises(RuntimeError) as excinfo:
+            ctf2._raise_for_status(
+                _response(429, self._risk_with_error({"code": "TOO_MANY_REQUESTS"}))
+            )
+
+        message = str(excinfo.value)
+        # The instruction still comes first: it is what stops a retry loop.
+        assert "DO NOT retry" in message
+        assert "TOO_MANY_REQUESTS" in message
+        assert message.index("risk_action=") < message.index("TOO_MANY_REQUESTS")
+
+    def test_the_recorded_captcha_payload_is_unchanged(self):
+        """No error field means no suffix: the existing message must not grow."""
+        with pytest.raises(RuntimeError) as excinfo:
+            ctf2._raise_for_status(_response(429, ctf2_payloads.SUBMIT_RISK_CONTROL_PAYLOAD))
+
+        message = str(excinfo.value)
+        assert "the platform said" not in message
+        assert "HUMAN-VERIFICATION" in message
+
+    def test_a_huge_body_cannot_flood_the_run_log(self):
+        with pytest.raises(RuntimeError) as excinfo:
+            ctf2._raise_for_status(
+                _response(429, self._risk_with_error("X" * 5000))
+            )
+
+        message = str(excinfo.value)
+        assert len(message) < 1200, len(message)

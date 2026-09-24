@@ -229,7 +229,14 @@ def _raise_for_status(response: httpx.Response) -> None:
         detail = payload_text
     risk = _risk_control_note(response)
     if risk:
-        raise RuntimeError(f"CTF2 API {response.status_code}: {risk}")
+        # Round8 L5: this branch used to throw away `detail` -- the platform's own error
+        # message, already extracted two lines above -- so a risk-control response that
+        # ALSO explains itself ("please wait 60s", "flag already submitted") lost that
+        # explanation. The risk note goes first because it carries the instruction ("do
+        # not retry"), and the platform's words follow it as the specific reason. Capped
+        # like the non-JSON fallback above: this text lands in a run log.
+        suffix = f" | the platform said: {detail[:300]}" if detail else ""
+        raise RuntimeError(f"CTF2 API {response.status_code}: {risk}{suffix}")
     raise RuntimeError(
         f"CTF2 API {response.status_code}: {detail or response.reason_phrase}"
     )
