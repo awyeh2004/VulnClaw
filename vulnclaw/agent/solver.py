@@ -538,6 +538,13 @@ _START_ENV_TOOL_NAMES = frozenset(
     {"ctf2_start_environment", "gcs_build_env", "platform_start_env"}
 )
 
+# How many times a run may re-query the note store with probe-measured features.
+# Two, not "every step": the second probe of a live target usually confirms the first
+# (same title, same headers), and a refresh that fires on every step would rewrite the
+# system prompt for nothing while making the `playbook_refreshed` line useless as
+# evidence -- "it refreshed" has to mean "the notes changed".
+_PLAYBOOK_REFRESH_LIMIT = 2
+
 
 def _pwn_local_first_reminder(agent: AgentState, state: AgentState, origin: str) -> Optional[str]:
     """One-shot correction when the model starts a REMOTE pwn instance while a
@@ -793,6 +800,235 @@ def _notify_operator(stream_sink: Any, message: str) -> None:
         pass
 
 
+def _brief_header(probe_query: str = "") -> str:
+    """The brief's opening line, with the probe-derived re-query made explicit."""
+    header = (
+        "\n\n# Prior-run notes (auto-matched: this target, or the same challenge "
+        "class)\n"
+    )
+    if probe_query:
+        header += (
+            "Re-matched AFTER the first probe, using features measured from the "
+            "responses (page title / headers / paths / form fields): "
+            f"`{one_line(probe_query, 200)}`. These notes replace the ones matched "
+            "from the challenge name alone.\n"
+        )
+    return header
+
+
+def _format_prior_playbook_brief(matches: list[dict], *, probe_query: str = "") -> str:
+    """The injected brief: the matched notes plus the three usage constraints.
+
+    The constraints are the whole reason the brief may exist at all -- ``score`` is a
+    bag-of-words overlap ratio, i.e. it measures RECALL, not relevance, so a "hit" is
+    not "this applies to your target". The judging is delegated to the model, which is
+    the only party that can verify a premise against a live target; that only works if
+    the brief says in so many words that the challenge's own class wins and that a
+    sibling note must be verified first. Weaken or drop these three lines and the
+    brief becomes an instruction to trust a keyword match. Test:
+    ``test_playbook_vuln_class.py::test_injection_wording_puts_the_challenge_class_first``.
+    """
+    from vulnclaw.agent.playbook import format_playbook_list
+
+    return (
+        _brief_header(probe_query)
+        + format_playbook_list(matches)
+        + "\nHow to use these notes:\n"
+        "- The challenge's OWN stated vulnerability class wins. A note matched by "
+        "challenge class is a SIBLING challenge, not this one: on 2026-09-23 a "
+        "note about Weblogic XMLDecoder deserialization was injected into a "
+        "Weblogic SSRF challenge, and the run dropped SSRF and chased the note's "
+        "path instead.\n"
+        "- Before adopting a sibling note's path, VERIFY its stated premise on "
+        "THIS target (hit the endpoint it names, confirm the version/route it "
+        "relies on). If the premise does not hold on this instance, discard that "
+        "path and attack the vulnerability the challenge actually asks for.\n"
+        "- Replay only steps you have confirmed still apply. Flag values are "
+        "fingerprinted because they rotate per instance — never resubmit stored "
+        "ones; re-read the flag."
+    )
+
+
+def _playbook_hits_payload(matches: list[dict]) -> list[dict]:
+    return [
+        {
+            "slug": m["slug"],
+            "score": m["score"],
+            "query_kind": m.get("query_kind", ""),
+            "overlap_tokens": m.get("overlap_tokens", 0),
+            "vuln_classes": m.get("vuln_classes", []),
+            "vuln_class_agrees": m.get("vuln_class_agrees", True),
+        }
+        for m in matches
+    ]
+
+
+def _playbook_stat_line(m: dict) -> str:
+    return (
+        f"{m['slug']} score={m['score']} ({m.get('query_kind', '?')}"
+        + (
+            ""
+            if m.get("vuln_class_agrees", True)
+            else f", CLASS MISMATCH {'/'.join(m.get('vuln_classes') or []) or 'unknown'}"
+        )
+        + ")"
+    )
+
+
+def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
+    """Run the merged lookup, returning ``(matches, rows the overlap floor withheld)``.
+
+    The withheld rows are returned rather than dropped so the run log can name them:
+    the floor deliberately costs recall, and a recall cost nobody can see turns into
+    "why was nothing injected for this challenge" with no way to answer it later.
+    """
+    from vulnclaw.agent.playbook import lookup_playbook_multi
+
+    gated: list[dict] = []
+    try:
+        matches = lookup_playbook_multi(queries, limit=2, out_blocked=gated)
+    except TypeError:  # a caller-side stub without the diagnostics parameter
+        matches = lookup_playbook_multi(queries, limit=2)
+        gated = []
+    return matches, gated
+
+
+def _gated_notice(gated: list[dict]) -> str:
+    from vulnclaw.agent.playbook import MIN_OVERLAP_TOKENS
+    from vulnclaw.agent.playbook_refresh import blocked_notice_rows
+
+    shown = blocked_notice_rows(gated)
+    extra = f" (+{len(gated) - len(shown)} more)" if len(gated) > len(shown) else ""
+    return (
+        f"; gated {len(gated)} below the {MIN_OVERLAP_TOKENS}-token overlap floor: "
+        + ", ".join(shown)
+        + extra
+    )
+
+
+def _remember_prior_playbooks(runtime: Any, matches: list[dict]) -> None:
+    """Record which notes the brief currently holds, for the refresh diff."""
+    runtime.prior_playbook_slugs = [m["slug"] for m in matches]
+
+
+def _refresh_prior_playbooks_after_probe(
+    *,
+    origin: str,
+    goal: str,
+    runtime: Any,
+    evidence: Any,
+    stream_sink: Any,
+    emit: Callable[[str, dict], None],
+) -> bool:
+    """Re-query the note store with the features the first probe actually measured.
+
+    Returns True iff the brief was replaced. Bounded on purpose:
+
+    * at most ``_PLAYBOOK_REFRESH_LIMIT`` refreshes per run, so a live target cannot
+      turn the reuse chain into a per-step re-ranking loop;
+    * only on evidence the refresh has not already consumed, so a repeated probe
+      costs nothing;
+    * only when the measured features CHANGED the answer (hit set, or top score by
+      more than :data:`playbook_refresh.REFRESH_SCORE_DELTA`) -- otherwise the system
+      prompt would be rewritten on every step for no reason, and the refresh event
+      would stop distinguishing the step that actually mattered;
+    * a refresh that finds nothing leaves the opening brief in place: the opening
+      recall is the fallback, and an empty answer to a longer query is not evidence
+      that the opening recall was wrong.
+
+    Every actual replacement is emitted (``playbook_refreshed``) and pushed to the
+    operator notice sink. That line is the acceptance evidence for this feature: the
+    notes in the prompt changed mid-run, and the log names which ones and why.
+    """
+    from vulnclaw.agent.playbook import (
+        challenge_class_signature,
+        target_fingerprint,
+    )
+    from vulnclaw.agent.playbook_refresh import (
+        new_signature_only,
+        probe_signature,
+        should_replace,
+    )
+
+    counter = int(getattr(runtime, "prior_playbook_refresh_count", 0) or 0)
+    limit = int(getattr(runtime, "prior_playbook_refresh_limit", 0) or _PLAYBOOK_REFRESH_LIMIT)
+    if counter >= limit:
+        if not getattr(runtime, "_playbook_refresh_limit_noticed", False):
+            runtime._playbook_refresh_limit_noticed = True
+            _notify_operator(
+                stream_sink,
+                f"[playbook] probe re-query budget spent ({limit}); "
+                "keeping the current notes",
+            )
+        return False
+
+    seen: list[str] = list(getattr(runtime, "prior_playbook_seen_evidence", None) or [])
+    records = [r for r in list(evidence or []) if getattr(r, "id", None) not in seen]
+    if not records:
+        return False
+
+    signature = probe_signature(records)
+    # Consume the records either way: they have been read, and re-reading them on a
+    # later step could only repeat the same query.
+    runtime.prior_playbook_seen_evidence = [
+        *seen,
+        *[str(getattr(r, "id", "")) for r in records if getattr(r, "id", None)],
+    ]
+    if not signature:
+        return False
+    previous_signature = str(getattr(runtime, "prior_playbook_signature", "") or "")
+    if not new_signature_only(previous_signature, signature):
+        return False
+    runtime.prior_playbook_signature = signature
+
+    queries: list[tuple[str, str]] = []
+    fingerprint = target_fingerprint(origin, goal)
+    if fingerprint:
+        queries.append(("target", fingerprint))
+    challenge_signature = challenge_class_signature(goal)
+    if challenge_signature:
+        queries.append(("class", challenge_signature))
+    queries.append(("probe", signature))
+
+    matches, gated = _lookup_prior_playbooks(queries)
+    gated_note = _gated_notice(gated) if gated else ""
+    previous_slugs = list(getattr(runtime, "prior_playbook_slugs", []) or [])
+    replace, reason = should_replace(
+        [{"slug": slug} for slug in previous_slugs], matches
+    )
+    if not replace:
+        _notify_operator(
+            stream_sink,
+            f"[playbook] probe re-query ({one_line(signature, 120)}): {reason}"
+            + gated_note,
+        )
+        return False
+
+    runtime.prior_playbook_refresh_count = counter + 1
+    runtime.prior_playbook_brief = _format_prior_playbook_brief(matches, probe_query=signature)
+    _remember_prior_playbooks(runtime, matches)
+    emit(
+        "playbook_refreshed",
+        {
+            "matches": len(matches),
+            "hits": _playbook_hits_payload(matches),
+            "query": signature,
+            "replaced": previous_slugs,
+            "reason": reason,
+        },
+    )
+    _notify_operator(
+        stream_sink,
+        "[playbook] refreshed "
+        + "; ".join(_playbook_stat_line(m) for m in matches)
+        + f" (probe key: {one_line(signature, 120)}; replaced {previous_slugs or ['-']}; "
+        + reason
+        + ")"
+        + gated_note,
+    )
+    return True
+
+
 def _inject_prior_playbooks(
     *,
     origin: str,
@@ -821,8 +1057,6 @@ def _inject_prior_playbooks(
     """
     from vulnclaw.agent.playbook import (
         challenge_class_signature,
-        format_playbook_list,
-        lookup_playbook_multi,
         target_fingerprint,
     )
 
@@ -836,63 +1070,31 @@ def _inject_prior_playbooks(
     if not queries:
         return 0
 
-    matches = lookup_playbook_multi(queries, limit=2)
+    matches, gated = _lookup_prior_playbooks(queries)
+    gated_note = _gated_notice(gated) if gated else ""
     if not matches:
         _notify_operator(
             stream_sink,
             "[playbook] no prior notes matched (queries: "
             + ", ".join(kind for kind, _ in queries)
-            + ")",
+            + ")"
+            + gated_note,
         )
         return 0
 
-    runtime.prior_playbook_brief = (
-        "\n\n# Prior-run notes (auto-matched: this target, or the same challenge "
-        "class)\n"
-        + format_playbook_list(matches)
-        + "\nHow to use these notes:\n"
-        "- The challenge's OWN stated vulnerability class wins. A note matched by "
-        "challenge class is a SIBLING challenge, not this one: on 2026-09-23 a "
-        "note about Weblogic XMLDecoder deserialization was injected into a "
-        "Weblogic SSRF challenge, and the run dropped SSRF and chased the note's "
-        "path instead.\n"
-        "- Before adopting a sibling note's path, VERIFY its stated premise on "
-        "THIS target (hit the endpoint it names, confirm the version/route it "
-        "relies on). If the premise does not hold on this instance, discard that "
-        "path and attack the vulnerability the challenge actually asks for.\n"
-        "- Replay only steps you have confirmed still apply. Flag values are "
-        "fingerprinted because they rotate per instance — never resubmit stored "
-        "ones; re-read the flag."
-    )
+    runtime.prior_playbook_brief = _format_prior_playbook_brief(matches)
+    _remember_prior_playbooks(runtime, matches)
+    runtime.prior_playbook_seen_evidence = []
+    runtime.prior_playbook_signature = ""
     emit(
         "playbook_injected",
-        {
-            "matches": len(matches),
-            "hits": [
-                {
-                    "slug": m["slug"],
-                    "score": m["score"],
-                    "query_kind": m.get("query_kind", ""),
-                    "vuln_classes": m.get("vuln_classes", []),
-                    "vuln_class_agrees": m.get("vuln_class_agrees", True),
-                }
-                for m in matches
-            ],
-        },
+        {"matches": len(matches), "hits": _playbook_hits_payload(matches)},
     )
     _notify_operator(
         stream_sink,
         "[playbook] injected "
-        + "; ".join(
-            f"{m['slug']} score={m['score']} ({m.get('query_kind', '?')}"
-            + (
-                ""
-                if m.get("vuln_class_agrees", True)
-                else f", CLASS MISMATCH {'/'.join(m.get('vuln_classes') or []) or 'unknown'}"
-            )
-            + ")"
-            for m in matches
-        ),
+        + "; ".join(_playbook_stat_line(m) for m in matches)
+        + gated_note,
     )
     return len(matches)
 
@@ -2044,6 +2246,26 @@ async def _solve_impl(
             _notify_operator(stream_sink, f"[stall guard] handing back to the operator: {stall_message}")
             emit("ask_user", {"question": stall_message, "reason": reason})
             stop_for_stall = True
+
+        # Probe-informed re-query of the note store. The opening injection could only
+        # use the challenge NAME; the first real responses (title, Server /
+        # X-Powered-By, paths, form fields) say far more about which prior note is
+        # actually relevant. Placement matters twice over: after the tool results of
+        # this turn are in `state.evidence` (so there is something measured to ask
+        # with), and before the next `_system_prompt` call (so a replacement brief
+        # takes effect on the NEXT turn rather than never). Never allowed to break the
+        # solve -- the injection path is best-effort by contract.
+        try:
+            _refresh_prior_playbooks_after_probe(
+                origin=origin,
+                goal=goal,
+                runtime=agent.runtime,
+                evidence=state.evidence,
+                stream_sink=stream_sink,
+                emit=emit,
+            )
+        except Exception:
+            pass
 
         # Keep normal conversational memory. Tool-call transcripts are appended
         # by llm_client as assistant/tool messages when tools run; this records

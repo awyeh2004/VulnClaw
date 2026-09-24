@@ -232,18 +232,30 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
     ``min_score`` filters out unrelated playbooks: a Jaccard-style overlap below
     this threshold (default 0.15) means the fingerprints share too little signal
     to be the same challenge, even if a few generic tokens collide.
+
+    This is the **ungated recall primitive**: it applies no overlap floor, because
+    the model calls it directly through the ``lookup_playbook`` tool and wants the
+    widest net (see ``lookup_playbook_multi`` for the floor that the automatic
+    injection path uses). Rows carry ``overlap_tokens`` -- the number of distinct
+    query tokens the note contains -- so callers never have to infer it from
+    ``score``, which is a share of the QUERY and therefore length-dependent.
     """
     if not (fingerprint or "").strip():
         return []
-    scored: list[tuple[float, Playbook]] = []
+    query_tokens = _tokenize(fingerprint)
+    scored: list[tuple[float, int, Playbook]] = []
     for pb in list_playbooks():
         s = pb.score(fingerprint)
         if s >= min_score:
-            scored.append((s, pb))
-    # Stable ranking: higher score first; validated ahead of draft on ties.
-    scored.sort(key=lambda item: (item[0], 0 if item[1].status == "validated" else 1), reverse=True)
+            scored.append((s, len(query_tokens & pb.tokens()), pb))
+    # Stable ranking: higher score first; more overlap, then validated-before-draft
+    # on ties.
+    scored.sort(
+        key=lambda item: (item[0], item[1], 0 if item[2].status == "validated" else 1),
+        reverse=True,
+    )
     result = []
-    for score, pb in scored[: limit if limit and limit > 0 else 3]:
+    for score, overlap, pb in scored[: limit if limit and limit > 0 else 3]:
         result.append(
             {
                 "name": pb.name or pb.slug,
@@ -251,6 +263,7 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
                 "status": pb.status,
                 "source": pb.source,
                 "score": round(score, 3),
+                "overlap_tokens": overlap,
                 "fingerprint": pb.fingerprint,
                 "steps": pb.steps,
             }
@@ -349,6 +362,45 @@ def _reserve_curated_representation(rows: list[dict[str, Any]], limit: int) -> l
 # (measured: two auto notes at 1.0, the useful curated note at 0.5).
 _LOOKUP_SCAN_LIMIT = 50
 
+# Minimum number of DISTINCT tokens a note must share with a query before automatic
+# injection will consider it a hit.
+#
+# ``Playbook.score`` is the share of the QUERY's tokens found in the note, so a
+# one-token query makes every note of that framework score exactly 1.0. Measured
+# 2026-09-23 on CTF2: with the goal written as "([Weblogic]SSRF)" the class
+# signature collapsed to a single token, the hit rate was 4/4, and every one of
+# those "perfect" hits carried no relevance information -- one of them (a Weblogic
+# XMLDecoder deserialization note, injected into a Weblogic SSRF challenge) measurably
+# derailed the run (mentions of "ssrf" fell 28 -> 3 while "bea_wls_internal" rose
+# 2 -> 41).
+#
+# The floor is counted in tokens, never inferred from the score: the score is
+# length-dependent, so "score >= x" would block a 12-token query whose 2-token
+# overlap is real while letting a 1-token query's 1.0 through.
+#
+# Deliberate recall cost: it also drops genuine single-token framework hits. Every
+# dropped row is reported through ``out_blocked`` so the run log can name it.
+MIN_OVERLAP_TOKENS = 2
+
+
+def _is_a_better_merge_candidate(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Which of two per-key hits for the SAME note should represent it.
+
+    Overlap first, then score. A short class query inflates the score (share of the
+    query's tokens found in the note) while sharing only the framework token, whereas
+    the long probe/target query that shares eight real tokens scores far lower. Keeping
+    "the highest score" therefore kept the WORSE evidence: measured on a fixture where
+    the class key returned ``score=1.0 overlap=1`` and the target key
+    ``score=0.5 overlap=2``, the merged row inherited the one-token hit and the
+    ``MIN_OVERLAP_TOKENS`` gate then threw the note away although it did qualify.
+    The overlap is also the number reported in the run log, so it must describe the
+    key that actually carried the hit.
+    """
+    return (int(candidate.get("overlap_tokens", 0) or 0), candidate["score"]) > (
+        int(current.get("overlap_tokens", 0) or 0),
+        current["score"],
+    )
+
 
 # Vulnerability classes, so "same framework" is not mistaken for "same problem".
 #
@@ -395,19 +447,43 @@ def vulnerability_classes(text: str) -> frozenset[str]:
 
 
 def lookup_playbook_multi(
-    queries: Sequence[tuple[str, str]], *, limit: int = 3, min_score: float = 0.15
+    queries: Sequence[tuple[str, str]],
+    *,
+    limit: int = 3,
+    min_score: float = 0.15,
+    out_blocked: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """Look each ``(kind, query)`` up and merge the hits, best score per slug.
+    """Look each ``(kind, query)`` up and merge the hits, best row per slug.
 
     Returns the same rows as :func:`lookup_playbook` plus ``query_kind``,
-    ``query``, ``vuln_classes`` and ``vuln_class_agrees``, so a caller can report
-    which key matched and whether the note is about the same KIND of problem -- the
-    hit rate per key is the number worth watching, and it was invisible while only
-    the count was recorded.
+    ``query``, ``overlap_tokens``, ``vuln_classes`` and ``vuln_class_agrees``, so a
+    caller can report which key matched and whether the note is about the same KIND
+    of problem -- the hit rate per key is the number worth watching, and it was
+    invisible while only the count was recorded. When two keys find the same note,
+    the row kept is the one with the larger overlap (see
+    :func:`_is_a_better_merge_candidate`), not the larger score.
 
     Ranking puts class agreement ahead of raw score: a keyword-overlap score cannot
     separate "same framework" from "same vulnerability", and the class key is
     usually a short query (one or two tokens) where everything scores 1.0.
+
+    Every surviving row must overlap **``MIN_OVERLAP_TOKENS`` distinct tokens** with
+    at least one of the queries. The floor is what kills the degenerate case in
+    which a one-token query (the real signature of ``([Weblogic]SSRF)`` is just
+    ``Weblogic``) scores **1.0 against every note of that framework** -- a perfect
+    score carrying no relevance information at all, because ``score`` measures
+    recall (share of the query's tokens found in the note), not relevance.
+
+    The floor applies to the merged rows, so it treats ``target`` and ``class``
+    alike: a one-token ``target`` query is the same degenerate shape. A row whose
+    only qualifying key is the long target fingerprint (which carries the goal
+    text, so a real sibling note can reach the floor there) still passes.
+
+    ``out_blocked``, when given, is filled with the rows the floor removed --
+    ``slug``/``name``/``score``/``overlap_tokens``/``query_kind`` -- so the run log
+    can say *which* note was withheld. A recall cost nobody can see is a recall
+    loss nobody can diagnose: without this, "why was nothing injected for this
+    challenge" becomes unanswerable after the fact.
     """
     effective = limit if limit and limit > 0 else 3
     query_classes = vulnerability_classes(" ".join(q for _, q in queries))
@@ -417,7 +493,7 @@ def lookup_playbook_multi(
             continue
         for row in lookup_playbook(query, limit=_LOOKUP_SCAN_LIMIT, min_score=min_score):
             current = best.get(row["slug"])
-            if current is None or row["score"] > current["score"]:
+            if current is None or _is_a_better_merge_candidate(row, current):
                 merged = dict(row)
                 merged["query_kind"] = kind
                 merged["query"] = query
@@ -448,6 +524,19 @@ def lookup_playbook_multi(
         ),
         reverse=True,
     )
+    if out_blocked is not None:
+        blocked_seen: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            overlap = int(row.get("overlap_tokens", 0) or 0)
+            if overlap >= MIN_OVERLAP_TOKENS:
+                continue
+            entry = dict(row)
+            entry["overlap_tokens"] = overlap
+            previous = blocked_seen.get(row["slug"])
+            if previous is None or overlap > previous["overlap_tokens"]:
+                blocked_seen[row["slug"]] = entry
+        out_blocked.extend(blocked_seen.values())
+    rows = [row for row in rows if int(row.get("overlap_tokens", 0) or 0) >= MIN_OVERLAP_TOKENS]
     return _reserve_curated_representation(rows, effective)
 
 

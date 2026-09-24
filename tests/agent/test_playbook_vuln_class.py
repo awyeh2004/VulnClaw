@@ -27,6 +27,17 @@ LONG_STEPS = (
     "ANGLES: [hit] one angle."
 )
 
+# Real goal shapes (the same wording the CTF2 practice field uses). The point of
+# writing them out: `challenge_class_signature` yields 4 tokens here -- weblogic /
+# cve / real / easy -- so a cross-instance `class` hit reaches the 2-token overlap
+# floor as soon as the note's fingerprint carries the CVE, which real notes do
+# (target_fingerprint appends the goal text). A goal phrased only as
+# "([Weblogic]SSRF)" yields 2 tokens and stays a framework-only match for any
+# Weblogic note: that is the measured harm case, gated below.
+GOAL_A = "Solve CTF2 challenge [Weblogic]CVE-2017-10271 (category Real, difficulty Easy)"
+GOAL_B = "Solve CTF2 challenge [Weblogic]CVE-2018-2628 (category Real, difficulty Easy)"
+GOAL_SSRF = "Solve CTF2 challenge [Weblogic]SSRF (category Real, difficulty Easy)"
+
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
@@ -86,12 +97,13 @@ def test_signature_carries_the_vulnerability_class():
 
 
 def test_note_classes_are_read_from_name_and_slug_not_only_fingerprint(store):
-    """The fingerprint is often just the target string; the name states the class.
+    """The class must come from the note's declared NAME, not only its fingerprint.
 
-    Real shape: the fingerprint shares only "weblogic" with the query (so the note
-    is a class-level match), while the technique words live in the name/slug.
+    Real shape: the fingerprint is target-derived (``target_fingerprint`` appends the
+    goal text), so framework/CVE tokens are what lift it past the overlap floor, while
+    the vulnerability class (XMLDecoder -> deserialization) lives only in the name.
     """
-    _write("weblogic-note", "Weblogic direct-ctf2.dasctf.com target string")
+    _write("weblogic-note", "Weblogic CVE-2017-10271 real easy direct-ctf2.dasctf.com target")
     path = pb.PLAYBOOKS_DIR / "weblogic-note.md"
     path.write_text(
         path.read_text(encoding="utf-8").replace(
@@ -100,56 +112,88 @@ def test_note_classes_are_read_from_name_and_slug_not_only_fingerprint(store):
         ),
         encoding="utf-8",
     )
-    rows = pb.lookup_playbook_multi([("class", "Weblogic SSRF")], limit=2)
-    assert rows, "the note must still match on the framework token"
+    rows = pb.lookup_playbook_multi([("class", pb.challenge_class_signature(GOAL_SSRF))], limit=2)
+    assert rows, "weblogic+real overlap (2 tokens) must still match"
     assert rows[0]["vuln_classes"], "class must come from the declared name"
     assert "deserialization" in rows[0]["vuln_classes"]
-    assert rows[0]["vuln_class_agrees"] is False
+    assert rows[0]["vuln_class_agrees"] is False, (
+        "the note's declared class must be read from its NAME (the fingerprint here "
+        "names no class at all)"
+    )
 
 
 # ── ranking ───────────────────────────────────────────────────────────────
 
 def test_a_class_matching_note_outranks_a_framework_only_note(store):
-    """Both score 1.0 against the one-token class key; agreement must decide."""
-    query = "Weblogic"
-    _write("weblogic-deser", "Weblogic CVE-2017-10271 wls-wsat XMLDecoder bea_wls_internal")
+    """Two notes that both clear the floor: the same-class note must be injected first.
+
+    The old shape of this test compared two notes against the single-token query
+    ``"Weblogic"``. Under the overlap floor that query reaches nothing at all (see
+    ``test_the_framework_only_note_is_now_blocked_outright``), so the comparison is
+    now made with a query that legitimately matches both notes: the SSRF note on
+    ``weblogic+ssrf`` and the deserialization note on ``weblogic+cve``, both 2 tokens.
+    """
+    _write("weblogic-deser", "Weblogic CVE-2017-10271 XMLDecoder wls-wsat bea_wls_internal")
     _write("weblogic-ssrf", "Weblogic SSRF uddiexplorer operator portlet")
+    query = "Weblogic CVE-2017-10271 SSRF"
 
     rows = pb.lookup_playbook_multi([("class", query)], limit=2)
-    # No class in the QUERY itself: agreement cannot discriminate, so score order holds.
-    assert [r["slug"] for r in rows] == ["weblogic-deser", "weblogic-ssrf"]
-
-    rows = pb.lookup_playbook_multi([("class", "Weblogic SSRF")], limit=2)
+    assert {r["slug"] for r in rows} == {"weblogic-deser", "weblogic-ssrf"}, rows
     assert rows[0]["slug"] == "weblogic-ssrf", "the same-class note must win"
     assert rows[0]["vuln_class_agrees"] is True
     assert rows[1]["vuln_class_agrees"] is False
 
 
 def test_a_disagreeing_note_is_demoted_not_dropped(store):
-    query = "Weblogic SSRF"
-    _write("weblogic-deser", "Weblogic CVE-2017-10271 wls-wsat XMLDecoder bea_wls_internal")
-    rows = pb.lookup_playbook_multi([("class", query)], limit=2)
-    assert rows, "a framework-only note must stay available as a fallback"
-    assert rows[0]["slug"] == "weblogic-deser"
-    assert rows[0]["vuln_class_agrees"] is False
-    assert rows[0]["vuln_classes"] == ["deserialization"]
+    """Once a note clears the overlap floor, class disagreement demotes but keeps it."""
+    _write("weblogic-deser", "Weblogic CVE-2017-10271 XMLDecoder wls-wsat bea_wls_internal")
+    _write("weblogic-ssrf", "Weblogic SSRF uddiexplorer operator portlet")
+    rows = pb.lookup_playbook_multi([("class", "Weblogic CVE-2017-10271 SSRF")], limit=2)
+    assert rows, "a disagreeing note must stay available as a fallback"
+    assert [r["slug"] for r in rows] == ["weblogic-ssrf", "weblogic-deser"]
+    assert rows[1]["vuln_class_agrees"] is False
+    assert rows[1]["vuln_classes"] == ["deserialization"]
+
+
+def test_the_framework_only_note_is_now_blocked_outright(store):
+    """The measured harm case, after the overlap floor.
+
+    Real store, 2026-09-23: goal written as ``([Weblogic]SSRF)``, signature reduced to
+    ``Weblogic ssrf``, and a Weblogic **XMLDecoder deserialization** note (whose
+    fingerprint carries no class token) scored 1.0 and was injected into the SSRF
+    challenge; the run then abandoned SSRF (``ssrf`` mentions 28 -> 3,
+    ``bea_wls_internal`` 2 -> 41).
+
+    A framework-only match is 1 overlapping token, so it no longer reaches the
+    injection at all. This is a deliberate recall cost: the note's knowledge was
+    environmental and did help that run solve, and we trade that for not being
+    derailed. The withheld row is reported so the drop stays diagnosable.
+    """
+    _write("weblogic-deser", "Weblogic wls-wsat XMLDecoder bea_wls_internal docroot")
+    blocked: list[dict] = []
+    rows = pb.lookup_playbook_multi(
+        [("class", pb.challenge_class_signature(GOAL_SSRF))], limit=2, out_blocked=blocked
+    )
+    assert rows == [], "a framework-only match must not be injected as a class hit"
+    assert [b["slug"] for b in blocked] == ["weblogic-deser"]
+    assert blocked[0]["overlap_tokens"] == 1
 
 
 def test_a_silent_note_is_not_treated_as_disagreeing(store):
-    _write("classless", "Weblogic some note that names no vulnerability class here")
-    rows = pb.lookup_playbook_multi([("class", "Weblogic SSRF")], limit=2)
+    _write("classless", "Weblogic CVE-2017-10271 note that names no vulnerability class")
+    rows = pb.lookup_playbook_multi([("class", "Weblogic CVE-2017-10271")], limit=2)
     assert rows[0]["vuln_class_agrees"] is True
 
 
 def test_rows_expose_the_classes_for_the_run_log(store):
-    _write("weblogic-ssrf", "Weblogic SSRF uddiexplorer")
-    rows = pb.lookup_playbook_multi([("class", "Weblogic SSRF")], limit=2)
+    _write("weblogic-ssrf", "Weblogic CVE-2018-2628 ssrf uddiexplorer")
+    rows = pb.lookup_playbook_multi([("class", "Weblogic CVE-2018-2628 ssrf")], limit=2)
     assert rows[0]["vuln_classes"] == ["ssrf"]
 
 
 def test_curated_reserve_still_holds_with_class_ranking(store):
     """The two ranking rules must compose: agreement first, then the reserve."""
-    query = "Weblogic SSRF"
+    query = "Weblogic CVE-2018-2628 Real Easy"
     _write("auto-a", query, source=pb.SOURCE_AUTO)
     _write("auto-b", query, source=pb.SOURCE_AUTO)
     _write("curated-deser", "Weblogic CVE-2017-10271 XMLDecoder bea_wls_internal wls-wsat")
@@ -164,13 +208,15 @@ def test_injection_logs_the_class_mismatch(store):
 
     from vulnclaw.agent import solver
 
-    _write("weblogic-deser", "Weblogic CVE-2017-10271 XMLDecoder bea_wls_internal wls-wsat")
+    # Real-shape note: target-derived fingerprint (so it clears the 2-token floor via
+    # weblogic+real) plus a NAMED class that disagrees with the SSRF challenge.
+    _write("weblogic-deser", "Weblogic CVE-2017-10271 real easy XMLDecoder bea_wls_internal")
     notices: list[str] = []
     events: list[tuple[str, dict]] = []
     runtime = SimpleNamespace(prior_playbook_brief="")
     hits = solver._inject_prior_playbooks(
         origin="http://direct-ctf2.dasctf.com:25723",
-        goal="This is a CTF challenge web service ([Weblogic]SSRF). Exploit it.",
+        goal=GOAL_SSRF,
         runtime=runtime,
         stream_sink=SimpleNamespace(on_notice=notices.append),
         emit=lambda kind, payload: events.append((kind, payload)),
@@ -187,16 +233,17 @@ def test_injection_wording_puts_the_challenge_class_first(store):
 
     from vulnclaw.agent import solver
 
-    _write("weblogic-deser", "Weblogic CVE-2017-10271 XMLDecoder bea_wls_internal")
+    _write("weblogic-deser", "Weblogic CVE-2017-10271 real easy XMLDecoder bea_wls_internal")
     runtime = SimpleNamespace(prior_playbook_brief="")
     solver._inject_prior_playbooks(
         origin="http://direct-ctf2.dasctf.com:25723",
-        goal="This is a CTF challenge web service ([Weblogic]SSRF). Exploit it.",
+        goal=GOAL_SSRF,
         runtime=runtime,
         stream_sink=SimpleNamespace(on_notice=lambda m: None),
         emit=lambda kind, payload: None,
     )
     brief = runtime.prior_playbook_brief
+    assert brief, "the wording assertions below are vacuous unless a brief was built"
     assert "OWN stated vulnerability class wins" in brief
     assert "VERIFY its stated premise on THIS target" in brief
     assert "attack the vulnerability the challenge actually asks for" in brief
