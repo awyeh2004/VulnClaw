@@ -32,6 +32,16 @@
 
 n=3，**只能给信号**（同代码方差 33%-100%，见 §5）。
 
+**本轮还撤回了自己的一条结论**：上一版报告说"平台套话 token 让无关笔记对任何题面都满分命中"，
+复算后不成立——那只在**短题面**下发生，产品的完整 goal 模板（37 个查询 token）会把它稀释到
+`min_score` 以下，实测 278 道题 × 两份真实库都是 0 次假命中。详见 §1 的更正表。
+
+**顺带发现**（§6）：home 库里有一条自动笔记的 fingerprint 存成 `'E:'`（成因：那一轮 target 就是
+`'E:'`，而 `Path('E:').exists()` 为 True / `is_file()` 为 False，既补不了 sha256 也拦不住），
+`tokens()` 为空，**对所有目标串都召回不了**（12 种组合实测 `score=0.000`）——与"确定性复用"
+契约直接冲突。本轮加了把它钉出来的回归测试，没有改落盘逻辑。同节还记了一个会骗人的观测陷阱：
+`read` 工具会把路径里的 `\v`/`\b` 当转义渲染，涉及反斜杠路径的证据必须做字节级校验。
+
 ---
 
 ## 1. 任务 2：仅框架命中的最小重叠门槛
@@ -74,22 +84,26 @@ redirects to login ...`），判别性名字只在 `name`。而 `lookup_playbook
 早就写明"身份要从 name/slug 读"（854818a/a300d4f 修的同类 bug）——这是同一缺陷的二次复发。
 已加 3 条测试钉住。
 
-### [实测] 门槛仍未解决的更大一类假命中（重要局限）
+### [实测·更正] 套话 token 假命中：**在真实题面形状下不成立**（上一版报告写错了）
 
-另一台机器的 70 条笔记库里，`autonotes-b9bbb32f-…` 对**任何** CTF2 题面都拿 0.556、重叠 5：
+上一版报告写"平台套话 token 让一条无关自动笔记对**任何**题面都拿 0.556/重叠 5 排第一"。
+按同一纪律复算后**撤回这句**，因为 0.556 只出现在**短题面**上：
 
-```
-note tokens  : [..., category, ctf2, difficulty, easy, practice, reverse, solve]
-query tokens : [category, ctf2, difficulty, direct, easy, real, solve, ssrf, weblogic]
-overlap      = {category, ctf2, difficulty, easy, solve}   # 全部是平台套话
-```
+| 查询形状（`target` 键 = `target_fingerprint(origin, goal)`） | query token 数 | `autonotes-b9bbb32f-…` 的 score | 重叠 | 是否为候选（`min_score=0.15`） |
+|---|---|---|---|---|
+| `Solve CTF2 challenge [Weblogic]SSRF (category Real, difficulty Easy)` | 9 | **0.556** | 5（全是套话） | 是 |
+| `Solve CTF2 challenge '[Weblogic]CVE-2017-10271' (…) on practice 2de971ac` | 12 | **0.583** | 7（全是套话） | 是 |
+| 产品实际的完整 goal 模板（`Target: …` + flag 说明 + 范围约束） | **37** | **0.054** | 2（`ctf2`、`flag`） | **否，进不了候选** |
+| `This is a CTF challenge web service ([Weblogic]SSRF). Exploit it.` | 10 | 0.100 | 1 | 否 |
 
-题面模板 `"Solve CTF2 challenge [...] (category X, difficulty Y) on practice Z"` 分词后贡献
-5 个 token，自动笔记 fingerprint 里也带同一段套话 → **与题目内容无关的笔记稳定拿 0.556 排第一**
-（`[Crypto]AES-ECB` 实测同样命中）。即 ≥2 token 门杀掉**单 token**退化，**多 token 套话**退化仍在。
+也就是说：**`_STOP` 里的 `ctf2` 漏了一个套话 token，但产品实际使用的 goal 模板长度足以把它稀释到
+`min_score` 以下**，那条笔记在真实运行里根本不会成为候选（`ghost_injection` 在 278 道题 × 两份
+真实笔记库上实测都是 **0**）。所以这条**不需要修 `_STOP`**，上一版把它列为"下一步"是错的。
 
-**[推断]** 修法：把 `solve/ctf2/challenge/category/difficulty/easy/practice/real` 加进 `_STOP`
-或在算重叠前剔除。**本轮没做**：它会全局改 `score` 语义，值得单独一轮 + 单独实测。
+**[推断]** 只有在题面被裁剪成"一行题名"的调用方（例如自定义 goal 的脚本、短题名字典）下，
+套话假命中才会真的出现。本仓库的 `scripts/ab/` 工装用的就是短格式之一，所以交接文档里的
+0.556 是真实测出来的——只是它不是产品路径的形状。**若将来有人把 goal 改短，这条会回来**，
+届时应加 `_STOP` 词条并重新画像。
 
 ---
 
@@ -129,7 +143,8 @@ overlap      = {category, ctf2, difficulty, easy, solve}   # 全部是平台套�
 - `test_playbook_probe_refresh.py` **32 条**（含**真跑 solve 主循环**的端到端；含
   "`python_execute` 输出可读"、"`shell_command` curl 输出可读"、"工具管道输出不产生查询"、
   "服务器错误页不产生查询"、"真标题不被误伤"）
-- 笔记链 6 个文件 **105 passed**
+- `test_playbook_auto_reuse.py` **+2 条**（"笔记必须能被自己的 fingerprint 召回"，见 §6）
+- 笔记链 6 个文件 **107 passed**
 - `tests/agent` **1051 passed / 7 skipped / 0 failed**；其余 18 个测试目录
   **2855 passed / 13 skipped / 0 failed**；`verify_execution_boundary.py` → **27 spawn sites**
 
@@ -196,7 +211,7 @@ overlap      = {category, ctf2, difficulty, easy, solve}   # 全部是平台套�
 
 1. **n=3 不足以下结论**：同代码不同次运行方差可达 33%-100%（交接文档 §4.1 实测）。上表逐组
    报了差值，但 CVE-2018-2628 那组冷臂是删失值，真正的有效配对只有 2 组半。
-2. **套话 token 的修法没做**（见 §1 末），留给下一轮单独做 + 单独实测。
+2. **套话 token 不修了**（见 §1 更正）：在产品的真实 goal 形状下它不是问题，实测为 0 次假命中。
 3. **重查的第二个信息源（黑板 LOCK / CONFIRMED facts）没接入**：本轮只用实测的探测证据，
    以免把未实测来源混进"先量后说"的改动。
 4. **平台 flag 提交仍被验证码挡**（429 `risk_action='challenge'`），所以判据是"日志里出现
@@ -204,6 +219,46 @@ overlap      = {category, ctf2, difficulty, easy, solve}   # 全部是平台套�
 5. **冷臂扫描宿主机**这一点没修（见 §3 保留）。
 6. **`fetch` 之外的 MCP 工具输出格式未逐一验证**：现版对任意工具文本做"找 title / 找头 /
    找带斜杠路径"，未识别就返回空（安全降级），但没有为每种 MCP 工具写夹具。
+7. **一条已存在的坏笔记没删、也没修**（见 §6）：`autonotes-babyfengshui-33c3-2016` 的
+   fingerprint 存成 `'E:'`（成因已定位：那一轮 target 就是 `'E:'`，而 `Path('E:').exists()`
+   为 True / `is_file()` 为 False，所以既补不了 sha256 也拦不住），永远召回不了。本轮加了
+   "必须能被自己召回"的回归测试把它钉出来，**没有**去改 `capture_run_notes` 的落盘逻辑。
+
+---
+
+## 6. 顺带发现：一条永远召回不了的自动笔记
+
+**[实测]** home 库里 `autonotes-babyfengshui-33c3-2016` 存下来的 fingerprint 是 `'E:'` ——
+一个裸的 Windows 盘符片段。后果：
+
+* `tokens()` 为空（`_tokenize` 会丢掉长度 <2 的 token），于是 `score()` 对**任何**查询都返回 0.0；
+* 拿 4 个目标串 × 3 个 goal 共 12 种组合核验，**全部 `score=0.000`、召回 `False`**，包括它当初
+  被捕获时那台目标（`E:\vulnclaw\work\babyfengshui_33c3_2016`）和它里面的二进制路径；
+* 它与本模块开头的契约（"deterministic reuse：同一道题下次运行要能找到笔记"）直接冲突：
+  这条笔记在库里只占位置，永远不会把任何东西带过去。
+
+**这不是本轮改动引入的**（本轮没有动 `capture_run_notes`），但它属于同一条复用链，而且
+**测试没有覆盖**：原有的 roundtrip 测试在同一次调用里捕获并查找、且用的是格式良好的目标串，
+所以照不出这种笔记。已补 `TestEveryNoteCanBeFoundAgain`：捕获后断言 `tokens()` 非空、且能被
+自己记录的 fingerprint 召回（4 种目标形状各测一遍），另有一条用例把 `'E:'` 这种退化形状的
+当前行为写死，给将来修它的人一个靶子。
+
+**[推断]** 成因已定位到"谁写的"：`target_fingerprint` 只在 `Path(o).exists() and is_file()`
+时补 sha256，否则**原样返回 target 字符串**；用 10 种候选串实测，只有 target 本身是 `'E:'`
+时才会得到 `fp='E:'`。所以那一轮（2026-09-18）的 target 就是 `'E:'`。
+而 `Path('E:').exists()` 在 Windows 上为 **True**、`is_file()` 为 **False** —— 一个只有盘符的
+路径既"存在"又不是文件，因此既拿不到 sha256 也不会被拦下。
+
+**[实测] 一个会骗人的观测方式（记录备查）**：用 `read` 工具看那条笔记的 frontmatter 时，
+`fingerprint:` 那一行显示成 `E:ulnclaw\workabyfengshuiabyfengshui_33c3_2016 pwn heap …`，
+看起来是"路径丢了反斜杠"；而用 Python 读**字节**得到的真实值是 `'E:'`（长度 2）。
+差异来自 `read` 把那一行里的 `\v`、`\b` 当转义序列渲染。**涉及反斜杠路径的证据一律用字节级校验**
+（`ascii(value)` / `len(value)`），否则会得出相反结论——本轮就先被它骗了一次。
+
+**[推断]** 修法（本轮没做）：`capture_run_notes` 落盘前检查该 fingerprint 在当前 token 规则下是否
+`tokens()` 非空（或至少能在自己身上召回），否则拒绝落盘并记一条 notice——这类笔记占着库位、
+永远不会被召回，落盘本身就是净值损失。要单独一轮做，因为它会改变"自动捕获永不落空"的既有语义，
+且旧库已有的坏条目怎么处理要一并决定。
 
 ---
 

@@ -201,6 +201,67 @@ def test_auto_lookup_roundtrip(tmp_playbooks):
     assert hits[0]["status"] == "draft"
 
 
+class TestEveryNoteCanBeFoundAgain:
+    """A note nobody can ever look up is a note that was never written.
+
+    Measured 2026-09-24 on the real home store: `autonotes-babyfengshui-33c3-2016` has the
+    stored fingerprint ``'E:'`` -- a bare Windows drive fragment. Its ``tokens()`` is
+    therefore EMPTY, so :meth:`Playbook.score` returns 0.0 for every possible query, and
+    the note cannot be retrieved by ANY target string (verified against the path it was
+    captured on, the file inside it, the bare directory name and an unrelated path --
+    12 combinations, all score=0.000). It survives in the store as dead weight and never
+    transfers anything, which defeats the module's stated contract ("deterministic
+    reuse": the next run of the same challenge finds the note again).
+
+    Nothing in the suite covered this, because the existing roundtrip test captures and
+    looks up in the SAME call with a well-formed target. The property worth pinning is
+    the one the store actually depends on: what was written must be findable by its own
+    recorded fingerprint.
+    """
+
+    def test_a_captured_note_is_found_by_its_own_fingerprint(self, tmp_playbooks):
+        bb = _seed_blackboard()
+        targets = [
+            "E:\\vulnclaw\\work\\babyfengshui_33c3_2016",
+            "E:\\vulnclaw\\work\\babyfengshui_33c3_2016\\challenge.elf",
+            "http://direct-ctf2.dasctf.com:27532",
+            "local-7",
+        ]
+        for target in targets:
+            ack = pb.capture_run_notes(
+                target=target, goal="capture the flag", blackboard=bb, outcome="solved"
+            )
+            assert ack is not None and "error" not in ack, ack
+            note = next(n for n in pb.list_playbooks() if n.slug == ack["slug"])
+            assert note.tokens(), (
+                f"captured note {ack['slug']} has an empty fingerprint token set "
+                f"({note.fingerprint!r}): it can never be recalled"
+            )
+            hits = pb.lookup_playbook(note.fingerprint, limit=5)
+            assert any(h["slug"] == note.slug for h in hits), (
+                f"{ack['slug']} is not found by its own fingerprint {note.fingerprint!r}"
+            )
+
+    def test_a_drive_only_fingerprint_cannot_recall_its_note(self, tmp_playbooks):
+        """Documents the observed failure shape, so a future fix has a target.
+
+        A bare ``E:`` is the degenerate case: ``_tokenize`` drops it entirely (one
+        character), leaving nothing to match on. This test asserts the CURRENT
+        behaviour of such a store entry rather than pretending it is fine.
+        """
+        ack = pb.save_playbook(
+            name="AutoNotes babyfengshui_33c3_2016",
+            fingerprint="E:",
+            steps="LOCK: x\nCONFIRMED: y\nANGLES: z\n" + "pad " * 30,
+            status="draft",
+            source=pb.SOURCE_AUTO,
+        )
+        note = next(n for n in pb.list_playbooks() if n.slug == ack["slug"])
+        assert note.tokens() == set(), "a bare drive letter carries no token"
+        assert note.score(note.fingerprint) == 0.0
+        assert pb.lookup_playbook(note.fingerprint, limit=5) == []
+
+
 def test_solver_prompt_injects_prior_brief():
     from vulnclaw.agent.solver import _system_prompt
 
