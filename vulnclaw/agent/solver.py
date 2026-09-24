@@ -1235,7 +1235,17 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     try:
         from vulnclaw.agent.tool_registry import build_tool_card
 
-        tool_card = (build_tool_card(state.goal or "") or "") if _tool_card_enabled() else ""
+        from vulnclaw.agent.task_mode import effective_task_mode, mode_instruction
+
+        mode, mode_reason = effective_task_mode(getattr(agent, "config", None), state.goal or "")
+        runtime.task_mode = mode  # visible to the run log / watchdog
+        runtime.task_mode_reason = mode_reason
+        tool_card = (
+            (build_tool_card(state.goal or "", mode=mode) or "")
+            if _tool_card_enabled()
+            else ""
+        )
+        mode_block = mode_instruction(mode)
     except Exception:
         tool_card = ""
     pwn_local_instruction = ""
@@ -1315,6 +1325,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"{playbook_instruction}{prior_playbook_brief}"
         f"{pwn_local_instruction}"
         f"{tool_card}"
+        f"{mode_block}"
     )
 
 

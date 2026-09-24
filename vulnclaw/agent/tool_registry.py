@@ -439,28 +439,30 @@ def _is_ir_goal(goal_lower: str) -> bool:
     return _match(goal_lower, list(IR_INTENT_KEYWORDS))
 
 
-def build_tool_card(goal: str) -> str:
+def build_tool_card(goal: str, mode: str = "auto") -> str:
     """Build the capability card for this goal. Returns empty string if no tools match.
 
-    Both registries are consulted. ``_IR_REGISTRY`` was previously defined and
-    documented but never read anywhere in the module, so IR-only tools (WinSCP)
-    could be detected and keyword-matched yet never appear in the card: an agent
-    doing 应急响应 was told nothing about them. IR matches are rendered in their
-    own section so the two purposes stay visually distinct.
+    ``mode`` follows the explicit task-mode switch (agent/task_mode.py):
+    ``ir`` renders ONLY the incident-response section — an IR answer round has
+    no use for attack tools and their presence dilutes the card;
+    ``pentest``/``ctf`` render only the attack-tool section; ``auto`` keeps the
+    legacy per-section keyword guessing (IR intent gate + goal keywords).
     """
     goal_lower = (goal or "").lower()
     lines: list[str] = []
 
-    for entry in _REGISTRY:
-        cmd = _detect(entry)
-        if not cmd:
-            continue
-        if not _match(goal_lower, entry.get("keywords", [])):
-            continue
-        lines.append(f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})")
+    if mode != "ir":
+        for entry in _REGISTRY:
+            cmd = _detect(entry)
+            if not cmd:
+                continue
+            if not _match(goal_lower, entry.get("keywords", [])):
+                continue
+            lines.append(f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})")
 
     ir_lines: list[str] = []
-    if _is_ir_goal(goal_lower):
+    ir_wanted = mode == "ir" or (mode == "auto" and _is_ir_goal(goal_lower))
+    if ir_wanted:
         for entry in _IR_REGISTRY:
             cmd = _detect(entry)
             if not cmd:
@@ -483,8 +485,8 @@ def build_tool_card(goal: str) -> str:
         card += "These are installed and verified. Use shell_command to invoke them.\n"
         card += "\n".join(ir_lines)
 
-    # bg_launch hint when cracking tools are relevant
-    if any(k in goal_lower for k in ["hash", "crack", "破解", "密码", "爆破"]):
+    # bg_launch hint when cracking tools are relevant (attack-side only)
+    if mode != "ir" and any(k in goal_lower for k in ["hash", "crack", "破解", "密码", "爆破"]):
         card += (
             "\n- ⭐ Long-running cracking: use `bg_launch` to run hashcat/john "
             "in the background while you continue exploring."

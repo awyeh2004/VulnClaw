@@ -530,6 +530,16 @@ class SessionConfig(BaseModel):
             "process cwd (old behavior)."
         ),
     )
+    task_mode: str = Field(
+        default="auto",
+        description=(
+            "Explicit task mode for solve runs: 'pentest' | 'ir' | 'ctf' | "
+            "'auto'. The mode selects the prompt discipline, the tool-card "
+            "sections and the skill-routing hint coherently, so CTF flag-"
+            "racing and IR answer-round strategies never mix in one context. "
+            "'auto' keeps keyword detection and logs what it guessed."
+        ),
+    )
     solve_max_directions: int = Field(
         default=3,
         description="Deprecated compatibility field; model-led solve no longer plans research directions",
