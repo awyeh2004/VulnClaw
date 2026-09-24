@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import vulnclaw.agent.builtin_tools as builtin_tools
+
 
 class DummyRuntime:
     def __init__(self):
@@ -1053,6 +1055,132 @@ class TestSolveScratchWorkdir:
         assert "20260921T101010Z-solve-x" not in cwd
 
 
+class TestNmapPassesTheGate:
+    """Round-8 finding R8-8: nmap was the one model-reachable spawn with no gate.
+
+    `gate.authorize` had exactly four sites -- shell_command, runtime_diff_probe,
+    python_execute, bg_launch -- while `nmap_scan` is recommended by the prompt itself
+    and is labelled "model-reachable" by `scripts/verify_execution_boundary.py`, whose
+    own contract is that model-reachable sites are exactly the ones the gate covers.
+    The argv is schema-constrained, which is why this is narrower than R8-1, but it is
+    not a substitute for approval: the operator is approving *that this host gets
+    scanned*, not which flags are used.
+    """
+
+    class DenyChannel:
+        def __init__(self):
+            self.views = []
+
+        async def request_approval(self, view):
+            self.views.append(view)
+            return "deny"
+
+    def _agent(self):
+        agent = DummyAgent()
+        agent.session_state.recon_data = {}
+        agent.session_state.add_step = lambda *a, **k: None
+        return agent
+
+    def _no_spawns(self, monkeypatch):
+        """Replace the nmap runner with a recorder that reports a clean scan."""
+        import subprocess
+
+        spawned: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            spawned.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(builtin_tools.shutil, "which", lambda name: "C:/fake/nmap.exe")
+        monkeypatch.setattr(builtin_tools, "_run_nmap_argv", fake_run)
+        return spawned
+
+    async def test_a_denied_scan_never_reaches_the_runner(self, monkeypatch):
+        from vulnclaw.agent.exec_gate import get_execution_gate, reset_execution_gate
+
+        spawned = self._no_spawns(monkeypatch)
+        reset_execution_gate()
+        channel = self.DenyChannel()
+        get_execution_gate().install_channel(channel)
+
+        result = await builtin_tools.execute_nmap(
+            self._agent(), {"target": "example.com", "scan_type": "tcp"}
+        )
+
+        assert "refused" in result
+        assert spawned == [], "a denied nmap_scan must spawn nothing"
+        assert channel.views, "the gate was never asked"
+        view = channel.views[0]
+        assert view.kind == "shell"
+        assert "nmap" in view.display_escaped
+
+    async def test_an_approved_scan_reaches_the_runner(self, monkeypatch):
+        spawned = self._no_spawns(monkeypatch)
+        _install_auto_approve()
+
+        result = await builtin_tools.execute_nmap(
+            self._agent(), {"target": "example.com", "scan_type": "tcp"}
+        )
+
+        assert "constraint_violation" not in result
+        assert spawned, "an approved scan must still run"
+
+    async def test_the_operator_sees_what_will_be_scanned(self, monkeypatch):
+        """The approval view names the target, not just the flags."""
+        from vulnclaw.agent.exec_gate import get_execution_gate, reset_execution_gate
+
+        self._no_spawns(monkeypatch)
+        reset_execution_gate()
+        channel = self.DenyChannel()
+        get_execution_gate().install_channel(channel)
+
+        await builtin_tools.execute_nmap(
+            self._agent(),
+            {"target": "example.com", "scan_type": "tcp", "ports": "80,443"},
+        )
+
+        view = channel.views[0]
+        assert "example.com" in view.detail
+        assert "80,443" in view.detail
+
+    async def test_a_request_that_is_refused_anyway_never_reaches_the_human(self, monkeypatch):
+        """Scope/port refusals are local: asking about them would train blind approval."""
+        from vulnclaw.agent.exec_gate import get_execution_gate, reset_execution_gate
+
+        spawned = self._no_spawns(monkeypatch)
+        reset_execution_gate()
+        channel = self.DenyChannel()
+        get_execution_gate().install_channel(channel)
+
+        agent = self._agent()
+        agent.session_state.task_constraints.allowed_ports = [443]
+        agent.session_state.task_constraints.strict_mode = True
+        result = await builtin_tools.execute_nmap(
+            agent, {"target": "example.com", "ports": "80", "scan_type": "tcp"}
+        )
+
+        assert "constraint_violation" in result
+        assert channel.views == [], "the gate must not be asked about a locally refused scan"
+        assert spawned == []
+
+    def test_the_classifier_never_auto_approves_nmap(self):
+        """In auto_review mode nmap always reaches the human; only a trusted prefix helps.
+
+        Pinned because the gate is only real in that mode if the read-only table does not
+        know the command: `_COMMAND_KINDS` routes kind="shell" through
+        `classify_shell_command`, and an "allow" verdict there would make this whole
+        change a no-op in the mode most operators run.
+        """
+        from vulnclaw.agent.command_classifier import classify_shell_command
+
+        for command in (
+            "nmap -q -T4 -sT -oX - example.com",
+            "nmap -v -T4 --top-ports 100 -oX - example.com",
+            "nmap -sV --script vuln example.com",
+        ):
+            assert classify_shell_command(command, ()).decision != "allow", command
+
+
 class TestNmapThreadOffload:
     """Round-5 A1: a 120s nmap scan must not run on the event loop thread."""
 
@@ -1062,6 +1190,7 @@ class TestNmapThreadOffload:
 
         import vulnclaw.agent.builtin_tools as builtin_tools
 
+        _install_auto_approve()
         loop_thread = threading.get_ident()
         worker_threads: list[int] = []
 

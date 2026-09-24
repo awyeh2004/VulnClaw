@@ -2,9 +2,12 @@
 
 Audit finding A1. Two separate defects on the same path:
 
-1. **No gate.** The only `gate.authorize` sites were shell / python / nmap, so a
-   background launch ran an operator-unapproved local command. The boundary scanner's
-   own contract says model-reachable spawn sites are exactly those the gate must cover.
+1. **No gate.** The three `gate.authorize` sites were shell / runtime_diff_probe /
+   python, so a background launch ran an operator-unapproved local command. The boundary
+   scanner's own contract says model-reachable spawn sites are exactly those the gate
+   must cover. (`git show 25b4677^` fixes that list; the commit message and the
+   `execute_bg_launch` docstring both said "shell/python/nmap", which round-8 finding
+   R8-8 corrected -- nmap had no gate either, and now does.)
 2. **A policy bypass, not just an ungated spawn.** The prefix allowlist accepts
    ``python``/``python3``, which makes the substring blacklist beside it decorative.
    Measured: ``python -c "import os;os.system('id')"`` was ACCEPTED here, while

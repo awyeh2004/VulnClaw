@@ -123,11 +123,18 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
     },
     "vulnclaw/agent/builtin_tools.py:_run_nmap_argv:run_text:ddcaa122": {
         "count": 1,
-        # model-reachable: called via asyncio.to_thread from execute_nmap;
-        # argv stays the structured, schema-constrained nmap command (plus the
-        # de-escalated retry) that the previous two inline subprocess.run
-        # entries covered.
-        "purpose": "structured argv nmap execution constrained by the nmap tool schema",
+        # model-reachable: called via asyncio.to_thread from execute_nmap.
+        # Round-8 finding R8-8: this entry's purpose used to justify the site with
+        # "argv stays the structured, schema-constrained nmap command" ALONE -- and
+        # that was the whole gap. Every other model-reachable site here is gated, and
+        # execute_nmap was not, so the scanner's own contract ("model-reachable sites
+        # are exactly those the ExecutionGate must gate") was violated in the file
+        # that states it. execute_nmap now authorizes before its first
+        # _run_nmap_argv call; a schema-constrained argv decides WHICH flags run,
+        # never WHETHER the host is scanned.
+        "purpose": "structured argv nmap execution constrained by the nmap tool schema, "
+                   "behind the ExecutionGate in execute_nmap (approval precedes the "
+                   "first spawn and the de-escalated retry)",
     },
     "vulnclaw/agent/builtin_tools.py:run_subprocess_capture:subprocess.run:f57fafd0": {
         "count": 1,

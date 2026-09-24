@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -2727,6 +2728,39 @@ async def execute_nmap(agent: AgentContext, args: dict[str, Any]) -> str:
             cmd.extend(["-p", custom_ports])
         cmd.append(target)
 
+    # ── ExecutionGate: per-request operator approval ─────────────────────
+    # Round-8 finding R8-8: this was the one model-reachable spawn that never
+    # asked. `gate.authorize` had exactly four sites -- shell_command,
+    # runtime_diff_probe, python_execute and bg_launch -- while `nmap_scan` is
+    # explicitly recommended by the prompt, is reachable by the model, and is
+    # labelled model-reachable by `scripts/verify_execution_boundary.py`'s own
+    # contract ("exactly those the ExecutionGate must gate").
+    #
+    # A schema-constrained argv is narrower than R8-1's hole, but it is not a
+    # substitute for approval: what the operator approves here is not "which
+    # flags" but "this host gets scanned". Placed after every in-process
+    # refusal (scope, ports, reserved-IP) so a request that is going to be
+    # refused anyway never reaches the human, and before the first
+    # `_run_nmap_argv` call so nothing is spawned unapproved. In `full_access`
+    # the gate approves without asking, exactly as it does for the other four.
+    from vulnclaw.agent.exec_gate import GateRequest, get_execution_gate
+
+    gate = get_execution_gate(getattr(agent, "config", None))
+    outcome = await gate.authorize(
+        GateRequest(
+            kind="shell",
+            display=shlex.join(cmd),
+            cwd="",
+            detail=(
+                f"nmap {profile or scan_type} scan · target={target}"
+                + (f" · ports={custom_ports}" if custom_ports else "")
+            ),
+        ),
+        run_id=str(getattr(getattr(agent, "runtime", None), "run_id", "") or ""),
+    )
+    if not outcome.approved:
+        return outcome.refusal_text("nmap_scan")
+
     try:
         kwargs: dict[str, Any] = {"timeout": 120}
         if sys.platform == "win32":
@@ -4091,11 +4125,17 @@ async def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
     The agent continues exploring and checks the result later via ``bg_result``.
 
     Async because it now passes the ExecutionGate, like every other model-reachable
-    process spawn. Audit finding A1: this path had NO gate at all -- the only three
-    ``gate.authorize`` sites were shell/python/nmap -- so a background launch ran an
-    operator-unapproved command, and (via ``python -c``) one that ``python_execute``
-    would have refused outright. The boundary scanner's own contract states that
-    model-reachable spawn sites are exactly the ones the gate must cover.
+    process spawn. Audit finding A1: this path had NO gate at all -- the three
+    ``gate.authorize`` sites then were shell / runtime_diff_probe / python -- so a
+    background launch ran an operator-unapproved command, and (via ``python -c``) one
+    that ``python_execute`` would have refused outright. The boundary scanner's own
+    contract states that model-reachable spawn sites are exactly the ones the gate must
+    cover.
+
+    ⚠️ Corrected by round-8 finding R8-8 (D3): this docstring used to say the three
+    sites were "shell/python/nmap". ``git show 25b4677^`` shows the third was
+    ``runtime_diff_probe`` -- nmap had no gate at all, which is exactly what R8-8
+    reported, and it now has one.
     """
     cmd_raw = str(args.get("command") or args.get("cmd") or "").strip()
     if not cmd_raw:
