@@ -25,6 +25,7 @@ from typing import Any, Optional, Sequence
 
 from vulnclaw.agent.ctf_mode import FLAG_PREFIX_NAMES
 from vulnclaw.config.settings import CONFIG_DIR
+from vulnclaw.utils.atomic_write import atomic_write_text
 
 MIN_PLAYBOOK_CHARS = 80  # minimum steps length (prevents 3-line low-effort entries)
 
@@ -813,7 +814,14 @@ def save_playbook(
         steps.strip(),
         "",
     ]
-    (PLAYBOOKS_DIR / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
+    # Through the shared atomic writer, not a bare `write_text` (round7, still open at
+    # round9). `write_text` truncates first and writes through the OS cache, so two
+    # sessions saving the same slug can lose an update and a concurrent `list_playbooks`
+    # can read a half-written note -- the store is shared across sessions by design
+    # (`~/.vulnclaw/playbooks`). `vulnclaw.utils.atomic_write` is the one implementation
+    # that also knows the Windows sharing-violation retry; the sibling KB path already
+    # used it (af3c4f2), and `platforms/attachments` points at it in a comment.
+    atomic_write_text(PLAYBOOKS_DIR / f"{slug}.md", "\n".join(lines))
     return {"slug": slug, "status": status, "name": name, "source": source}
 
 

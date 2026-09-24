@@ -396,6 +396,61 @@ class TestTheGateDoesNotDependOnKnowingThePlatform:
             assert pb._fingerprint_flags(once) == once, flag
 
 
+class TestTheNoteIsWrittenAtomically:
+    """Round7's out-of-scope finding, still open: `save_playbook` used a bare `write_text`.
+
+    The playbook store is shared across sessions by design (`~/.vulnclaw/playbooks`), and
+    `write_text` truncates first and writes through the OS cache: a concurrent
+    `list_playbooks` can read a half-written note, and two sessions saving the same slug
+    can lose an update. The KB path got the atomic writer in af3c4f2; this one did not.
+    """
+
+    STEPS = "LOCK: x\n" + "y" * 80
+
+    def _save(self, **over):
+        kwargs = dict(name="maze", fingerprint="fp", steps=self.STEPS, status="validated")
+        kwargs.update(over)
+        return pb.save_playbook(**kwargs)
+
+    def test_it_goes_through_the_shared_atomic_writer(self, tmp_playbooks, monkeypatch):
+        """Structural: a bare `write_text` bypasses the Windows-retry/fsync machinery."""
+        seen: list[str] = []
+        real = pb.atomic_write_text
+
+        def spy(path, text, **kwargs):
+            seen.append(str(path))
+            return real(path, text, **kwargs)
+
+        monkeypatch.setattr(pb, "atomic_write_text", spy)
+        ack = self._save()
+        assert "error" not in ack, ack
+        assert seen and seen[0].endswith(f"{ack['slug']}.md"), seen
+
+    def test_a_failed_commit_leaves_the_previous_note_byte_identical(
+        self, tmp_playbooks, monkeypatch
+    ):
+        """The commit point is the rename: a failure before it must change nothing."""
+        import pytest
+
+        from vulnclaw.utils import atomic_write
+
+        ack = self._save()
+        path = tmp_playbooks / f"{ack['slug']}.md"
+        before = path.read_bytes()
+
+        def boom(src, dst):
+            raise PermissionError("simulated sharing violation")
+
+        monkeypatch.setattr(atomic_write, "replace_with_retry", boom)
+        with pytest.raises(PermissionError):
+            self._save(steps="LOCK: rewritten\n" + "z" * 80)
+
+        assert path.read_bytes() == before
+        assert [p.name for p in tmp_playbooks.iterdir()] == [path.name], (
+            "a failed write must not leave its temp file behind"
+        )
+
+
 def test_save_playbook_redacts_before_writing(tmp_playbooks):
     """The gate has to work on the model-initiated path too, not only capture_run_notes."""
     ack = pb.save_playbook(
