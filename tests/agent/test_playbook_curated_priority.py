@@ -134,6 +134,53 @@ def test_empty_store_returns_nothing(store):
     assert pb.lookup_playbook_multi([("class", "Weblogic CVE-2018-2628")], limit=2) == []
 
 
+class TestAValidatedNoteWinsATie:
+    """Round8 L3: the tie-break was written backwards.
+
+    Both sorts took ``0 if status == "validated" else 1`` as their last key **under
+    ``reverse=True``**, so a DRAFT sorted ahead of a validated note -- the opposite of the
+    comment directly above one of them ("validated-before-draft on ties") and of the
+    docstring of the other. Measured on HEAD with two notes sharing score and overlap::
+
+        HEAD (before)        -> ['note-draft', 'note-validated']
+        working tree (after) -> ['note-validated', 'note-draft']
+
+    A validated note is the one a run actually solved the challenge with, so on an
+    otherwise exact tie it is the one worth injecting.
+    """
+
+    def _pair(self, fingerprint):
+        """Two notes identical except for status (the helper above hardcodes validated)."""
+        for slug, status in (("note-draft", "draft"), ("note-validated", "validated")):
+            block = [
+                "---",
+                f"name: {status} note",
+                f"fingerprint: {fingerprint}",
+                f"status: {status}",
+                f"source: {pb.SOURCE_CURATED}",
+                "---",
+                "",
+                LONG_STEPS,
+                "",
+            ]
+            (pb.PLAYBOOKS_DIR / f"{slug}.md").write_text("\n".join(block), encoding="utf-8")
+
+    def test_lookup_playbook_prefers_validated(self, store):
+        self._pair("Weblogic CVE-2017-10271 real easy")
+        rows = pb.lookup_playbook("Weblogic CVE-2017-10271 real easy", limit=2)
+        assert [r["slug"] for r in rows] == ["note-validated", "note-draft"], rows
+        # The tie is real: identical score AND overlap, so the last key decided it.
+        assert rows[0]["score"] == rows[1]["score"]
+        assert rows[0]["overlap_tokens"] == rows[1]["overlap_tokens"]
+
+    def test_lookup_playbook_multi_prefers_validated(self, store):
+        query = "Weblogic CVE-2017-10271 real easy"
+        self._pair(query)
+        rows = pb.lookup_playbook_multi([("class", query)], limit=2)
+        assert [r["slug"] for r in rows] == ["note-validated", "note-draft"], rows
+        assert rows[0]["status"] == "validated" and rows[1]["status"] == "draft"
+
+
 def test_the_injection_reports_the_curated_note(store):
     """End to end: the injected brief must carry the technique note."""
     from types import SimpleNamespace

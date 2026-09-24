@@ -391,8 +391,14 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
             scored.append((s, len(query_tokens & pb.identity_tokens()), pb))
     # Stable ranking: higher score first; more overlap, then validated-before-draft
     # on ties.
+    #
+    # The third key was `0 if validated else 1` under `reverse=True`, i.e. a DRAFT
+    # outranked a validated note on a tie -- the exact opposite of what this comment,
+    # the docstring above and `_reserve_curated_representation` all describe (round8 L3).
+    # Written as a boolean it cannot be read the wrong way round again: True sorts after
+    # False, so under reverse=True the validated note comes first.
     scored.sort(
-        key=lambda item: (item[0], item[1], 0 if item[2].status == "validated" else 1),
+        key=lambda item: (item[0], item[1], item[2].status == "validated"),
         reverse=True,
     )
     result = []
@@ -709,7 +715,9 @@ def lookup_playbook_multi(
         key=lambda r: (
             bool(r.get("vuln_class_agrees", True)),
             r["score"],
-            0 if r["status"] == "validated" else 1,
+            # Same sign fix as in `lookup_playbook` (round8 L3): a validated note must
+            # win a tie, and a boolean under reverse=True says that directly.
+            r["status"] == "validated",
         ),
         reverse=True,
     )
