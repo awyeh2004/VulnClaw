@@ -667,6 +667,59 @@ def _auto_notes_name(target: str) -> str:
     return f"AutoNotes {short}"[:80]
 
 
+def _recallable_fingerprint(target: str, goal: str) -> Optional[str]:
+    """The fingerprint to STORE for a captured note, or None if it could never be found.
+
+    The invariant is NOT "the fingerprint has a token" -- that is too strict, and
+    measurably so. ``score`` counts the QUERY's tokens found in the NOTE, so a note whose
+    fingerprint is a low-token string like ``http://t/`` is still found by the URL-shaped
+    queries it was captured from: that string is IN the fingerprint text. A first version of
+    this gate rejected any fingerprint with an empty token set and thereby turned two
+    existing capture tests red -- a recall REGRESSION on notes that were perfectly findable.
+    The real question is "can anything find this note?", so that is what gets asked.
+
+    So the guard checks the note against the identity it is about to be given. If nothing
+    of its fingerprint / name / slug can match ANY query token, the note is unreachable and
+    is not worth a store slot. Measured case (2026-09-24, real home store):
+    ``autonotes-babyfengshui-33c3-2016`` was captured with ``target='E:'`` and its stored
+    fingerprint is that same two-character string; against 4 target shapes x 3 goals
+    (12 combinations, including the target it came from) it scored 0.000 and was never
+    found. ``Path('E:').exists()`` is True on Windows while ``is_file()`` is False, so a
+    bare drive letter is "an existing target" that is not a file: no content hash, and
+    ``_tokenize`` drops it.
+
+    Two escapes, then a refusal:
+
+    * the target-derived fingerprint is already findable -> store it unchanged;
+    * it is not, but widening it with the GOAL makes it findable -> store the widened key,
+      which keeps the run's confirmed conclusions;
+    * neither -> return None, and ``capture_run_notes`` declines to write. A note nobody can
+      recall costs a slot and, worse, makes the store look richer than it is.
+    """
+    fingerprint = target_fingerprint(target, goal)
+    name = _auto_notes_name(target)
+    if _note_is_queryable(fingerprint, name):
+        return fingerprint
+    widening = " ".join(part for part in (goal, target) if str(part or "").strip()).strip()
+    if widening and _note_is_queryable(widening, name):
+        return widening
+    return None
+
+
+def _note_is_queryable(fingerprint: str, name: str) -> bool:
+    """Whether SOME query could find a note with this fingerprint and name.
+
+    The note's own identity tokens are the candidate answers, so a query made of those
+    tokens is the most favourable query that can exist: if even that scores zero, no query
+    can find the note.
+    """
+    probe = Playbook(slug=_slugify(name), name=name, fingerprint=fingerprint or "")
+    identity = probe.identity_tokens()
+    if not identity:
+        return False
+    return probe.score(" ".join(sorted(identity))) > 0.0
+
+
 def capture_run_notes(
     *,
     target: str,
@@ -723,9 +776,16 @@ def capture_run_notes(
     steps = "\n".join(lines).strip()
     if len(steps) < MIN_PLAYBOOK_CHARS:
         return None
+    fingerprint = _recallable_fingerprint(target, goal)
+    if fingerprint is None:
+        # Nothing in the target OR the goal can be tokenized, so no future query could ever
+        # score this note above zero. Writing it would create a note that looks like saved
+        # knowledge and is findable by nobody (see _recallable_fingerprint for the measured
+        # `'E:'` case). Declining is the smaller loss.
+        return None
     return save_playbook(
         name=_auto_notes_name(target),
-        fingerprint=target_fingerprint(target, goal),
+        fingerprint=fingerprint,
         steps=steps,
         status=status,
         source=SOURCE_AUTO,
