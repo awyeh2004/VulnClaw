@@ -211,6 +211,73 @@ class TestAFailedDownloadCannotDamageAnExistingCopy:
         assert os.listdir(tmp_path) == ["a.zip"], "the .part file must not linger"
 
 
+class TestConcurrentDownloadsCannotTrampleEachOther:
+    """Round8 L2: the temp file name was fixed (`<local>.part`), so two writers shared it.
+
+    Both would stream into that one file and both would `os.replace` it, so the canonical
+    path could end up holding an interleaving of two responses. Nothing downstream catches
+    that: CTF2 publishes no size, so the truncation check is a no-op, and the artifact is
+    then unpacked and executed.
+    """
+
+    def test_two_writers_never_commit_a_mixture(self, tmp_path):
+        import threading
+
+        # 8 KB chunks, so each response is several chunks and the interleaving window is
+        # wide enough for the race to be real rather than theoretical.
+        body_a = b"A" * (att.CHUNK * 4)
+        body_b = b"B" * (att.CHUNK * 4)
+        barrier = threading.Barrier(2, timeout=10)
+
+        class _SyncedResponse(_FakeResponse):
+            def iter_bytes(self, size: int = 8192):
+                for start in range(0, len(self._body), size):
+                    barrier.wait()          # both writers alternate chunks
+                    yield self._body[start:start + size]
+
+        results = []
+
+        def run(body):
+            client = _FakeClient(_SyncedResponse(200, body))
+            results.append(
+                att.download_attachment(
+                    client, Attachment(name="a.zip", url="https://h/a.zip"), str(tmp_path)
+                )
+            )
+
+        threads = [threading.Thread(target=run, args=(body,)) for body in (body_a, body_b)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        committed = (tmp_path / "a.zip").read_bytes()
+        assert committed in (body_a, body_b), (
+            "the committed file is neither writer's response -- it is an interleaving"
+        )
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name != "a.zip"]
+        assert leftovers == [], f"temp files lingered: {leftovers}"
+
+    def test_the_temp_name_is_unique_per_writer(self, tmp_path, monkeypatch):
+        """Cheap structural pin: the name must not be a pure function of the destination."""
+        seen = []
+        real_open = open
+
+        def recording_open(path, *args, **kwargs):
+            if str(path).endswith(".part"):
+                seen.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", recording_open)
+        for _ in range(2):
+            att.download_attachment(
+                _FakeClient(_FakeResponse(200, b"x")),
+                Attachment(name="a.zip", url="https://h/a.zip"),
+                str(tmp_path),
+            )
+        assert len(seen) == 2 and seen[0] != seen[1], seen
+
+
 class TestTheWorkDirectoryIsPlatformNeutral:
     """Audit finding D1: `%USERPROFILE%` + expandvars is a Windows-only expression."""
 

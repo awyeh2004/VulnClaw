@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -151,7 +152,17 @@ def download_attachment(
     # the exact path whose contents this docstring says get analysed and executed.
     # `atomic_write` in vulnclaw/utils exists for the same reason; the size check
     # already lives here, so the temp file is the missing half.
-    partial = f"{local}.part"
+    #
+    # The temp name is UNIQUE per writer (round8 L2). It used to be `<local>.part`, one
+    # name for every writer, so two concurrent downloads of the same attachment streamed
+    # into the same file and both `os.replace`d it: whichever finished second committed a
+    # file whose bytes are an interleaving of two responses. Nothing downstream would
+    # catch it -- CTF2 declares no size (see below), so the truncation check is a no-op
+    # there, and the file is then unpacked and executed. Both current callers happen to
+    # be serial; uniqueness is what removes the requirement instead of documenting it.
+    # A process killed mid-download now leaves an orphan `<local>.<pid>-<hex>.part`
+    # rather than one the next run would overwrite; it is scratch in the attachments dir.
+    partial = f"{local}.{os.getpid()}-{uuid.uuid4().hex[:8]}.part"
     os.makedirs(dest_dir, exist_ok=True)
 
     written = 0
