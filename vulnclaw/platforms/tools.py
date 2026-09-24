@@ -440,11 +440,18 @@ def _authorise_hosts(agent: Any, hosts: Any) -> bool:
         if constraints is None or constraints.is_empty():
             return False
         current = list(getattr(constraints, "allowed_hosts", []) or [])
+        # Dedupe on the SAME normalisation the gate matches with (round8 L10): the gate
+        # (`host_in_scope`) lower-cases both sides, so an entry already present as
+        # `Direct-CTF2.dasctf.com` -- a host a user typed -- must not be added a second
+        # time as `direct-ctf2.dasctf.com`. Comparing raw strings here meant the list
+        # grew a case-variant duplicate of a host that was already authorised.
+        seen = {str(entry or "").strip().lower().rstrip(".") for entry in current}
         added = False
         for raw in hosts or ():
             host = str(raw or "").strip().lower().rstrip(".")
-            if host and host not in current:
+            if host and host not in seen:
                 current.append(host)
+                seen.add(host)
                 added = True
         if added:
             constraints.allowed_hosts = current
@@ -734,7 +741,14 @@ async def _handle_overview(args: dict[str, Any]) -> str:
     return "[platform] no configured platform exposes a scoreboard."
 
 
-_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] = {
+# Agent-aware handlers take ``(args, agent)``; the rest take ``(args)``. The annotation
+# used to claim every entry was ``Callable[[dict], Awaitable[str]]``, which stopped being
+# true when the env handlers learned to authorise the endpoint they provisioned
+# (round8 L10) -- and it was the kind of inaccuracy that hides a real arity mistake,
+# since a mis-typed handler only fails at the call site. `_AGENT_AWARE` below is the
+# dispatch rule; `tests/platforms/test_platform_env_scope.py` asserts the two agree.
+_Handler = Callable[..., Awaitable[str]]
+_HANDLERS: dict[str, _Handler] = {
     "platform_list": _handle_list,
     "platform_read": _handle_read,
     "platform_start_env": _handle_start_env,

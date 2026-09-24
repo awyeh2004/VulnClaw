@@ -285,3 +285,62 @@ def test_attachment_host_extraction_handles_the_url_shapes(url, expected):
         attachments=(base.Attachment(name="x.zip", url=url),) if url else (),
     )
     assert _attachment_hosts(challenge) == expected
+
+
+# ── round8 L10: the handler table and the dispatch rule must agree ────────
+
+
+def test_the_declared_handler_arity_matches_the_dispatch_rule():
+    """Every name in `_AGENT_AWARE` must actually accept an agent, and vice versa.
+
+    The annotation on `_HANDLERS` claimed a single `(args)` shape long after the env
+    handlers grew a second parameter. That drift is invisible until the call site raises
+    TypeError, so it is checked against the real signatures instead of the annotation.
+    """
+    import inspect
+
+    from vulnclaw.platforms.tools import _AGENT_AWARE, _HANDLERS
+
+    for name, handler in _HANDLERS.items():
+        positional = [
+            p
+            for p in inspect.signature(handler).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        if name in _AGENT_AWARE:
+            assert len(positional) >= 2, f"{name} is agent-aware but takes {len(positional)}"
+        else:
+            assert len(positional) == 1, (
+                f"{name} takes {len(positional)} positional parameters but is not in "
+                f"_AGENT_AWARE, so dispatch would call it with one argument"
+            )
+    assert set(_AGENT_AWARE) <= set(_HANDLERS)
+
+
+@pytest.mark.asyncio
+async def test_a_case_variant_of_an_authorised_host_is_not_added_twice():
+    """Round8 L10: the dedupe compared case-sensitively while the gate does not.
+
+    `host_in_scope` lower-cases both sides, so `Direct-CTF2.dasctf.com` (as a user typed
+    it) and `direct-ctf2.dasctf.com` are the SAME authorisation. Registration appended the
+    second spelling anyway. The list must keep the operator's spelling and not grow.
+    """
+    agent = _agent(allowed_hosts=["Direct-CTF2.DASCTF.com"])
+    await dispatch_platform_tool("platform_read_env", {"ref": REF}, agent=agent)
+    hosts = agent.session_state.task_constraints.allowed_hosts
+    assert hosts == ["Direct-CTF2.DASCTF.com"], hosts
+
+
+def test_a_trailing_dot_variant_is_not_registered_twice():
+    """The other normalisation the gate applies and the dedupe did not: the trailing dot.
+
+    `host_in_scope` strips it from both sides, so `dasctf.com.` and `dasctf.com` are one
+    authorisation. A direct unit test rather than an adapter override -- registering a
+    second adapter under the same name does not reliably replace the first, and a test
+    that silently exercises the ordinary path proves nothing.
+    """
+    from vulnclaw.platforms.tools import _authorise_hosts
+
+    agent = _agent(allowed_hosts=[TARGET_HOST + "."])
+    assert _authorise_hosts(agent, [TARGET_HOST]) is False
+    assert agent.session_state.task_constraints.allowed_hosts == [TARGET_HOST + "."]
