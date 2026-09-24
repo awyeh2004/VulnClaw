@@ -160,6 +160,76 @@ def test_the_query_carries_the_powered_by_header():
     assert "servlet" in signature.lower() or "jsp" in signature.lower(), signature
 
 
+# ── 真实运行里模型用的工具，不是制式探测工具 ────────────────────────────────
+#
+# 这是第一组冷/热配对实测发现的最严重问题：真实 CTF2 运行里模型调用的是
+# `python_execute`(8 次) 与 `shell_command`(5 次)，**从不**调用
+# `http_probe_batch` / `fetch` / `http_request`（日志里 `body:` 标记与
+# `response_headers=` 行各出现 0 次）。当时 `HTTP_EVIDENCE_TOOLS` 只列了制式工具，
+# 于是 `probe_signature` 对每次真实运行都返回 ""，**整个重查是死代码**，
+# 而单测因为夹具用了制式格式而全绿。
+
+def test_python_execute_output_is_readable_evidence():
+    """模型的 python_execute 输出（没有 body: 标记）必须能取到特征。"""
+    raw = (
+        "[+] Python execution result (trusted-local): probe\n"
+        "GET /wls-wsat/CoordinatorPortType -> 200 :: 'Web Services WSAT10Service'\n"
+        "GET /bea_wls_internal/ -> 200 len=0\n"
+    )
+    signature = pr.probe_signature([_evidence(raw, tool="python_execute")])
+    assert signature, "a python_execute probe result must yield a query"
+    assert "wls" in signature.lower() and "wsat" in signature.lower(), signature
+
+
+def test_shell_command_curl_output_is_readable_evidence():
+    raw = (
+        "HTTP/1.1 200 OK\n"
+        "Server: Weblogic Server 10.3.6\n"
+        "Content-Type: text/html\n\n"
+        '<html><head><title>Weblogic Server Console</title></head></html>'
+    )
+    signature = pr.probe_signature([_evidence(raw, tool="shell_command")])
+    assert "weblogic" in signature.lower(), signature
+
+
+def test_the_evidence_tool_set_covers_what_the_model_actually_calls():
+    """名单必须包含实测会被调用的工具；否则重查只会在纸面上工作。"""
+    for tool in ("python_execute", "shell_command", "http_probe_batch", "fetch"):
+        assert tool in pr.HTTP_EVIDENCE_TOOLS, tool
+
+
+def test_a_tool_plumbing_output_yields_no_query():
+    """只有工具自身的管道信息 → 不是页面特征 → 不许换简报。"""
+    raw = (
+        "[+] Python execution result (trusted-local): cmd='true' status=500 "
+        "elapsed=0.4s cmd='sleep 6' status=500 elapsed=0.2s\n"
+    )
+    assert pr.probe_signature([_evidence(raw, tool="python_execute")]) == ""
+
+
+def test_a_server_error_page_yields_no_query():
+    """实测：运行里第一条 HTTP 结果是未授权错误页，标题是 "Error 404--Not Found"。
+
+    它是真页面、有真 `<title>`，能过"这是页面吗"的所有检查，却不标识任何题目 ——
+    用它换简报会把按题名建好的简报换成按模板套话建的，比不换更差。
+    """
+    raw = (
+        "status: 500 o.txt -> 404\n"
+        '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Draft//EN">\n'
+        "<HTML><HEAD><TITLE>Error 404--Not Found</TITLE></HEAD>\n"
+        '<BODY BGCOLOR="black" TEXT="white"><FONT FACE="Helvetica" COLOR="black">'
+        "Not Found</FONT></BODY></HTML>"
+    )
+    assert pr.probe_signature([_evidence(raw, tool="python_execute")]) == ""
+
+
+def test_a_page_with_a_real_title_is_never_treated_as_template_noise():
+    """反面对照：真实框架页面的标题必须留下（不能把整套错误页过滤误伤真页面）。"""
+    raw = "<html><head><title>Weblogic Server Console</title></head><body>ok</body></html>"
+    signature = pr.probe_signature([_evidence(raw, tool="python_execute")])
+    assert "weblogic" in signature.lower(), signature
+
+
 def test_generic_paths_and_params_do_not_flood_the_query():
     """`/static/`、`/api/`、`?id=` 这类人人都有，进了查询就是噪声。"""
     raw = _probe_output(

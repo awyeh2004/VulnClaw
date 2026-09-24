@@ -39,7 +39,27 @@ from typing import Any, Iterable, Optional, Sequence
 
 # Tools whose recorded output can contain a real HTTP response. Read from evidence
 # rather than from a live call: a refresh must never cost a network round trip.
-HTTP_EVIDENCE_TOOLS = frozenset({"http_probe_batch", "fetch", "http_request", "curl"})
+#
+# ``python_execute`` / ``shell_command`` are in here because that is what the model
+# ACTUALLY uses on CTF2. Measured 2026-09-24 on a real solve log: 8 x python_execute +
+# 5 x shell_command, and ZERO calls to ``http_probe_batch`` / ``fetch`` / ``http_request``
+# -- the log contained no ``body:`` marker and no ``response_headers=`` line at all.
+# While this set listed only the sanctioned probe tools, ``probe_signature`` returned ""
+# for every real run, so the whole re-query was dead code that no unit test could catch
+# (the fixtures used the sanctioned format). Reading every tool's text is safe here
+# because the parser is not format-bound: it looks for a <title>, for Server /
+# X-Powered-By header text and for path-like strings wherever they appear, and anything
+# it fails to recognise simply yields no tokens.
+HTTP_EVIDENCE_TOOLS = frozenset(
+    {
+        "http_probe_batch",
+        "fetch",
+        "http_request",
+        "curl",
+        "python_execute",
+        "shell_command",
+    }
+)
 
 # Query-length cap. ``Playbook.score`` is the share of the QUERY's tokens found in a
 # note, so an ever-growing probe query eventually dilutes every real hit below
@@ -70,6 +90,27 @@ _GENERIC_PARAMS = frozenset(
 
 # Where an http_probe_batch body starts inside the recorded raw output.
 _BODY_MARKER = "\n    body:\n"
+
+# Words that belong to ERROR PAGES AND HTML MARKUP rather than to a challenge. An
+# unauthenticated 404/WAF page ("Error 404--Not Found TITLE Helvetica COLOR black") is
+# a real page with a real <title>, so it passes every "is this a page?" check while
+# identifying nothing -- the same template is served by every instance of that server.
+# A signature made only of these words is therefore treated as no signature at all.
+_TEMPLATE_STOP = frozenset(
+    {
+        "error", "errors", "not", "found", "title", "color", "colors", "helvetica",
+        "html", "head", "body", "meta", "font", "style", "center", "table", "tr",
+        "td", "div", "span", "br", "hr", "nbsp", "doctype", "public", "envelope",
+        "xmlns", "schemas", "xmlsoap", "encoding", "fault", "faultstring", "soap",
+        "soapenv", "workcontext", "message", "stacktrace", "frame", "class", "java",
+        "void", "string", "array", "method", "status", "result", "output", "command",
+        "elapsed", "truncated", "preview", "stored", "chars", "raw", "size",
+        "execution", "trusted", "local", "diagnostic", "observed", "directory",
+        # colour/font words from server-generated error pages
+        "black", "white", "grey", "gray", "red", "blue", "green", "silver", "navy",
+        "maroon", "arial", "verdana", "sans", "serif", "monospace", "bold", "size",
+    }
+)
 
 # A response header line rendered as JSON-ish text by the probe formatter.
 _HEADER_RE = re.compile(
@@ -104,10 +145,19 @@ def _evidence_texts(evidence: Sequence[Any]) -> list[str]:
 
 
 def _response_body(raw: str) -> str:
-    """The body of a recorded ``http_probe_batch`` result (empty if absent)."""
-    _, marker, tail = str(raw or "").partition(_BODY_MARKER)
+    """The response body inside a recorded tool output.
+
+    A sanctioned ``http_probe_batch`` result marks it with an indented ``body:`` line;
+    a ``python_execute`` / ``shell_command`` output (what the model actually uses) is
+    just the program's stdout, so the whole text IS the candidate body. Returning ""
+    for the unmarked case was the second half of the "the re-query never fires" defect:
+    even after the tool-name filter was widened, the parser would still have found
+    nothing to read.
+    """
+    text = str(raw or "")
+    _, marker, tail = text.partition(_BODY_MARKER)
     if not marker:
-        return ""
+        return text
     return "\n".join(line[4:] if line.startswith("    ") else line for line in tail.splitlines())
 
 
@@ -122,11 +172,14 @@ def _signature_values_from_text(raw: str) -> list[str]:
 
     body = _response_body(raw)
     values: list[str] = []
+    strong = False
     title = _extract_html_title(body)
     if title:
         values.append(title)
+        strong = True
     for match in _HEADER_RE.finditer(raw or ""):
         values.append(f"{match.group('name')} {match.group('value')}")
+        strong = True
     # Paths the page itself advertises, plus the parameter names they carry. Both are
     # per-challenge: "/wls-wsat/CoordinatorPortType" or "?uddiexplorer" say far more
     # than the word "weblogic" ever could.
@@ -134,13 +187,30 @@ def _signature_values_from_text(raw: str) -> list[str]:
         path = str(endpoint).split("#", 1)[0]
         path = path.split("?", 1)[0].strip()
         if path:
-            values.append(_path_signal(path))
+            signal = _path_signal(path)
+            if signal:
+                values.append(signal)
+                strong = True
         query = str(endpoint).partition("?")[2]
         if query:
             for name in re.findall(r"[?&]([a-z0-9_\-\[\]]{2,40})=", "?" + query, re.IGNORECASE):
                 if name.strip("[]").lower() in _GENERIC_PARAMS:
                     continue
                 values.append(name.strip("[]"))
+                strong = True
+    # A path-like string the model printed itself (curl/wget output, an error trace, a
+    # payload it just sent). This is the case that matters on CTF2, where the model
+    # probes with python_execute rather than with the sanctioned probe tool: the raw
+    # stdout is all we get, and "/wls-wsat/CoordinatorPortType" appears in it as plain
+    # text. Counted as strong only with a slash, so a bare error word is not enough.
+    if not strong:
+        for match in re.finditer(r"(?<![\w/])(/[A-Za-z0-9_\-][\w\-./]{2,60})", body):
+            signal = _path_signal(match.group(1))
+            if signal and "/" in signal:
+                values.append(signal)
+                strong = True
+                if len(values) >= 6:
+                    break
     # Form/input markup without repeating the endpoint extraction above.
     for surface in _extract_html_surfaces(body):
         for match in re.finditer(r'(?i)\bname\s*=\s*["\']([^"\']{2,40})["\']', surface):
@@ -148,12 +218,21 @@ def _signature_values_from_text(raw: str) -> list[str]:
     # Only the class-defining words out of the body signals. The helper falls back to
     # plain visible text when no marker line exists, and feeding that whole blob in as
     # query tokens would dilute every real hit (the score is a share of the QUERY).
+    #
+    # These are scored as WEAK on their own. Measured 2026-09-24 by replaying the real
+    # tool outputs of a CTF2 run through this parser: the outputs that carry no page and
+    # no path produced signatures like "Python execution result trusted-local status
+    # elapsed sleep" and "Error 404--Not Found TITLE Helvetica COLOR black" -- pure tool
+    # plumbing and error boilerplate. Re-querying the store with those would REPLACE a
+    # good brief that was built from the challenge name, which is strictly worse than
+    # doing nothing. Hence ``strong``: the probe must show a real page signature
+    # (title / response header / path) before anything is asked with it.
     for match in re.finditer(r"[A-Za-z][A-Za-z0-9_\-]{4,30}", _http_body_signals(body, 240) if body else ""):
         word = match.group(0)
         if word.lower() in _GENERIC_PARAMS or word.lower() in _GENERIC_PATH_SEGMENTS:
             continue
         values.append(word)
-    return [value for value in values if str(value or "").strip()]
+    return [value for value in values if str(value or "").strip()] if strong else []
 
 
 def _path_signal(path: str) -> str:
@@ -200,6 +279,15 @@ def probe_signature(evidence: Sequence[Any], *, max_tokens: int = MAX_PROBE_TOKE
         ),
         max_tokens,
     )
+    # A signature of template vocabulary only is no signature. Measured 2026-09-24 by
+    # replaying a real CTF2 run's outputs: the very first HTTP result the model produced
+    # was an unauthenticated error page whose title ("Error 404--Not Found") tokenizes
+    # to words that identify no challenge, yet it would have replaced a brief built from
+    # the challenge name -- strictly worse than doing nothing. Requiring TWO tokens
+    # outside the template vocabulary keeps the refusal cheap and explainable.
+    informative = [tok for tok in tokens if tok.lower() not in _TEMPLATE_STOP]
+    if len(informative) < 2:
+        return ""
     return " ".join(tokens)
 
 

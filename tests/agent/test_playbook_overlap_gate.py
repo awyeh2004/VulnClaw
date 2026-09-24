@@ -136,6 +136,61 @@ def test_the_raw_single_key_lookup_primitive_is_not_gated(store):
     assert rows[0]["overlap_tokens"] == 1
 
 
+# ── 重叠算在"笔记声明的身份"上，不只算 fingerprint ────────────────────────
+#
+# 这条是实测踩出来的：手工笔记的 fingerprint 常是**目标形状**的
+# （"Weblogic 10.3.6 - /wls-wsat/CoordinatorPortType returns 'Web Services WSAT10Service'
+# listing; /console/ redirects to login ..."），而真正有判别力的名字在 `name` 里
+# （"Weblogic CVE-2017-10271 (wls-wsat XMLDecoder RCE) flag exfil via bea_wls_internal
+# docRoot"）。只数 fingerprint 时，查询 `Weblogic CVE-2017-10271` 与该笔记只重叠 1 个
+# token，于是**它自己那道题**都被挡住。278 道真实题面（练习场 2de971ac 全量）实测：
+#
+#   只数 fingerprint :  手工笔记注入 0/278（Weblogic 笔记在 11 道兄弟题上全部被挡，
+#                       ThinkPHP 笔记在 14 道上全部被挡 → 跨题迁移被整体清零）
+#   连 name/slug 一起数: 手工笔记注入 16/278，`[Weblogic]SSRF` 仍被正确挡住
+#
+# 同一个函数里的漏洞类判别早就写明"身份要从 name/slug 读，因为 fingerprint 常只是目标串"
+# —— 一条规则不能一边读名字、另一边只读同一个笔记的 fingerprint。
+
+def test_the_overlap_counts_the_name_not_only_the_fingerprint(store):
+    """真实形状：fingerprint 是目标串，判别性信息在 name 里。"""
+    _write(
+        "weblogic-note",
+        "Weblogic 10.3.6 - /wls-wsat/CoordinatorPortType returns 'Web Services "
+        "WSAT10Service' listing; /console/ redirects to login",
+        name="Weblogic CVE-2017-10271 (wls-wsat XMLDecoder RCE) flag exfil",
+    )
+    rows = pb.lookup_playbook_multi([("class", "Weblogic CVE-2017-10271")], limit=2)
+    assert [r["slug"] for r in rows] == ["weblogic-note"], (
+        "the note's own challenge must inject it: name carries weblogic+cve"
+    )
+    assert rows[0]["overlap_tokens"] >= 2
+
+
+def test_counting_the_name_does_not_let_a_bare_framework_token_through(store):
+    """放开到 name 之后，单 token 查询依然过不了门（原始退化情形没被放回来）。"""
+    _write(
+        "weblogic-deser",
+        "Weblogic CVE-2017-10271 wls-wsat XMLDecoder bea_wls_internal",
+        name="Weblogic CVE-2017-10271 (wls-wsat XMLDecoder RCE) flag exfil",
+    )
+    blocked: list[dict] = []
+    rows = pb.lookup_playbook_multi([("class", "Weblogic")], limit=2, out_blocked=blocked)
+    assert rows == [], "a bare framework token still needs a second declared token"
+    assert [b["slug"] for b in blocked] == ["weblogic-deser"]
+    assert blocked[0]["overlap_tokens"] == 1
+
+
+def test_the_overlap_surface_is_the_declared_identity(store):
+    """`identity_tokens` = fingerprint + name + slug，是一条可测的公开语义。"""
+    _write("weblogic-ssrf-note", "Weblogic uddiexplorer", name="Weblogic SSRF operator portlet")
+    note = pb.list_playbooks()[0]
+    assert note.tokens() == pb._tokenize("Weblogic uddiexplorer")
+    assert "ssrf" in note.identity_tokens(), "the name must contribute"
+    assert "note" in note.identity_tokens(), "the slug must contribute"
+    assert note.identity_tokens() >= note.tokens()
+
+
 # ── 被挡条目必须可见 ──────────────────────────────────────────────────────
 
 def test_blocked_rows_are_reported_to_the_caller(store):

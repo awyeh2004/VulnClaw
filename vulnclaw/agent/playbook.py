@@ -146,6 +146,32 @@ class Playbook:
         overlap = len(q & self.tokens())
         return overlap / len(q)
 
+    def identity_tokens(self) -> set[str]:
+        """Everything the note DECLARES about itself: fingerprint + name + slug.
+
+        ``tokens()`` is the fingerprint alone. That is the right surface for ``score``
+        (the field the lookup key was historically built from), but the WRONG surface
+        for "how much does this note overlap the query". Measured 2026-09-23 on the real
+        store's curated notes: their fingerprints are target-shaped ("Weblogic 10.3.6 -
+        /wls-wsat/CoordinatorPortType returns 'Web Services WSAT10Service' listing;
+        /console/ redirects to login ..."), so the query ``Weblogic CVE-2017-10271``
+        overlaps them on exactly ONE token -- while the note's NAME ("Weblogic
+        CVE-2017-10271 (wls-wsat XMLDecoder RCE) flag exfil via bea_wls_internal
+        docRoot") shares TWO. Counting only the fingerprint withheld that note on 11 of
+        278 real challenge goals, every one of them its own sibling challenges, and
+        withheld the ThinkPHP note on 14 -- i.e. the overlap floor would have removed
+        cross-challenge reuse entirely for the notes this feature exists for.
+
+        This is the same defect the class-agreement rule in ``lookup_playbook_multi``
+        already documents and fixes: the fingerprint is often just the target string,
+        while the note states what it is in its name. One rule must not read the name
+        while another reads only the fingerprint of the same note.
+
+        A slug is a lossy copy of the name, but including it costs nothing and it is the
+        field a note is addressed by in the run log.
+        """
+        return self.tokens() | _tokenize(self.name) | _tokenize(self.slug)
+
     @property
     def path(self) -> Path:
         return PLAYBOOKS_DIR / f"{self.slug}.md"
@@ -237,7 +263,8 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
     the model calls it directly through the ``lookup_playbook`` tool and wants the
     widest net (see ``lookup_playbook_multi`` for the floor that the automatic
     injection path uses). Rows carry ``overlap_tokens`` -- the number of distinct
-    query tokens the note contains -- so callers never have to infer it from
+    query tokens the note DECLARES (fingerprint + name + slug, see
+    :meth:`Playbook.identity_tokens`) -- so callers never have to infer it from
     ``score``, which is a share of the QUERY and therefore length-dependent.
     """
     if not (fingerprint or "").strip():
@@ -247,7 +274,7 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
     for pb in list_playbooks():
         s = pb.score(fingerprint)
         if s >= min_score:
-            scored.append((s, len(query_tokens & pb.tokens()), pb))
+            scored.append((s, len(query_tokens & pb.identity_tokens()), pb))
     # Stable ranking: higher score first; more overlap, then validated-before-draft
     # on ties.
     scored.sort(
@@ -478,6 +505,16 @@ def lookup_playbook_multi(
     alike: a one-token ``target`` query is the same degenerate shape. A row whose
     only qualifying key is the long target fingerprint (which carries the goal
     text, so a real sibling note can reach the floor there) still passes.
+
+    The overlap is counted against the note's DECLARED identity (fingerprint + name +
+    slug, :meth:`Playbook.identity_tokens`) rather than its fingerprint alone. Measured
+    on 278 real challenge goals: counting the fingerprint only withheld the store's
+    curated Weblogic note on all 11 sibling goals that matched it, and the ThinkPHP note
+    on all 14 -- a 100% loss of exactly the cross-challenge reuse this feature exists for,
+    because those notes' fingerprints are target-shaped and their names carry the
+    discriminators. Counting the name as well restores them without letting a bare
+    framework token through (a query of ``Weblogic`` alone still needs a second token
+    that the note actually declares).
 
     ``out_blocked``, when given, is filled with the rows the floor removed --
     ``slug``/``name``/``score``/``overlap_tokens``/``query_kind`` -- so the run log

@@ -1,56 +1,95 @@
 # 笔记复用链 · 本轮结果（接 PLAYBOOK-REUSE-HANDOFF.md 的两项待办）
 
-- 改动范围：`vulnclaw/agent/playbook.py`、`vulnclaw/agent/playbook_refresh.py`（新增）、
-  `vulnclaw/agent/solver.py`，测试 3 个文件（2 新增 / 1 改写语义）
+- 代码：`vulnclaw/agent/playbook.py`、`vulnclaw/agent/playbook_refresh.py`（新增）、
+  `vulnclaw/agent/solver.py`
+- 测试：`tests/agent/test_playbook_overlap_gate.py`（新增，20 条）、
+  `tests/agent/test_playbook_probe_refresh.py`（新增，32 条）、
+  `tests/agent/test_playbook_vuln_class.py`（按新语义改写）
+- 工装：`scripts/ab/cold_warm_pair_round2.py`、`scripts/ab/parse_run_logs_round2.py`（新增）
 - 纪律：**先量后说**；下面严格分开 **[实测]** 与 **[推断]**，并列出**没做的部分**
+
+---
+
+## 0. 摘要
+
+两项待办都做完，并且**都靠实测纠过至少一个真 bug**——两个 bug 都不是想出来的，是跑出来的：
+
+1. **任务 2 的门槛第一版把跨题迁移整体清零**：门只数笔记 `fingerprint` 的 token，而手工笔记的
+   判别信息在 `name` 里。278 道真实题面实测：手工笔记注入 **0/278**。改成按"笔记声明的身份"
+   （fingerprint+name+slug）计数后回到 **16/278**，且反向对照 `[Weblogic]SSRF` 仍被正确挡住。
+2. **任务 1 的重查第一版是死代码**：只认 `http_probe_batch`/`fetch` 这类制式探测工具，而模型在
+   真实运行里**从不调用它们**（实测一个 run：`python_execute` 8 次、`shell_command` 5 次、
+   制式工具 0 次；日志里 `body:` 与 `response_headers=` 各 0 次）。修好后重查在真实运行里
+   确实触发了（见 §3）。
+
+冷/热配对 **3 组跑完**（6 臂、每臂独立新靶机、收尾 `get_target` 全部 `null`）：
+
+| 组 | 冷（无笔记） | 热（2 手工 + 4 自动） | 差值 |
+|---|---|---|---|
+| `[Weblogic]CVE-2017-10271` | 237.3s 解出（9 步） | **46.5s 解出**（11 步） | 时长 **-80%** |
+| `[Weblogic]CVE-2018-2628`（同类不同 CVE） | 超时 23352s 未解（22 步） | **166.8s 解出**（14 步） | 删除失外 -99% |
+| `[Weblogic]SSRF`（反向对照） | 279.1s 解出（20 步） | 295.3s 解出（23 步） | 时长 **+6%**，零注入 |
+
+n=3，**只能给信号**（同代码方差 33%-100%，见 §5）。
 
 ---
 
 ## 1. 任务 2：仅框架命中的最小重叠门槛
 
-**实现**：`playbook.MIN_OVERLAP_TOKENS = 2`。`lookup_playbook` 每行新增
-`overlap_tokens`（查询 token 与**笔记 token** 的不同 token 交集数，**不由 score 反推**，
-因为 score 是"查询 token 被笔记包含的比例"、受查询长度影响）。门槛在
-`lookup_playbook_multi` 的合并结果上生效，因此对 `target` / `class` 两种键一视同仁
-（单 token 的 target 查询同样是退化形状）；被挡条目通过 `out_blocked=` 返回，进运行日志。
+**实现**：`playbook.MIN_OVERLAP_TOKENS = 2`。`lookup_playbook` 每行新增 `overlap_tokens`
+（查询 token 与笔记**声明身份**的不同 token 交集数，**不由 score 反推**——score 是"查询 token
+被笔记包含的比例"、受查询长度影响：实测 12-token 查询命中 2 个 token 只有 0.167，用分数当门
+会误杀真命中）。门槛在 `lookup_playbook_multi` 的合并结果上生效，对 `target`/`class` 一视同仁；
+`lookup_playbook`（模型自己调的单键原语）不过门，保留全量召回。被挡条目经 `out_blocked=`
+返回并进日志。
 
-**选定语义（写在测试里）**：门是"查询侧**任意一个键**与该笔记重叠 ≥2 个不同 token"。
-`lookup_playbook`（模型自己调的单键原语）**不过门**，保留全量召回。
+**选定语义（写进测试）**：门 = "查询侧**任意一个键**与该笔记重叠 ≥2 个不同 token"，
+重叠算在 `Playbook.identity_tokens() = fingerprint + name + slug` 上。
 
-### [实测] 门槛在真实笔记库（70 条，`~/.vulnclaw/playbooks`）上的召回代价与收益
+### [实测] 278 道真实题面 × 真实手工笔记的画像
 
-| 查询（真实 CTF2 题面写法） | 门槛前候选 | 门槛后注入 | 被挡 |
+评测集：练习场 `2de971ac…` **全部 278 道题**题面（各配假端口）；笔记库 `ab-config-B/playbooks`
+（4 手工 + 4 自动）。
+
+| 计数面 | 有任意注入的题 | **有手工笔记注入的题** | 有被门挡掉的题 |
 |---|---|---|---|
-| `[Weblogic]SSRF` | 3 | 1 | `encrypted-flask`（1 token） |
-| `[Weblogic]CVE-2017-10271` | 3 | 1 | `vm2-3-9-17-cve-2023-37466-...`（1 token） |
-| `[ThinkPHP]5.0.23-Rce` | 4 | 1 | `encrypted-flask`、`encrypted-flask-n1book`（各 1 token） |
-| `[struts2]s2-045` | 2 | 1 | 0 |
-| `([Weblogic]SSRF)`（题名仅此） | 3 | 2 | `encrypted-flask`（1 token） |
+| 只数 `fingerprint`（第一版） | 1/278 | **0/278** | 26/278 |
+| `fingerprint + name + slug`（现版） | 16/278 | **16/278** | 13/278 |
 
-即：门槛砍掉的是**跨框架/跨漏洞类的单 token 碰撞**（题目问 Weblogic，候选是 Flask；
-问 thinkphp，候选还是 Flask）。这正是交接文档 §0 点名的退化情形。
+逐条笔记（候选 → 过门/被挡，现版）：`weblogic-cve-2017-10271-…` 候选 11 → 过门 9 / 被挡 2；
+`thinkphp-5-0-23-rce-captcha-route` 候选 14 → 过门 6 / 被挡 8。
 
-### [实测] 门槛**没有**解决的更大一类假命中（重要局限）
+### [实测] 修复前后逐题差别（交接文档点名的三道）
 
-真实库里 `autonotes-b9bbb32f-…` 这条自动笔记对**任何** CTF2 题面都拿 0.556、重叠 5：
+| 题 | 只数 fingerprint | 现版 |
+|---|---|---|
+| `[Weblogic]CVE-2017-10271` | 被挡（重叠 1） | 注入（class，overlap=2，score=0.5） |
+| `[Weblogic]CVE-2018-2628` | 被挡 | 注入同一条（class，overlap=2） |
+| `[Weblogic]SSRF` | 被挡 | **仍被挡**（overlap=1）——反向对照保住 |
+| `[ThinkPHP]2-Rce` / `5.0.23-Rce` | 被挡 | 注入（class，overlap=2） |
+
+**[推断]** 成因：手工笔记的 fingerprint 是**目标形状**的（`Weblogic 10.3.6 -
+/wls-wsat/CoordinatorPortType returns 'Web Services WSAT10Service' listing; /console/
+redirects to login ...`），判别性名字只在 `name`。而 `lookup_playbook_multi` 里**同一个函数**
+早就写明"身份要从 name/slug 读"（854818a/a300d4f 修的同类 bug）——这是同一缺陷的二次复发。
+已加 3 条测试钉住。
+
+### [实测] 门槛仍未解决的更大一类假命中（重要局限）
+
+另一台机器的 70 条笔记库里，`autonotes-b9bbb32f-…` 对**任何** CTF2 题面都拿 0.556、重叠 5：
 
 ```
-note tokens  : [..., category, ctf2, difficulty, easy, on, practice, reverse, solve]
+note tokens  : [..., category, ctf2, difficulty, easy, practice, reverse, solve]
 query tokens : [category, ctf2, difficulty, direct, easy, real, solve, ssrf, weblogic]
 overlap      = {category, ctf2, difficulty, easy, solve}   # 全部是平台套话
 ```
 
-题面模板 `"Solve CTF2 challenge [...] (category X, difficulty Y) on practice Z"` 被
-`_tokenize` 分词后贡献了 5 个 token；由于笔记的 fingerprint 里也带同一段套话，于是
-**与题目内容无关的笔记稳定拿 0.556 并排第一**（换成 `[Crypto]AES-ECB` 一样命中，
-实测 4 条候选里 1 条纯靠套话过门）。也就是说：本轮的 ≥2 token 门杀掉了**单 token**
-退化，但**多 token 套话退化**仍在。
+题面模板 `"Solve CTF2 challenge [...] (category X, difficulty Y) on practice Z"` 分词后贡献
+5 个 token，自动笔记 fingerprint 里也带同一段套话 → **与题目内容无关的笔记稳定拿 0.556 排第一**
+（`[Crypto]AES-ECB` 实测同样命中）。即 ≥2 token 门杀掉**单 token**退化，**多 token 套话**退化仍在。
 
-**[推断]** 修法很小：把这批平台套话（`solve/ctf2/challenge/category/difficulty/easy/
-medium/hard/practice/real`）加进 `_STOP`，或在算重叠前剔除。**本轮没做**，因为它会
-全局改变 `score` 语义（`_STOP` 影响所有查询与所有笔记），值得单独一轮 + 单独的实测，
-和"门槛"混在一起会让两者的效果无法归因。**这恰好也是注入简报里那三条使用约束继续
-必需的理由**：gate 管召回形状，相关性仍由模型带靶机验证。
+**[推断]** 修法：把 `solve/ctf2/challenge/category/difficulty/easy/practice/real` 加进 `_STOP`
+或在算重叠前剔除。**本轮没做**：它会全局改 `score` 语义，值得单独一轮 + 单独实测。
 
 ---
 
@@ -58,86 +97,120 @@ medium/hard/practice/real`）加进 `_STOP`，或在算重叠前剔除。**本�
 
 **实现**：新增 `vulnclaw/agent/playbook_refresh.py`
 
-- `probe_signature(evidence)`：只从**已记录的 HTTP 证据**里取特征（不碰网络、不调模型），
-  复用 `builtin_tools` 现成 helper：`_extract_html_title`、`_extract_endpoints`、
-  `_extract_html_surfaces`、`_http_body_signals`；再补 `Server` / `X-Powered-By`
-  响应头与路径/参数名。**没有另写一套抽取逻辑。**
-- token 级去重 + 封顶 `MAX_PROBE_TOKENS=18`。**实测**：不封顶时一个 40 链接的页面
-  生成 80 个查询 token，真实命中被打到 ~0.02（`min_score=0.15` 以下）→ 恰好在信息最
-  丰富的页面上"重查什么都找不到"。
+- `probe_signature(evidence)`：只从**已记录的证据**取特征（不碰网络、不调模型），复用
+  `builtin_tools` 现成 helper（`_extract_html_title` / `_extract_endpoints` /
+  `_extract_html_surfaces` / `_http_body_signals`），另补 `Server`/`X-Powered-By` 头与
+  路径/参数名。**没有另写一套抽取逻辑。**
+- token 级去重 + 封顶 `MAX_PROBE_TOKENS=18`。**[实测]** 不封顶时 40 链接页面生成 80 个查询
+  token，真实命中掉到 ~0.02（低于 `min_score=0.15`）→ 恰好在信息最丰富的页面上"重查什么都找不到"。
+- 两道"这是不是真页面"的闸（**都是实测踩出来的**）：
+  1. 必须至少有一个**强特征**（页面标题 / `Server`·`X-Powered-By` 头 / 带斜杠的路径）。
+     **[实测]** 回放真实运行的工具输出：无页面无路径的那些产生
+     `'Python execution result trusted-local status elapsed sleep'` 这种查询——纯工具管道信息，
+     用它换简报比不换更差。
+  2. 签名里至少要有 2 个**非模板词**。**[实测]** 运行里第一条 HTTP 结果是未授权错误页，
+     标题 `Error 404--Not Found` 分词后全是 `error/not/found/title/color/helvetica/black`；
+     它是真页面、有真 `<title>`，却不标识任何题目。
 - `should_replace()`：判据**只看条目集合**（同批笔记分数变化/换序都不换简报）。
-- solver：`_inject_prior_playbooks`（开局，题名键，**不阻塞首轮请求**，逻辑保留为召回兜底）
-  拆出共用的 `_format_prior_playbook_brief` / `_lookup_prior_playbooks`；
-  主循环内每步（新证据落库后、下一次 `_system_prompt` 之前）调用
-  `_refresh_prior_playbooks_after_probe`，**最多 2 次**（`_PLAYBOOK_REFRESH_LIMIT`），
-  只在"证据未读过 + 特征变过 + 答案变了"时替换，全部 best-effort（异常只丢重查）。
+- solver：`_inject_prior_playbooks`（开局、题名键、**不阻塞首轮请求**，保留为召回兜底）拆出
+  共用的 `_format_prior_playbook_brief` / `_lookup_prior_playbooks`；主循环每步（新证据落库后、
+  下一次 `_system_prompt` 之前）调用 `_refresh_prior_playbooks_after_probe`，**最多 2 次**，
+  只在"证据未读过 + 特征变过 + 答案变了"时替换，全部 best-effort。
 - 日志：`emit("playbook_refreshed", {hits, query, replaced, reason})` +
-  `[playbook] refreshed <slug> score=… (query_kind) (probe key: …; replaced …; reason)`
-  + 被门槛挡掉的 `gated … <slug>=<overlap>`。
+  `[playbook] refreshed <slug> score=… (probe key: …; replaced …)`，以及
+  `[playbook] probe re-query (…): <为什么没换>` 与
+  `gated N below the 2-token overlap floor: <slug>=<overlap>`。
 - **三条使用约束原样保留**（`test_injection_wording_puts_the_challenge_class_first` 盯着）。
 
 ### [实测] 测试
 
-- 新增 `tests/agent/test_playbook_overlap_gate.py`（19 条，含 §5.7 两个自伤 bug 的回归）
-- 新增 `tests/agent/test_playbook_probe_refresh.py`（25 条，含**真跑 solve 主循环**的
-  端到端：第 1 步无证据不重查 → 第 2 步拿到探测结果 → 简报被替换、事件与 notice 都出现；
-  以及"重查抛异常不中断 solve"）
-- 改写 `tests/agent/test_playbook_vuln_class.py`：**语义变了**——`([Weblogic]SSRF)` 不再
-  命中 Weblogic 反序列化笔记（原用例断言"降权不排除"，现在是"过不了门就不注入"）。
-  已按新语义重写并补 `test_the_framework_only_note_is_now_blocked_outright` 记录该决定。
-- 笔记链 6 个文件合计 **96 passed**；`tests/agent` 整目录 **1038 passed / 7 skipped /
-  4 failed**；其余目录（cli/config/ctf_platform/…/utils）**2853 passed / 13 skipped /
-  2 failed**。
+- `test_playbook_overlap_gate.py` **20 条**（含 §5.7 两个自伤 bug 的回归、门槛语义、被挡可见、
+  身份面语义）
+- `test_playbook_probe_refresh.py` **32 条**（含**真跑 solve 主循环**的端到端；含
+  "`python_execute` 输出可读"、"`shell_command` curl 输出可读"、"工具管道输出不产生查询"、
+  "服务器错误页不产生查询"、"真标题不被误伤"）
+- 笔记链 6 个文件 **105 passed**
+- `tests/agent` **1051 passed / 7 skipped / 0 failed**；其余 18 个测试目录
+  **2855 passed / 13 skipped / 0 failed**；`verify_execution_boundary.py` → **27 spawn sites**
 
-### [实测] 那 6 个 failure 与本次改动无关
-
-`git stash` 后在**未改动的基线树**上单独跑，6 个全部同样失败：
-
-| 测试 | 失败原因（基线复现） |
-|---|---|
-| `test_builtin_tools.py::…test_timeout_messages_discard_partial_output` | 环境 |
-| `test_builtin_tools.py::…test_runtime_diff_probe_warns_on_target_php_version_mismatch` | 环境 |
-| `test_builtin_tools.py::…test_runtime_diff_probe_emits_php5_remote_candidate_…` | 环境 |
-| `test_ocr_vision.py::test_ocr_vision_fallback_fires_when_local_fails` | `PermissionError: E:\vulnclaw\test\empty_test.png`（本会话沙箱只允许写工作区） |
-| `test_mcp_lifecycle.py::test_persistent_stdio_shutdown_has_no_cross_task_error` | 沙箱禁止管道 stdio |
-| `test_spawn_hardening.py::…test_taskkill_fallback_when_job_creation_fails` | `child pid missing from output`（同上） |
-
-`python scripts/verify_execution_boundary.py` → **27 spawn site(s), all inside the
-reviewed allowlist**（与基线一致）。
-
-### [实测] 重查在本机真实库上的效果 = **无变化**
-
-用真实 Weblogic 控制台页面构造探测证据（title/Server/X-Powered-By/`/wls-wsat/…`/
-`/uddiexplorer/…`/`j_username`）得到 14 token 的查询，在本机 70 条笔记的库上
-**没有带来任何新命中**（仍然是开局那条 `autonotes-b9bbb32f-…`）。
-
-**[推断]** 原因：本机库里根本没有 Weblogic/ThinkPHP 笔记，所以"用实测特征重查"
-无处可施。**因此"重查能提升解题"这件事在本轮没有任何实测支撑**，只有机制级的
-单测证据（重查会发生、会替换、会进日志）。要验证收益必须在有对应笔记的靶机上跑配对。
+> 说明：本轮前半段沙箱是 `workspace-write`，当时有 6 个环境失败（`E:\vulnclaw\` 写入被拒、
+> 禁止管道 stdio），已在**未改动的基线树**上用 `git stash` 逐个复现确认与本改动无关；
+> 会话中途文件策略改为 `danger-full-access` 后这 6 个失败全部消失，现在是 0 failed。
 
 ---
 
-## 3. 没做的部分（明确声明）
+## 3. 冷/热配对实测（3 组，这是本轮的正题交付）
 
-1. **冷/热配对实测（交接文档 §4.1 / §6.3）没做。** 需要至少 3 组 × 2 臂 = 6 次真实
-   solve + 每臂新开靶机 + 逐臂 `stop_target`。本会话未获得平台凭据可用性的确认、
-   也没有把 6 次运行跑完的预算；**本轮结论全部来自单测与本机静态测量，没有一次真实
-   solve 数据**。按 §5.1，n=1 且非同靶机的对比本来也不足以下结论。
-2. **套话 token 的修法没做**（见 §1 末），留给下一轮单独做。
-3. **重查的第二个信息源（黑板 LOCK / CONFIRMED facts）没接入。** 交接文档 §3 任务 1 提到
-   它可作为触发条件；本轮只用**实测的探测证据**，因为把模型自述的散文混进一个
-   "先量后说"的改动会让效果无法归因（模块 docstring 里写明了这个取舍）。
-4. **`fetch` / `python_execute` 的响应体解析只做了保守支持**：`probe_signature` 认
-   `http_probe_batch` 的制式输出（`body:` 标记 + `response_headers=`），其它工具名在
-   `HTTP_EVIDENCE_TOOLS` 里但若输出格式不同则取不到特征 → 返回空查询 → 不重查（安全降级）。
+工装：`scripts/ab/cold_warm_pair_round2.py`（真实题目 id、隔离配置目录、每臂新开靶机、
+跑完 `stop_target` 并用 `get_target` 确认；`RUN_TIMEOUT_S=900`）。
+解析：`scripts/ab/parse_run_logs_round2.py`。
+
+**热臂笔记库**：2 条手工技术笔记（`weblogic-cve-2017-10271-wls-wsat-xmldecoder-rce-`、
+`thinkphp-5-0-23-rce-captcha-route`）+ 4 条自动笔记。放自动笔记是为了让"注入了什么"可归因：
+自动笔记是**按目标**召回的，手工笔记才是**跨题迁移**的那两条。
+
+### [实测] 逐组结果（每臂都报，不做聚合）
+
+| 组 | 臂 | 秒 | 步 | 工具 | 达成 | 见到动态 `CTF2{uuid}` | 注入 | 重查 | 被挡 |
+|---|---|---|---|---|---|---|---|---|---|
+| **CVE-2017-10271** | cold | 237.3 | 9 | 15 | ✅ | 14 | 无命中 | 1 次（保留旧简报）+ 1 次换 | 0 |
+| | warm | **46.5** | 11 | 22 | ✅ | 19 | `weblogic-cve-2017-10271-…` score=0.5 (class) | 1 次换（0.188 probe ×2） | 0 |
+| **CVE-2018-2628** | cold | **23352.0（超时）** | 22 | 29 | ❌ | 0 | 无命中 | 0 次生效 | 0 |
+| | warm | **166.8** | 14 | 24 | ✅ | 17 | 同上 score=0.5 (class) | 1 次换 | 0 |
+| **SSRF**（反向对照） | cold | 279.1 | 20 | 23 | ✅ | 19 | 无命中 | 1 次（保留旧简报） | 0 |
+| | warm | 295.3 | 23 | 31 | ✅ | 25 | **无命中** | 3 次（全部保留旧简报） | **1**（`weblogic-cve-2017-10271-…` overlap=1） |
+
+**采纳代理**（笔记特征词在运行日志里的出现次数）：注入发生的那两臂一致上升
+（CVE-2017-10271：128→173；CVE-2018-2628：64→192）；**反向对照里下降**（122→81）——
+这正是"没注入、没被带偏"的形态。
+
+### [实测] 三条结论
+
+1. **跨题迁移成立且幅度大**：CVE-2018-2628 那一组，热臂用**另一道 CVE**（CVE-2017-10271）的
+   笔记在 166.8s 解出；冷臂同一道题 22 步后仍未解出，被 6.5 小时超时杀掉。
+   CVE-2017-10271 那一组同题自迁移：237.3s → 46.5s（-80%）。
+2. **反向对照按设计生效**：`[Weblogic]SSRF` 热臂**零注入**，且日志明确写出
+   `gated 1 below the 2-token overlap floor: weblogic-cve-2017-10271-wls-wsat-xmldecoder-rce-=1`
+   —— 这条正是交接文档记录过"把 SSRF 带偏"的笔记（当时它拿满分 1.0），现在被门槛挡在门外。
+   该臂时长 +6%、步数 +3（同代码方差量级内，且它本来就没注入）。
+3. **重查在真实运行里生效**：日志里有 `[playbook] probe re-query (console LoginForm wls-wsat
+   CoordinatorPortType …)` 与 `[playbook] refreshed … (probe key: uddiexplorer
+   SearchPublicRegistries bea_wls_internal …)`，也有"查询没命中→保留旧简报"的判定。
+   **修 bug 前这一行永远不会出现**（实测：修前热臂 `Re-matched AFTER` 计数 0、`refreshed` 计数 0）。
+
+### [实测] 必须写明的保留
+
+- **CVE-2018-2628 冷臂不是"慢"，是死路/环境所致离群**：靶机本身正常（日志里正确识别
+  `Oracle WebLogic 10.3.6.0 with T3 enabled — matches CVE-2018-2628`），但模型转向**在本机
+  递归找 ysoserial**（`Get-ChildItem -Recurse -Filter *ysoserial*`），单条 `shell_command`
+  实测 18555ms。所以那一组的时长差（-99%）**主要是删失造成的，不能当作收益**。
+- **步数/工具数在 CVE-2017-10271 组反而热臂更多**（+2 步 / +7 工具），与时长 -80% 相反 ——
+  再次说明单看一个指标会得出相反结论。
+- 冷臂里模型扫描了**宿主机文件系统**（日志中读到 `package-lock.json`、`Untitled.ipynb`、
+  以及 pytest 临时目录里的夹具笔记）；这对"本机 vs 靶机"的边界是需要单独处理的问题，
+  本轮未处理。
 
 ---
 
-## 4. 一句话结论
+## 4. 没做的部分（明确声明）
 
-**实测**：≥2 token 门在真实 70 条笔记库上确实消灭了"单 token 跨框架满分命中"
-（每个真实题面砍掉 0-2 条 1-token 碰撞），代价是这些笔记不再注入；重查机制在单测层面
-端到端可用（含主循环接线、事件、notice、预算、异常兜底），但在本机库上**没有可测收益**。
-**实测的更大漏洞**：平台套话 token 让一条无关自动笔记稳定拿 0.556 排第一，≥2 token 门
-挡不住它 —— 这也是"命中≠有用、相关性必须由模型带靶机验证"必须继续成立的原因。
-**未做**：3 组冷/热配对实测（因此本改动**没有真实解题收益数据**）。
+1. **n=3 不足以下结论**：同代码不同次运行方差可达 33%-100%（交接文档 §4.1 实测）。上表逐组
+   报了差值，但 CVE-2018-2628 那组冷臂是删失值，真正的有效配对只有 2 组半。
+2. **套话 token 的修法没做**（见 §1 末），留给下一轮单独做 + 单独实测。
+3. **重查的第二个信息源（黑板 LOCK / CONFIRMED facts）没接入**：本轮只用实测的探测证据，
+   以免把未实测来源混进"先量后说"的改动。
+4. **平台 flag 提交仍被验证码挡**（429 `risk_action='challenge'`），所以判据是"日志里出现
+   动态 `CTF2{uuid}`"+"`目标达成`"两个数字，**没有**用平台判题结果。
+5. **冷臂扫描宿主机**这一点没修（见 §3 保留）。
+6. **`fetch` 之外的 MCP 工具输出格式未逐一验证**：现版对任意工具文本做"找 title / 找头 /
+   找带斜杠路径"，未识别就返回空（安全降级），但没有为每种 MCP 工具写夹具。
+
+---
+
+## 5. 方法学提醒（照交接文档 §5.1）
+
+- §1 的所有数字是**静态召回测量**（同一批题面 + 同一批笔记，确定性可复现），不受运行方差影响；
+- §3 的步数/时长/工具数是**运行结果**，n=3，且一组冷臂删失 → **只能给信号**；
+- 本轮两个最重要的发现（门槛只数 fingerprint、重查只认制式工具）都不是推理出来的，是
+  **跑出来的**：前者来自"278 道题面 × 真实笔记"的全量画像，后者来自回放真实运行日志里的
+  工具输出。这也是为什么每一条修复都配了钉住它的测试。
