@@ -80,6 +80,80 @@ def test_vocabulary_recognises_chinese_labels():
     assert "file_read" in pb.vulnerability_classes("疑似文件包含")
 
 
+class TestTheVocabularyDoesNotFireInsideUnrelatedWords:
+    """Round-8 finding R8-7: the needles were matched as bare substrings.
+
+    Measured on HEAD: `vulnerability_classes("brute force the login form")` returned
+    `{auth_bypass, rce}` -- "rce" is inside "fo**rce**" -- and "view-source"/"resources"
+    declared RCE on their own. Every false declaration costs twice: the class-agreement
+    demotion (the rule this vocabulary exists for) stops discriminating on the most
+    common class, and the note class read from a fingerprint mislabels rows.
+
+    This is the third instance of the same defect in this file; single-token signatures
+    and read-only-fingerprint classes were the first two, both already fixed.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "brute force the login form",
+            "view-source the page and read the script",
+            "static resources/ directory listing",
+            "the server enforces a rate limit",
+            "check the CSS source map",
+        ],
+    )
+    def test_no_rce_is_declared_by_accident(self, text):
+        assert "rce" not in pb.vulnerability_classes(text), text
+
+    def test_the_measured_case_declares_only_what_it_says(self):
+        assert pb.vulnerability_classes("brute force the login form") == {"auth_bypass"}
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "RCE via the deserialization gadget",
+            "pre-auth RCE!",
+            "RCE漏洞",
+            "remote code execution",
+            "命令执行",
+            "getshell through the upload",
+            "invokeFunction reached",
+        ],
+    )
+    def test_real_rce_wording_is_still_declared(self, text):
+        assert "rce" in pb.vulnerability_classes(text), text
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("XMLDecoder deserialization", "deserialization"),
+            ("反序列化利用链", "deserialization"),
+            ("the endpoint is unauthenticated", "auth_bypass"),
+            ("steganography in the PNG", "steganography"),
+            ("disassembly of the binary", "reverse"),
+            ("SSRF漏洞", "ssrf"),
+            ("a pure AES加密 challenge", "crypto"),
+            ("疑似文件包含", "file_read"),
+            ("this is a 弱口令 login", "auth_bypass"),
+            ("path traversal to /etc/passwd", "file_read"),
+        ],
+    )
+    def test_stem_needles_still_match_their_longer_word(self, text, expected):
+        """A trailing boundary on a STEM needle would break exactly these."""
+        assert expected in pb.vulnerability_classes(text), text
+
+    def test_a_boundary_is_not_python_word_boundary_semantics(self):
+        """`\\b` counts CJK as word chars, so `\\brce\\b` would miss `RCE漏洞`.
+
+        Pinned because the obvious "just use \\b" fix silently drops the ordinary Chinese
+        spelling of every ASCII class name.
+        """
+        assert "rce" in pb.vulnerability_classes("RCE漏洞")
+        assert "ssrf" in pb.vulnerability_classes("ssrf攻击")
+        assert "crypto" in pb.vulnerability_classes("RSA解密")
+
+
 # ── two limits found on a real store ──────────────────────────────────────
 
 def test_signature_carries_the_vulnerability_class():

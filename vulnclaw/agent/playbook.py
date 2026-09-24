@@ -572,6 +572,35 @@ _VULN_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
     "pwn": ("pwn", "pwntools", "heap overflow", "栈溢出", "rop chain"),
 }
 
+# Needles that are deliberately the STEM of a longer word, and so must not require a
+# trailing boundary: "deserial" -> deserialization, "disassembl" -> disassembly,
+# "unauth" -> unauthorized, "unacc" -> unaccepted, "steg" -> steganography/stegsolve.
+_VULN_CLASS_PREFIX_NEEDLES = frozenset({"deserial", "disassembl", "unauth", "unacc", "steg"})
+
+
+def _class_needle_re(needle: str) -> "re.Pattern[str]":
+    """Word-bounded matcher for one class needle.
+
+    The boundaries are ASCII-only on purpose. Python's ``\\b`` uses ``\\w``, which counts
+    CJK characters as word characters, so ``\\brce\\b`` would NOT match the ordinary
+    Chinese spelling ``RCE漏洞`` -- a boundary test against 漏 fails. `(?![a-z0-9])`
+    accepts it while still refusing to match inside "force" or "resources".
+
+    Only the LEADING side is required for the stem needles above; a trailing boundary
+    would make "deserial" stop matching "deserialization", which is the whole point of
+    listing the stem.
+    """
+    escaped = re.escape(needle.lower())
+    if needle in _VULN_CLASS_PREFIX_NEEDLES:
+        return re.compile(r"(?<![a-z0-9])" + escaped)
+    return re.compile(r"(?<![a-z0-9])" + escaped + r"(?![a-z0-9])")
+
+
+_VULN_CLASS_RES: dict[str, tuple["re.Pattern[str]", ...]] = {
+    name: tuple(_class_needle_re(needle) for needle in needles)
+    for name, needles in _VULN_CLASS_PATTERNS.items()
+}
+
 
 def vulnerability_classes(text: str) -> frozenset[str]:
     """Vulnerability classes a text declares, from a fixed vocabulary.
@@ -579,11 +608,20 @@ def vulnerability_classes(text: str) -> frozenset[str]:
     Deliberately a closed vocabulary rather than a model call: this runs on every
     lookup and must be deterministic and free. Unknown classes simply do not appear,
     which degrades to the previous behaviour instead of failing.
+
+    Round-8 finding R8-7: the needles were matched as BARE SUBSTRINGS, so `"rce"` fired
+    on "brute fo**rce**", "view-sou**rce**" and "resou**rce**s" -- measured:
+    ``vulnerability_classes("brute force the login form")`` returned ``{auth_bypass, rce}``.
+    Every false declaration costs twice: the class-agreement demotion stops working on the
+    most common class (a note that really is about RCE compares equal), and the note class
+    read from a fingerprint mislabels rows. Matching is now word-bounded (see
+    ``_VULN_CLASS_RES``), which is the third instance of this same defect in this file --
+    single-token signatures and read-only-fingerprint classes were the first two.
     """
     low = str(text or "").lower()
     return frozenset(
-        name for name, needles in _VULN_CLASS_PATTERNS.items()
-        if any(needle in low for needle in needles)
+        name for name, patterns in _VULN_CLASS_RES.items()
+        if any(pattern.search(low) for pattern in patterns)
     )
 
 
