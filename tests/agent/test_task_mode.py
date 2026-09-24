@@ -117,3 +117,58 @@ class TestSystemPromptIntegration:
         agent = _Agent()
         _system_prompt(agent, _State())
         assert agent.runtime.task_mode == "ir"
+
+
+class TestAMissingRuntimeCannotBreakThePrompt:
+    """Regression found while the full suite was run after 481d7ab.
+
+    `mode_block` was assigned only inside the `try` and consumed after it. Any raise
+    part-way through -- here, an agent object with no `runtime` attribute, which several
+    entry points and `tests/agent/test_solver_quiz.py` both pass -- left it unbound and the
+    `f"{mode_block}"` in the prompt f-string raised:
+
+        UnboundLocalError: cannot access local variable 'mode_block'
+        where it is not associated with a value
+
+    That turned "the capability card is unavailable" into "no system prompt at all",
+    which is the opposite of what the handler exists for. Both blocks must degrade to
+    empty instead.
+    """
+
+    def _state(self):
+        class _State:
+            goal = "capture the flag from http://target"
+            origin = "http://target"
+
+        return _State()
+
+    def test_an_agent_without_runtime_still_renders_a_prompt(self):
+        from vulnclaw.agent.solver import _system_prompt
+
+        class _Agent:
+            config = _cfg("auto")
+
+        prompt = _system_prompt(_Agent(), self._state())
+        assert "You are VulnClaw's" in prompt, "the prompt must render without a runtime"
+
+    def test_a_raising_tool_card_degrades_to_an_empty_block(self, monkeypatch):
+        """The handler must empty BOTH blocks, not just the one it was written for."""
+        from vulnclaw.agent import solver
+
+        monkeypatch.setattr(
+            solver, "_tool_card_enabled", lambda: True, raising=False
+        )
+        monkeypatch.setattr(
+            "vulnclaw.agent.tool_registry.build_tool_card",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("card exploded")),
+        )
+
+        class _RT:
+            prior_playbook_brief = ""
+
+        class _Agent:
+            config = _cfg("auto")
+            runtime = _RT()
+
+        prompt = solver._system_prompt(_Agent(), self._state())
+        assert "You are VulnClaw's" in prompt

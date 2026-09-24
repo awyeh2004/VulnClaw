@@ -1232,14 +1232,26 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     runtime = getattr(agent, "runtime", None)
     prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
     # Deterministic capability card: goal-relevant external tools this host has.
+    #
+    # Both values are assigned INSIDE the try and consumed after it. A raise part-way
+    # through -- an agent with no `runtime` (which `_system_prompt` is called with in
+    # several entry points and in tests), or a future tool-card signature change -- used
+    # to leave `mode_block` unbound, so the `f"{mode_block}"` below raised
+    # UnboundLocalError and the whole system prompt failed to build. That is a strictly
+    # worse outcome than an empty block: `except Exception` exists here precisely so a
+    # missing capability card cannot kill the run. Initialise both, and re-initialise
+    # both in the handler.
+    tool_card = ""
+    mode_block = ""
     try:
         from vulnclaw.agent.tool_registry import build_tool_card
 
         from vulnclaw.agent.task_mode import effective_task_mode, mode_instruction
 
         mode, mode_reason = effective_task_mode(getattr(agent, "config", None), state.goal or "")
-        runtime.task_mode = mode  # visible to the run log / watchdog
-        runtime.task_mode_reason = mode_reason
+        if runtime is not None:
+            runtime.task_mode = mode  # visible to the run log / watchdog
+            runtime.task_mode_reason = mode_reason
         tool_card = (
             (build_tool_card(state.goal or "", mode=mode) or "")
             if _tool_card_enabled()
@@ -1248,6 +1260,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         mode_block = mode_instruction(mode)
     except Exception:
         tool_card = ""
+        mode_block = ""
     pwn_local_instruction = ""
     if "pwn" in (state.goal or "").lower() or _looks_like_binary_target(state.origin or ""):
         pwn_local_instruction = (
