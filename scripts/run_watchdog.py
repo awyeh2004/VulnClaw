@@ -376,6 +376,26 @@ def print_status(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Status words that are NOT a verdict: run.json has not been written yet, or it carries
+#: no status. `--follow` must wait these out rather than report them as an ending (W1).
+_NON_VERDICT_STATUSES = frozenset({"", "unknown", "running"})
+
+#: How a final status word is spoken in the documented outcome vocabulary (_EPILOG).
+_OUTCOME_WORDS = {
+    "completed": "ENDED:COMPLETED",
+    "failed": "ENDED:FAILED",
+    "needs-input": "NEEDS_INPUT",
+}
+
+
+def _outcome_word(status: str) -> str:
+    """Map an effective status onto the outcome word the epilog tells readers to expect."""
+    lowered = str(status or "").strip().lower()
+    if lowered in _OUTCOME_WORDS:
+        return _OUTCOME_WORDS[lowered]
+    return f"ENDED:{lowered.upper()}" if lowered else "TIMEOUT"
+
+
 def follow_status(args: argparse.Namespace) -> int:
     """Print a status line only when something CHANGED, until the run ends.
 
@@ -388,27 +408,50 @@ def follow_status(args: argparse.Namespace) -> int:
     block, i.e. it blocks until the run either finishes or needs a human. That is
     the cheapest correct supervision loop: one tool call in, one line of verdict
     out.
+
+    Round-5 finding W1: the first poll used to treat ANY non-``running`` status as an
+    ending, so a run whose ``run.json`` had not been written yet (status ``unknown``)
+    exited immediately with a block whose first line was ``STATUS <run>: unknown`` --
+    an outcome the epilog does not list, on a run that had not even started. The
+    blocking mode had always waited a grace period before calling that ``NO_RUN_DIR``;
+    ``--follow`` waits the same ``--stall-secs`` grace, and reports terminal statuses in
+    the documented vocabulary (``WATCHDOG ENDED:COMPLETED``) so "always the first line
+    of the final block" is true in this mode too.
     """
     last: tuple[str, tuple[int, int]] | None = None
     started = time.time()
+    run_json = _run_dir(args.home, args.run) / "run.json"
     while time.time() - started < args.max_minutes * 60:
         lines, status, counts = _status_lines(args)
-        key = (status.lower(), counts)
+        lowered = status.lower()
+        key = (lowered, counts)
         if key != last:
             last = key
             stamp = f"[{datetime.now():%H:%M:%S}]"
-            if status.lower() == "running":
+            if lowered == "running":
                 if not args.quiet:
                     print(f"{stamp} running evidence={counts[0]} tools={counts[1]}",
                           flush=True)
+            elif lowered in _NON_VERDICT_STATUSES:
+                # Not a verdict: keep waiting, quietly under --quiet (whose contract is
+                # "say something only when there is something to say").
+                if not args.quiet:
+                    print(f"{stamp} not started yet (no run.json / no status); "
+                          f"waiting up to {_fmt_age(args.stall_secs)}", flush=True)
             else:
+                print(f"WATCHDOG {_outcome_word(status)}", flush=True)
                 print("\n".join(lines), flush=True)
                 return 0
-        if status.lower() != "running" and last is not None:
+        # The same grace the blocking mode applies before it calls this NO_RUN_DIR.
+        if not run_json.exists() and time.time() - started > args.stall_secs:
+            print("WATCHDOG NO_RUN_DIR", flush=True)
+            print("\n".join(lines), flush=True)
             return 0
         time.sleep(args.interval)
 
-    print(f"FOLLOW TIMEOUT after {args.max_minutes:.0f}m", flush=True)
+    print(f"WATCHDOG TIMEOUT", flush=True)
+    print(f"detail: no terminal status within {args.max_minutes:.0f}m "
+          f"(still unreadable or still running)", flush=True)
     return 0
 
 
@@ -440,7 +483,8 @@ how to read the verdict (always the first line of the final block):
                     run. Do NOT kill; re-check with a wider budget.
   STUCK             no activity for --stall-secs AND no findings; look for what
                     blocked it
-  NO_RUN_DIR        no run.json appeared; the run name or --home is probably wrong
+  NO_RUN_DIR        no run.json appeared within --stall-secs; the run name or --home is
+                    probably wrong (--follow waits that same grace before saying so)
   TIMEOUT           still running when --max-minutes elapsed; the block shows how far
 
 exit code is always 0 -- the verdict is the first line of stdout, and a non-zero
