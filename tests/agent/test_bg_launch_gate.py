@@ -14,6 +14,11 @@ Audit finding A1. Two separate defects on the same path:
 The gate is faked rather than driven through the real approval machinery: these tests
 are about *whether* the path is gated and what it rejects, not about the gate itself
 (covered by tests/security/test_exec_gate.py).
+
+Round-8 finding R8-1 added `TestTheGuardSurvivesRespellings`: the A1 fix matched raw
+whitespace-split text, so quoting, concatenation and an interpreter version suffix all
+walked past it. Those spellings are the point of that class -- each one is a bypass that
+was measured live, not a hypothetical.
 """
 
 from __future__ import annotations
@@ -137,6 +142,70 @@ class TestItCannotRouteAroundPythonExecute:
         ["hashcat -m 0 h.txt w.txt", "john hashes.txt", "brute.py"],
     )
     def test_non_interpreters_are_untouched_by_the_inline_rule(self, command):
+        assert _bg_interpreter_inline_code(command) is None
+
+
+class TestTheGuardSurvivesRespellings:
+    """Round-8 finding R8-1: same vector, four spellings the old check missed.
+
+    The old check compared `lowered.split()` tokens against `("-c", "-m", "--command",
+    "-")` and required a listed prefix followed by a space. Measured bypasses, all of
+    which now refuse:
+
+    * `python "-c" …` -- the quotes are part of the raw token, so `== "-c"` is False;
+    * `python -c"…"` -- CPython takes an attached value, so this is ONE token;
+    * `python3.13 …` / `pythonw …` -- the allowlist is prefix-based and both pass it,
+      but neither equals a listed prefix plus a space.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'python "-c" "import os;os.system(chr(105)+chr(100))"',
+            "python '-c' 'import os'",
+            'python -c"import os;os.system(\'id\')"',
+            "python -c'print(1)'",
+            'python3.13 -c "print(1)"',
+            'pythonw -c "print(1)"',
+            'cmd /c pythonw -c "print(1)"',
+            'python -m"http.server" 8000',
+            'python3.13 "-m" http.server',
+        ],
+    )
+    def test_quoted_concatenated_and_versioned_forms_are_rejected(self, command):
+        blocked = _bg_validate_command(command)
+        assert blocked is not None, command
+        assert "inline code" in blocked
+
+    @pytest.mark.parametrize(
+        ("command", "named"),
+        [
+            ('python "-c" "x"', "-c"),
+            ('python -c"x"', "-c"),
+            ("python -mhttp.server", "-m"),
+            ("python3.13 -c x", "-c"),
+        ],
+    )
+    def test_the_offending_flag_is_still_named(self, command, named):
+        assert _bg_interpreter_inline_code(command) == named
+
+    def test_an_attached_value_past_the_script_belongs_to_the_script(self):
+        """`-charset` is the script's option, not the interpreter's: not inline code.
+
+        The attached-value rule stops at the script name, which is what keeps a real
+        brute-force invocation usable. The exact-token rule below is unchanged and
+        deliberately stricter.
+        """
+        assert _bg_validate_command("python brute.py -charset abc words.txt") is None
+        assert _bg_validate_command("python brute.py -c x words.txt") is not None
+
+    @pytest.mark.parametrize("wrapper", ["python", "python3", "python3.13", "pythonw"])
+    def test_every_interpreter_family_member_is_covered(self, wrapper):
+        assert _bg_interpreter_inline_code(f'{wrapper} -c "x"') == "-c"
+
+    @pytest.mark.parametrize("command", ["hashcat -c 0 h.txt w.txt", "john -c x hashes.txt"])
+    def test_non_python_prefixes_are_still_untouched(self, command):
+        """The rule is about interpreters; another tool's `-c` is not this tool's business."""
         assert _bg_interpreter_inline_code(command) is None
 
 

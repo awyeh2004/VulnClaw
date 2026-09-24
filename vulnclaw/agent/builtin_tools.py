@@ -3877,7 +3877,27 @@ _BG_ALLOWED_PREFIXES = (
 )
 # The subset of the allowlist above that is an INTERPRETER: those prefixes make the
 # substring blacklist meaningless unless their inline-code flags are refused (A1).
-_BG_INTERPRETER_PREFIXES = ("python", "python3", "cmd /c python")
+#
+# Round-8 finding R8-1: the first version of that check compared raw whitespace-split
+# tokens against ("-c", "-m", "--command", "-") and required the command to start with
+# one of the strings above FOLLOWED BY A SPACE. Three live bypasses fell straight out
+# of that, all measured:
+#
+#   python "-c" "code"   -- the quotes survive a plain .split(), so the token is "-c"
+#                           only to a shell, never equal to the literal "-c";
+#   python -c"code"      -- CPython takes an ATTACHED value, so flag and code are one
+#                           token (`python -cprint(1)` == `python -c "print(1)"`);
+#   python3.13 -c / pythonw -c
+#                        -- the allowlist is prefix-based, so both pass it, but neither
+#                           command starts with a listed prefix plus a space.
+#
+# So the interpreter is now identified by BASENAME (an optional `cmd /c` wrapper, then
+# python/pythonw/py/pypy with an optional version suffix), and the flags are matched on
+# quote-stripped tokens instead of raw text.
+_BG_INTERPRETER_RE = re.compile(r"^(?:python|pythonw|py|pypy)(?:\d+(?:\.\d+)*)?$")
+_BG_INLINE_FLAGS = ("-c", "-m", "--command", "-")
+# `cmd /c python ...`: wrappers to step over before the interpreter token.
+_BG_SHELL_WRAPPERS = ("cmd", "/c", "/k", "call")
 # 禁止出现的危险模式（配合前缀二次过滤）
 _BG_BLOCKED_PATTERNS = (
     "|",
@@ -3903,6 +3923,50 @@ def _bg_new_id() -> str:
         return f"bg{_bg_seq}"
 
 
+def _bg_split_tokens(text: str) -> list[str]:
+    """Split a command line into tokens, dropping quote characters.
+
+    Deliberately not ``shlex.split(..., posix=True)``: that eats backslashes, and this
+    runs on Windows command lines where ``C:\\path`` has to survive. Quotes are removed
+    rather than interpreted, so ``python "-c" x`` yields the token ``-c`` -- which is
+    the whole point (round-8 finding R8-1).
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for ch in text:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                current.append(ch)
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(ch)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _bg_looks_like_script(token: str) -> bool:
+    """Whether ``token`` is a script path rather than an interpreter option.
+
+    Bounds where an ATTACHED ``-cvalue`` counts as inline code: past the script name the
+    options belong to the script, so ``python brute.py -charset abc`` is left alone.
+    Exact ``-c``/``-m`` tokens stay refused everywhere, as before.
+    """
+    if token.startswith("-"):
+        return False
+    return token.endswith((".py", ".pyw", ".pyc")) or "/" in token or "\\" in token
+
+
 def _bg_interpreter_inline_code(cmd_raw: str) -> str | None:
     """Return the offending flag when an interpreter prefix carries inline code.
 
@@ -3917,16 +3981,40 @@ def _bg_interpreter_inline_code(cmd_raw: str) -> str | None:
     -- the documented "pure computation" use -- still works, and the launch is gated
     anyway. A script that itself wants ``-c`` as its own flag loses; that is the safe
     direction, and the refusal says so.
+
+    Round-8 finding R8-1 rewrote this (see ``_BG_INTERPRETER_RE``): the previous version
+    was matched against raw text and missed quoted, concatenated and version-suffixed
+    spellings of the same vector. Every one of those is now in
+    ``tests/agent/test_bg_launch_gate.py``.
     """
-    lowered = " ".join(cmd_raw.lower().split())
-    if not any(
-        lowered == prefix or lowered.startswith(prefix + " ")
-        for prefix in _BG_INTERPRETER_PREFIXES
-    ):
+    tokens = _bg_split_tokens(str(cmd_raw or "").lower())
+    if not tokens:
         return None
-    for token in lowered.split():
-        if token in ("-c", "-m", "--command", "-"):
+    index = 0
+    while index < len(tokens) and tokens[index] in _BG_SHELL_WRAPPERS:
+        index += 1
+    if index >= len(tokens):
+        return None
+    interpreter = tokens[index].replace("\\", "/").rsplit("/", 1)[-1]
+    if interpreter.endswith(".exe"):
+        interpreter = interpreter[: -len(".exe")]
+    if not _BG_INTERPRETER_RE.match(interpreter):
+        return None
+    arguments = tokens[index + 1 :]
+    # Exact flag tokens are refused wherever they appear: unchanged behaviour, and
+    # `python brute.py -c x` still loses (the documented safe direction above).
+    for token in arguments:
+        if token in _BG_INLINE_FLAGS:
             return token
+    # Attached values (`-cprint(1)`, `-mhttp.server`) only up to the script name, beyond
+    # which the option belongs to the script rather than to the interpreter.
+    for token in arguments:
+        if _bg_looks_like_script(token):
+            break
+        if token.startswith("--"):
+            continue
+        if token.startswith(("-c", "-m")):
+            return token[:2]
     return None
 
 
