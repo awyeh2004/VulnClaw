@@ -12,6 +12,20 @@
 | `cold_warm_pair.py` | 冷/热配对运行器：同一道题先跑 `cold`（配额目录笔记为空）再跑 `warm`（只放手工技术笔记），每臂各开一台新靶机，跑完即释放，结果写 `.test-tmp/rate-results.json` |
 | `negative_control.py` | 反向对照：同框架但不同漏洞类的题（`[Weblogic]SSRF`），用来查"同框架被误注入"是否会带偏运行 |
 | `parse_run_logs.py` | 解析运行日志：命中条目/分数/命中的键/是否 CLASS MISMATCH、步数、工具调用数、墙钟、逐组冷热差值 |
+| `cold_warm_pair_round2.py` | 第二轮配对（2026-09-24）：真实题目 id、每臂记录 `get_target` 释放确认、`RUN_TIMEOUT_S=900`；隔离目录在**仓库内**，避开仓库外写入 |
+| `parse_run_logs_round2.py` | 解析第二轮日志：多解析 `refreshed` / `probe re-query` / `gated` 行、以及"是否从靶机读到动态 `CTF2{uuid}`" |
+
+## 自包含（2026-09-24 起）
+
+脚本原先指向仓库外的 `D:\GitClone\VulnClaw\ab-config-*`（上一轮会话的实验目录，**不是入库
+资产**，随时可能被回收），既读种子笔记也写隔离配置。现在：
+
+- **种子与基准配置入库**在 `scripts/ab/seeds/`：`config.yaml`（原 `ab-config-B` 的）、
+  `config-round2.yaml`（第二轮用的，`solve_work_root` 指向仓库内 scratch）、
+  以及 8 条种子笔记 `seeds/playbooks/*.md`；
+- **隔离配置目录**落在 `REPO/.test-tmp/abcfg-COLD|WARM`（仓库内，gitignore），
+  不再往仓库外写；
+- 于是三个 runner 都能**独立跑**，不依赖任何仓库外目录。
 
 ## 用法
 
@@ -19,6 +33,7 @@
 
 - `PRACTICE`：CTF2 练习场 id
 - `SIBLINGS` / `CHALLENGES`：题目 (name, challenge_id)
+- `SEEDS` / `SEED_FROM`：入库的基准配置与种子笔记
 - `COLD` / `WARM`：两个隔离配置目录（脚本会重建 `COLD`，并按 `SEED` 给 `WARM` 播种子笔记）
 - `MAX_STEPS` / `RUN_TIMEOUT_S`：预算
 

@@ -22,15 +22,19 @@ sys.path.insert(0, ".")
 from vulnclaw.ctf_platform import client as c
 
 ROOT = Path(r"D:\GitClone\VulnClaw")
+REPO = Path(__file__).resolve().parents[2]
 LOGS = Path(".test-tmp/neg-logs")
 PRACTICE = "2de971ac-26fe-448a-8719-01829e52c1d5"
 MAX_STEPS = "30"
 RUN_TIMEOUT_S = 600
 TOKEN = ""
 
-COLD = ROOT / "ab-config-COLD"
-WARM = ROOT / "ab-config-WARM"
-SEED_FROM = ROOT / "ab-config-B" / "playbooks"
+# 见 cold_warm_pair.py 里的同一条说明：种子与基准 config 已入库到 scripts/ab/seeds/，
+# 不再依赖仓库外的 ab-config-*（那是上一轮会话的实验目录，不是入库资产）。
+SEEDS = REPO / "scripts" / "ab" / "seeds"
+COLD = REPO / ".test-tmp" / "abcfg-COLD"
+WARM = REPO / ".test-tmp" / "abcfg-WARM"
+SEED_FROM = SEEDS / "playbooks"
 SEED = [
     "thinkphp-5-0-23-rce-captcha-route.md",
     "weblogic-cve-2017-10271-wls-wsat-xmldecoder-rce-.md",
@@ -61,7 +65,7 @@ def build_cfg(cfg: Path, seed: bool) -> None:
     if cfg.exists():
         shutil.rmtree(cfg)
     cfg.mkdir(parents=True)
-    shutil.copy2(ROOT / "ab-config-B" / "config.yaml", cfg / "config.yaml")
+    shutil.copy2(SEEDS / "config.yaml", cfg / "config.yaml")
     books = cfg / "playbooks"
     books.mkdir(exist_ok=True)
     (cfg / "work").mkdir(exist_ok=True)

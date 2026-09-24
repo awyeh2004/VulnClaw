@@ -44,7 +44,8 @@ TOKEN = ""
 
 COLD = REPO / ".test-tmp" / "abcfg-COLD"
 WARM = REPO / ".test-tmp" / "abcfg-WARM"
-SEED_FROM = ROOT / "ab-config-B" / "playbooks"
+# 种子已入库（`scripts/ab/seeds/`），不再指向仓库外的 ab-config-B。见 cold_warm_pair.py。
+SEED_FROM = REPO / "scripts" / "ab" / "seeds" / "playbooks"
 # 两条手工技术笔记 + 4 条自动笔记。自动笔记也放进来是为了让"注入了什么"可归因：
 # `autonotes-*` 是**按目标**召回的（fingerprint 里带 URL 与整段题面），
 # `*rce*captcha-route` / `weblogic-cve-*` 才是**跨题迁移**的那两条手工笔记。
@@ -64,7 +65,7 @@ SIBLINGS = [
     ("[Weblogic]SSRF", "5fcc745e-4272-45cd-9f8f-435870e88199"),
 ]
 
-CFG_SRC = REPO / ".test-tmp" / "abcfg-base.yaml"
+CFG_SRC = REPO / "scripts" / "ab" / "seeds" / "config-round2.yaml"
 
 
 def log(msg: str) -> None:

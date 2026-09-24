@@ -22,15 +22,20 @@ sys.path.insert(0, ".")
 from vulnclaw.ctf_platform import client as c
 
 ROOT = Path(r"D:\GitClone\VulnClaw")
+REPO = Path(__file__).resolve().parents[2]
 LOGS = Path(".test-tmp/rate-logs")
 PRACTICE = "2de971ac-26fe-448a-8719-01829e52c1d5"
 MAX_STEPS = "30"
 RUN_TIMEOUT_S = 600
 TOKEN = ""
 
-COLD = ROOT / "ab-config-COLD"
-WARM = ROOT / "ab-config-WARM"
-SEED_FROM = ROOT / "ab-config-B" / "playbooks"
+# 种子笔记与基准 config 现在放在**仓库内**（`scripts/ab/seeds/`）。原来指向仓库外的
+# `D:\GitClone\VulnClaw\ab-config-*`（上一轮会话的实验目录），那不是入库资产，随时可能被
+# 回收；这三个脚本是入库的，必须能独立跑。内容是当时那份的逐字节拷贝（8 条笔记 + config）。
+SEEDS = REPO / "scripts" / "ab" / "seeds"
+COLD = REPO / ".test-tmp" / "abcfg-COLD"
+WARM = REPO / ".test-tmp" / "abcfg-WARM"
+SEED_FROM = SEEDS / "playbooks"
 SEED = [
     "thinkphp-5-0-23-rce-captcha-route.md",
     "weblogic-cve-2017-10271-wls-wsat-xmldecoder-rce-.md",
@@ -63,7 +68,7 @@ def build_cfg(cfg: Path, seed: bool) -> None:
     if cfg.exists():
         shutil.rmtree(cfg)
     cfg.mkdir(parents=True)
-    shutil.copy2(ROOT / "ab-config-B" / "config.yaml", cfg / "config.yaml")
+    shutil.copy2(SEEDS / "config.yaml", cfg / "config.yaml")
     books = cfg / "playbooks"
     books.mkdir(exist_ok=True)
     (cfg / "work").mkdir(exist_ok=True)
