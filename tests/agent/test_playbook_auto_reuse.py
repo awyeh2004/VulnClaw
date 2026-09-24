@@ -530,6 +530,105 @@ print(ack["slug"])
         assert Path(store / f"{ack['slug']}.md").is_file()
 
 
+class TestARefusalSaysWhyItRefused:
+    """Round7 L8: three different refusals all returned a bare `None`.
+
+    "This run had nothing to record" and "there WAS a conclusion and the store refused it"
+    were the same event for the caller, so a dropped conclusion was indistinguishable from
+    an empty run -- and the caller (the solve loop) discarded the result entirely.
+    `out_reason` reports it, the same way `lookup_playbook_multi`'s `out_blocked` reports
+    the rows its overlap floor withholds.
+    """
+
+    def test_nothing_recorded_is_named(self, tmp_playbooks):
+        reason: list[str] = []
+        ack = pb.capture_run_notes(
+            target="http://direct-ctf2.dasctf.com:27532",
+            goal="pwn the heap",
+            blackboard=None,
+            outcome="failed",
+            out_reason=reason,
+        )
+        assert ack is None
+        assert reason and "recorded nothing" in reason[0], reason
+
+    def test_an_unrecallable_note_is_named_and_is_a_different_reason(self, tmp_playbooks):
+        """The `'E:'` shape: a conclusion existed, but no query could ever find it."""
+        from vulnclaw.agent.blackboard import Blackboard
+
+        bb = Blackboard()
+        # NOTE the long text: `set_lock` silently ignores a lock that is too short
+        # (measured: "flag lives in /flag" is dropped, current_lock() stays None), so a
+        # short one here would test the "recorded nothing" branch instead.
+        bb.set_lock("Heap UAF on the user description pointer; flag in /flag")
+        reason: list[str] = []
+        ack = pb.capture_run_notes(
+            target="E:",          # a bare drive letter: not hashable, and tokenizes to nothing
+            goal="",
+            blackboard=bb,
+            outcome="solved",
+            out_reason=reason,
+        )
+        assert ack is None
+        assert reason and "no query could ever find this note" in reason[0], reason
+
+    def test_a_short_conclusion_is_named(self, tmp_playbooks):
+        """A fake board so the short-steps branch is reached deterministically.
+
+        `set_lock`'s own quality rule sits between the too-short and the acceptable lock,
+        so a real Blackboard cannot be aimed at this branch reliably.
+        """
+        from types import SimpleNamespace
+
+        board = SimpleNamespace(
+            current_lock=lambda: SimpleNamespace(description="short"),
+            confirmed_facts=lambda: [],
+            all_nodes=lambda: [],
+        )
+        reason: list[str] = []
+        ack = pb.capture_run_notes(
+            target="http://x",
+            goal="g",
+            blackboard=board,
+            out_reason=reason,
+        )
+        assert ack is None
+        assert reason and "too short" in reason[0], reason
+
+    def test_a_successful_capture_reports_no_reason(self, tmp_playbooks):
+        bb = Blackboard()
+        bb.set_lock("Heap UAF on the user description pointer; flag in /flag")
+        reason: list[str] = []
+        ack = pb.capture_run_notes(
+            target="http://direct-ctf2.dasdctf.com:27532".replace("dasdctf", "dasctf"),
+            goal="pwn the heap challenge",
+            blackboard=bb,
+            outcome="no path found",
+            out_reason=reason,
+        )
+        assert ack is not None and "error" not in ack, ack
+        assert reason == []
+
+    def test_existing_callers_are_unaffected(self, tmp_playbooks):
+        """`out_reason` is optional: the old call shape must behave exactly as before."""
+        assert (
+            pb.capture_run_notes(
+                target="http://x", goal="g", blackboard=None, outcome="fail"
+            )
+            is None
+        )
+
+    def test_the_solve_loop_surfaces_the_reason_to_the_operator(self, tmp_playbooks):
+        """End to end through the real call site: the notice must reach the sink."""
+        import inspect
+
+        from vulnclaw.agent import solver
+
+        source = inspect.getsource(solver._solve_impl)
+        assert "out_reason=notes_outcome" in source
+        assert "no run notes captured" in source
+
+
 def test_save_playbook_redacts_before_writing(tmp_playbooks):
     """The gate has to work on the model-initiated path too, not only capture_run_notes."""
     ack = pb.save_playbook(

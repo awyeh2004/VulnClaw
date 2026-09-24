@@ -2440,14 +2440,28 @@ async def _solve_impl(
     try:
         from vulnclaw.agent.playbook import capture_run_notes
 
-        capture_run_notes(
+        # Round7 L8: this call used to discard its result, and `capture_run_notes` returns a
+        # bare None for three different refusals -- so "the run had nothing to record" and
+        # "a conclusion WAS dropped" were the same event in the log. The reason is asked for
+        # and surfaced; the operator can now tell why the reuse chain ends here.
+        notes_outcome: list[str] = []
+        ack = capture_run_notes(
             target=origin,
             goal=goal,
             blackboard=getattr(agent.runtime, "blackboard", None),
             outcome=reason,
             status="validated" if state.completed else "draft",
             final_answer=getattr(state, "final_answer", ""),
+            out_reason=notes_outcome,
         )
+        if ack is None and notes_outcome:
+            _notify_operator(
+                stream_sink, f"[playbook] no run notes captured: {notes_outcome[0]}"
+            )
+        elif isinstance(ack, dict) and ack.get("error"):
+            _notify_operator(
+                stream_sink, f"[playbook] run notes rejected: {ack['error']}"
+            )
     except Exception:
         pass
 

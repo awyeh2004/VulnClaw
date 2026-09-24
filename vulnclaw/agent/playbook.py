@@ -856,6 +856,16 @@ def _auto_notes_name(target: str) -> str:
     return f"AutoNotes {short}"[:80]
 
 
+def _note_reason(out_reason: Optional[list[str]], reason: str) -> None:
+    """Record why a capture declined, when the caller asked to be told.
+
+    Factored out so the three refusal sites cannot drift into reporting differently shaped
+    messages, and so `out_reason=None` (every existing caller) stays free.
+    """
+    if out_reason is not None:
+        out_reason.append(reason)
+
+
 def _recallable_fingerprint(target: str, goal: str) -> Optional[str]:
     """The fingerprint to STORE for a captured note, or None if it could never be found.
 
@@ -917,6 +927,7 @@ def capture_run_notes(
     outcome: str = "",
     status: str = "draft",
     final_answer: str = "",
+    out_reason: Optional[list[str]] = None,
 ) -> Optional[dict[str, Any]]:
     """Deterministically persist confirmed run conclusions as a draft playbook.
 
@@ -927,6 +938,14 @@ def capture_run_notes(
     evidence. When the model never engaged the blackboard, a fallback LOCK is
     synthesized from the final answer so the notes are never empty after a
     completed run. Returns the save ack, or None when there is nothing at all.
+
+    ``out_reason`` (round7 L8): this function declines to write on three different
+    grounds -- the run recorded nothing, the text is below ``MIN_PLAYBOOK_CHARS``, or the
+    only fingerprint available could never be recalled -- and all three used to return a
+    bare ``None``. A caller could not tell "this run had nothing to say" from "there WAS a
+    conclusion and the store refused it", so a dropped conclusion looked exactly like an
+    empty one in the run log. Same shape as ``lookup_playbook_multi``'s ``out_blocked``:
+    the reason is reported rather than inferred.
     """
     from vulnclaw.agent.blackboard import NodeStatus, NodeType
 
@@ -957,6 +976,8 @@ def capture_run_notes(
         synth = " ".join(final_answer.split())[:300]
         lines.append(f"LOCK: (from final answer) {synth}")
     if not lines:
+        _note_reason(out_reason, "the run recorded nothing (no LOCK, no confirmed fact, "
+                                 "no angle, no final answer)")
         return None
     lines.append(f"TARGET: {target}")
     lines.append(f"GOAL: {goal}")
@@ -964,6 +985,11 @@ def capture_run_notes(
         lines.append(f"OUTCOME: {outcome}")
     steps = "\n".join(lines).strip()
     if len(steps) < MIN_PLAYBOOK_CHARS:
+        _note_reason(
+            out_reason,
+            f"the recorded conclusion is too short ({len(steps)} chars, "
+            f"min {MIN_PLAYBOOK_CHARS})",
+        )
         return None
     fingerprint = _recallable_fingerprint(target, goal)
     if fingerprint is None:
@@ -971,6 +997,11 @@ def capture_run_notes(
         # score this note above zero. Writing it would create a note that looks like saved
         # knowledge and is findable by nobody (see _recallable_fingerprint for the measured
         # `'E:'` case). Declining is the smaller loss.
+        _note_reason(
+            out_reason,
+            "no query could ever find this note (neither the target nor the goal "
+            "tokenizes to anything), so it was not written",
+        )
         return None
     return save_playbook(
         name=_auto_notes_name(target),
