@@ -327,10 +327,15 @@ def _call_target(call: ast.Call, aliases: dict[str, str] | None = None) -> str |
     form is unknown do we consult the alias map -- which is what makes an aliased
     ``_sp.run(...)`` visible as ``subprocess.run``. Checking both, in that order, keeps
     every existing key valid while closing the alias hole.
+
+    A call whose callee is itself a call -- ``getattr(subprocess, "run")(...)`` -- has no
+    written dotted name at all, so that form is resolved separately (round8 L1).
     """
     raw = _dotted_name(call.func)
     if raw is None:
-        return None
+        raw = _getattr_name(call.func, aliases or {})
+        if raw is None:
+            return None
     if raw in _SPAWN_CALLS or raw.startswith(("os.exec", "os.spawn")):
         return raw
     if aliases:
@@ -340,6 +345,37 @@ def _call_target(call: ast.Call, aliases: dict[str, str] | None = None) -> str |
         ):
             return resolved
     return None
+
+
+def _getattr_name(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    """Canonical dotted name for ``getattr(<dotted name>, "attr"[, default])``.
+
+    Round8 L1: ``getattr(subprocess, "run")(argv)`` is a spawn with no dotted callee, and
+    the textual match saw nothing. Only a CONSTANT string attribute is resolved -- a
+    computed name stays invisible, which is the honest limit of a static scan (the same
+    limit the module docstring states for reformulations).
+
+    The default argument is ignored on purpose: ``getattr(subprocess, "DETACHED_PROCESS", 0)``
+    (a real site in ``cli/wizard.py``) resolves to ``subprocess.DETACHED_PROCESS``, which is
+    not a spawn callable, so it is not reported. The rule is about known spawn names, not
+    about "any getattr that looks dynamic".
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = _dotted_name(node.func)
+    if func is None or _resolve_aliases(func, aliases) not in ("getattr", "builtins.getattr"):
+        return None
+    if len(node.args) < 2:
+        return None
+    base = _dotted_name(node.args[0])
+    if base is None:
+        return None
+    attr = node.args[1]
+    if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
+        return None
+    if not attr.value.isidentifier():
+        return None
+    return f"{_resolve_aliases(base, aliases)}.{attr.value}"
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
@@ -397,6 +433,101 @@ def _resolve_aliases(name: str, aliases: dict[str, str]) -> str:
     return f"{canonical}.{tail}" if sep else canonical
 
 
+def _defined_names(tree: ast.AST) -> set[str]:
+    """Names this module binds with ``def``/``class``.
+
+    Used to keep a ``from X import *`` binding from shadowing the module's own function
+    of the same name (see :func:`_star_import_bindings`).
+    """
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def _star_import_bindings(tree: ast.AST, defined: set[str]) -> dict[str, str]:
+    """Bare names a ``from <spawn module> import *`` could bind (round8 L1).
+
+    ``from subprocess import *`` followed by ``run(argv)`` was invisible: the star import
+    binds every public name, and nothing in this file knew which. Only names that are
+    spawn callables in a module this audit already tracks are bound, and a name the module
+    defines itself wins (its ``def run`` is not the stdlib's).
+    """
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        if not any(alias.name == "*" for alias in node.names):
+            continue
+        prefix = f"{node.module}."
+        for canonical in _SPAWN_CALLS:
+            if not canonical.startswith(prefix):
+                continue
+            bare = canonical[len(prefix) :]
+            if "." in bare or bare in defined:
+                continue
+            out.setdefault(bare, canonical)
+    return out
+
+
+def _assignment_bindings(tree: ast.AST, aliases: dict[str, str]) -> None:
+    """Add ``name = <dotted name>`` / ``name = getattr(mod, "attr")`` bindings in place.
+
+    Round8 L1: ``Popen = subprocess.Popen`` then ``Popen(argv)`` was invisible, because
+    only ``import`` statements were mapped. Chains are resolved by repeating until the map
+    stops changing (``sp = subprocess`` / ``run = sp.run``), bounded so a pathological file
+    cannot loop.
+    """
+    for _ in range(5):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets: list[ast.expr] = list(node.targets)
+                value: ast.expr | None = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+                value = node.value
+            else:
+                continue
+            if value is None:
+                continue
+            canonical = _dotted_name(value)
+            canonical = (
+                _resolve_aliases(canonical, aliases)
+                if canonical is not None
+                else _getattr_name(value, aliases)
+            )
+            if canonical is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and aliases.get(target.id) != canonical:
+                    aliases[target.id] = canonical
+                    changed = True
+        if not changed:
+            return
+
+
+def _binding_map(tree: ast.AST) -> dict[str, str]:
+    """Every local spelling of a spawn callable in this module (round8 L1).
+
+    Built from three forms, because each one alone left a hole the audit measured:
+
+    * ``import subprocess as _sp`` / ``from subprocess import run as r`` (A1);
+    * ``Popen = subprocess.Popen`` and chains through a module binding;
+    * ``from subprocess import *``.
+
+    ``getattr(subprocess, "run")`` is not a binding but a call shape, so it is resolved at
+    the call site instead (:func:`_getattr_name`).
+    """
+    aliases = _import_aliases(tree)
+    defined = _defined_names(tree)
+    for bare, canonical in _star_import_bindings(tree, defined).items():
+        aliases.setdefault(bare, canonical)
+    _assignment_bindings(tree, aliases)
+    return aliases
+
+
 def scan_file(path: Path) -> list[SpawnSite]:
     # utf-8-sig accepts the BOM present in a few legacy modules. Real parse or
     # decode errors must fail CI rather than silently hiding every spawn in the
@@ -404,7 +535,7 @@ def scan_file(path: Path) -> list[SpawnSite]:
     tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
     rel = path.relative_to(REPO_ROOT).as_posix()
     scopes = _scope_of(tree)
-    aliases = _import_aliases(tree)
+    aliases = _binding_map(tree)
     sites: list[SpawnSite] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
