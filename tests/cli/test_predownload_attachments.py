@@ -121,6 +121,14 @@ class TestTheGoalHandsOverTheLocalPath:
         captured: dict = {}
         monkeypatch.setattr(main, "solve", lambda **kwargs: captured.update(kwargs))
         monkeypatch.setattr(main, "has_llm_credentials", lambda llm: True)
+        # `ctf2()` bails out early when no CTF2 credential is discoverable, and discovery
+        # includes SCRAPING THE DEVELOPER'S EDGE/CHROME localStorage for a live session
+        # token -- so this test passed or failed depending on whether the machine happened
+        # to have one (measured: it was green all evening, then red once the browser profile
+        # no longer held a live session). The subject here is "the goal lists the
+        # predownloaded local path", so the credential check is stubbed like every other
+        # dependency in this test.
+        monkeypatch.setattr(main, "ctf2_is_configured", lambda: True)
         monkeypatch.setattr(
             main, "load_config", lambda: SimpleNamespace(llm=SimpleNamespace(), competition=SimpleNamespace())
         )
