@@ -9,7 +9,7 @@ class TestRecordAnswer:
         from vulnclaw.agent.blackboard import Blackboard
 
         findings = []
-        state = SimpleNamespace(add_finding=lambda f: findings.append(f) or True)
+        state = SimpleNamespace(add_finding=lambda f, skip_dedup=False: findings.append(f) or True)
         bb = Blackboard()
         agent = SimpleNamespace(
             runtime=SimpleNamespace(blackboard=bb),
