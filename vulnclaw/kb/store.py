@@ -49,6 +49,27 @@ def _index_file_lock(path: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _portable_entry_path(path: Path, store_dir: Optional[Path]) -> str:
+    """A path that survives the KB directory MOVING (round5 residual item).
+
+    The index stores one `file` per row, and it used to be ``str(path)`` -- an absolute
+    path including the current machine's home directory. Copy the KB to another machine
+    (another user's home, a different drive) and every row points at nothing; the readers
+    then SKIP silently (``if filepath and Path(filepath).exists():`` in `search`, and the
+    same in `iter_all_entries`), so the knowledge base looks EMPTY rather than broken.
+
+    With a ``store_dir``, rows for files under the store are stored RELATIVE to it and
+    resolved back against the current root on read. A file outside the store keeps its
+    absolute form -- the best that can be said about it, and the readers still try it.
+    """
+    if store_dir is None:
+        return str(path)
+    try:
+        return path.resolve().relative_to(Path(store_dir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
 class KnowledgeStore:
     """Manages the security knowledge base.
 
@@ -109,7 +130,7 @@ class KnowledgeStore:
                     if not isinstance(data, dict):
                         continue
                     self._index[category].append(
-                        self.index_meta_for(data, entry_file)
+                        self.index_meta_for(data, entry_file, store_dir=self.store_dir)
                     )
                 except (json.JSONDecodeError, IOError, TypeError, ValueError):
                     continue
@@ -186,8 +207,15 @@ class KnowledgeStore:
         return entry_id
 
     @classmethod
-    def index_meta_for(cls, data: dict[str, Any], filepath: Path | str) -> dict[str, Any]:
-        """Build one index row from on-disk entry data."""
+    def index_meta_for(
+        cls, data: dict[str, Any], filepath: Path | str, *, store_dir: Path | None = None
+    ) -> dict[str, Any]:
+        """Build one index row from on-disk entry data.
+
+        ``store_dir`` (optional) makes the stored path relative to the store, which is what
+        keeps the index usable after the KB directory moves (see `_portable_entry_path`).
+        Without it the absolute path is stored, exactly as before this fix.
+        """
         path = Path(filepath)
         entry_id = str(data.get("id") or path.stem)
         meta: dict[str, Any] = {
@@ -195,12 +223,42 @@ class KnowledgeStore:
             "title": cls.entry_title(data, entry_id),
             "search_text": cls.entry_search_text(data, entry_id),
             "tags": cls.normalize_tags(data),
-            "file": str(path),
+            "file": _portable_entry_path(path, store_dir),
         }
         status = data.get("status")
         if status is not None and status != "":
             meta["status"] = status
         return meta
+
+    def _resolve_entry_path(self, stored: Any) -> Optional[Path]:
+        """The file a row points at, relative-to-the-store first, absolute second.
+
+        Both orders appear in real indexes: rows written before this fix are absolute
+        (and still correct on the machine that wrote them), rows written after it are
+        relative. Trying both means neither generation of index breaks the other.
+        """
+        raw = str(stored or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = self.store_dir / candidate
+        if candidate.exists():
+            return candidate
+        if not Path(raw).is_absolute():
+            return None
+        # A legacy absolute row whose machine path is gone: the file may still be sitting
+        # under the CURRENT store (a moved/copied KB), so try the tail as well -- including
+        # the category directory, which is what makes the tail unambiguous.
+        parts = Path(raw).parts
+        for start in range(len(parts)):
+            tail = Path(*parts[start:])
+            if len(tail.parts) < 2:
+                continue
+            candidate = self.store_dir / tail
+            if candidate.exists():
+                return candidate
+        return None
 
     def upsert_index_entry(
         self,
@@ -216,7 +274,7 @@ class KnowledgeStore:
         """
         payload = dict(data)
         payload["id"] = entry_id
-        meta = self.index_meta_for(payload, filepath)
+        meta = self.index_meta_for(payload, filepath, store_dir=self.store_dir)
         with _index_file_lock(self.store_dir / ".index.lock"):
             if not self._read_index_unlocked():
                 self._build_index()
@@ -342,9 +400,9 @@ class KnowledgeStore:
                     or (entry_status and query_lower in entry_status)
                 ):
                     # Load full entry
-                    filepath = entry_meta.get("file")
-                    if filepath and Path(filepath).exists():
-                        with open(filepath, "r", encoding="utf-8") as f:
+                    resolved = self._resolve_entry_path(entry_meta.get("file"))
+                    if resolved is not None:
+                        with open(resolved, "r", encoding="utf-8") as f:
                             data = json.load(f)
                         if cat == "experience" and data.get("status") != "approved":
                             continue
@@ -363,11 +421,11 @@ class KnowledgeStore:
         entries: list[dict[str, Any]] = []
         for cat, metas in self._index.items():
             for entry_meta in metas:
-                filepath = entry_meta.get("file")
-                if not filepath or not Path(filepath).exists():
+                resolved = self._resolve_entry_path(entry_meta.get("file"))
+                if resolved is None:
                     continue
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(resolved, "r", encoding="utf-8") as f:
                         data = json.load(f)
                 except (json.JSONDecodeError, IOError):
                     continue
@@ -386,5 +444,19 @@ class KnowledgeStore:
         return self._index.get(category, [])
 
     def get_stats(self) -> dict[str, int]:
-        """Get knowledge base statistics."""
-        return {cat: len(entries) for cat, entries in self._index.items()}
+        """Get knowledge base statistics.
+
+        ``unresolved_files`` is the diagnosability half of the portability fix above: a row
+        whose file cannot be found is SKIPPED by every reader, so without a count the only
+        symptom of a moved KB is "the knowledge base looks empty".
+        """
+        stats = {cat: len(entries) for cat, entries in self._index.items()}
+        unresolved = sum(
+            1
+            for entries in self._index.values()
+            for entry in entries
+            if self._resolve_entry_path(entry.get("file")) is None
+        )
+        if unresolved:
+            stats["unresolved_files"] = unresolved
+        return stats

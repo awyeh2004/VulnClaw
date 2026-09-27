@@ -440,3 +440,98 @@ def test_add_entry_failure_keeps_previous_entry_intact(tmp_path, monkeypatch):
     survived = store.get_entry("techniques", "t1")
     assert survived["title"] == "original"
     assert survived["steps"] == ["a"]
+
+
+class TestTheIndexSurvivesTheKbDirectoryMoving:
+    """Round5 residual item: index rows stored ABSOLUTE paths, so a moved KB went silently empty.
+
+    Measured shape before the fix: the row recorded the writing machine's full path, and
+    both readers do `if not Path(filepath).exists(): continue` -- so copying the KB (another
+    machine, another home, a different drive) produced a store whose `search` and
+    `iter_all_entries` returned nothing, with no error anywhere. The knowledge base looked
+    EMPTY rather than broken.
+    """
+
+    def _populated(self, store_dir):
+        from vulnclaw.kb.store import KnowledgeStore
+
+        store = KnowledgeStore(store_dir=store_dir)
+        store.add_entry(
+            "cve",
+            "CVE-2026-0001",
+            {"title": "Nginx Buffer Overflow", "tags": ["nginx"], "description": "boom"},
+        )
+        store.add_entry("techniques", "t1", {"title": "blind sqli", "steps": ["a"]})
+        return store
+
+    def test_a_moved_kb_still_finds_its_entries(self, tmp_path):
+        """A real MOVE, not a copy: with a copy the stale absolute path still resolves and
+        the test would pass for the wrong reason (measured: it did)."""
+        import shutil
+
+        from vulnclaw.kb.store import KnowledgeStore
+
+        original = tmp_path / "kb-home"
+        self._populated(original)
+        moved = tmp_path / "elsewhere" / "kb-home"
+        moved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(original), str(moved))
+        assert not original.exists(), "the move must make the old absolute path stale"
+
+        store = KnowledgeStore(store_dir=moved)
+        assert store.search("nginx"), "a moved KB must still resolve its own rows"
+        assert store.get_entry("cve", "CVE-2026-0001")["title"] == "Nginx Buffer Overflow"
+        titles = {e["title"] for e in store.iter_all_entries()}
+        assert titles == {"Nginx Buffer Overflow", "blind sqli"}
+        assert "unresolved_files" not in store.get_stats()
+
+    def test_rows_are_stored_relative_to_the_store(self, tmp_path):
+        from vulnclaw.kb.store import KnowledgeStore
+
+        store = self._populated(tmp_path)
+        import json
+
+        rows = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+        files = [row["file"] for row in rows["cve"]]
+        assert files == ["cve/CVE-2026-0001.json"], files
+
+    def test_a_legacy_absolute_row_is_resolved_after_the_move(self, tmp_path):
+        """Indexes written before this fix hold absolute paths; they must keep working."""
+        import json
+        import shutil
+
+        from vulnclaw.kb.store import KnowledgeStore
+
+        original = tmp_path / "kb-home"
+        self._populated(original)
+        moved = tmp_path / "elsewhere" / "kb-home"
+        moved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(original), str(moved))
+
+        # Rewrite the index the way the old code did: absolute paths under `original`,
+        # which no longer exists.
+        index_path = moved / "index.json"
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+        for rows in raw.values():
+            for row in rows:
+                row["file"] = str(original / row["file"])
+        index_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        store = KnowledgeStore(store_dir=moved)
+        assert store.search("nginx"), "a legacy absolute row must still resolve via the tail"
+
+    def test_a_row_that_resolves_nowhere_is_counted_not_silently_dropped(self, tmp_path):
+        import json
+
+        from vulnclaw.kb.store import KnowledgeStore
+
+        store = self._populated(tmp_path)
+        index_path = tmp_path / "index.json"
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+        raw["cve"][0]["file"] = "cve/does-not-exist.json"
+        index_path.write_text(json.dumps(raw), encoding="utf-8")
+
+        reopened = KnowledgeStore(store_dir=tmp_path)
+        assert reopened.get_stats().get("unresolved_files") == 1, (
+            "an unresolvable row is skipped by every reader; it must be visible in stats"
+        )
