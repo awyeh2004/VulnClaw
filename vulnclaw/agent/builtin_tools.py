@@ -1941,6 +1941,7 @@ def build_openai_tools(
     active_role: str | None = None,
     allowed_tools: set[str] | None = None,
     include_subagent_tool: bool = True,
+    config: Any = None,
 ) -> list[dict[str, Any]]:
     """Build OpenAI function calling schema from MCP tools + built-in tools.
 
@@ -1949,6 +1950,10 @@ def build_openai_tools(
     tokens per call and reduces the chance the model reaches for irrelevant
     heavy tools; it does not change runtime dispatch, so a pruned name can still
     be executed if the model somehow calls it.
+
+    ``config`` is the runtime config the agent was built with, forwarded to the ablation
+    switches (round8 L4): this function runs every turn, and the switches used to re-read
+    the config file here. Optional so the tool-face tests can keep calling it bare.
     """
     tools: list[dict[str, Any]] = []
 
@@ -2533,7 +2538,7 @@ def build_openai_tools(
     # hand-crafted call arrives, which mirrors how allowed_tools pruning behaves.
     from vulnclaw.agent.blackboard import reasoning_graph_enabled
 
-    if not reasoning_graph_enabled():
+    if not reasoning_graph_enabled(config):
         tools = [t for t in tools if not str(t.get("function", {}).get("name", "")).startswith("blackboard_")]
 
     return tools

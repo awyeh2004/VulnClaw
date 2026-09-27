@@ -81,6 +81,92 @@ def test_runtime_blackboard_still_exists_when_the_model_face_is_off(config_switc
     assert board.confirmed_facts() == []
 
 
+class TestTheSwitchesPreferTheRuntimeConfig:
+    """Round8 L4: the file was re-read per call while its sibling switch read the object.
+
+    `builtin_tools._scratch_dir_if_configured` (same commit, `session.solve_work_root`) reads
+    `agent.config`; these two switches called `load_config()` instead, and they sit on the
+    per-turn path (`build_openai_tools` every turn, `_system_prompt` every round). So the
+    file was parsed repeatedly, and an edit made mid-run changed a setting the run had
+    already acted on -- two switches of the same kind disagreeing about their source.
+    """
+
+    def _recording_load(self, monkeypatch, *, reasoning: bool, tool_card: bool):
+        """Count file reads (and who made them) while answering the OPPOSITE of the object."""
+        import inspect
+
+        calls: list[str] = []
+        file_cfg = _cfg(reasoning=not reasoning, tool_card=not tool_card)
+
+        def fake_load():
+            caller = "?"
+            for frame in inspect.stack()[1:]:
+                module = frame.frame.f_globals.get("__name__", "")
+                if module.startswith("vulnclaw") and "settings" not in module:
+                    caller = f"{module}.{frame.function}"
+                    break
+            calls.append(caller)
+            return file_cfg
+
+        monkeypatch.setattr(settings_module, "load_config", fake_load)
+        return calls
+
+    def test_the_reasoning_switch_reads_the_object_and_not_the_file(self, monkeypatch):
+        calls = self._recording_load(monkeypatch, reasoning=False, tool_card=True)
+        config = _cfg(reasoning=False, tool_card=True)
+
+        assert reasoning_graph_enabled(config) is False, (
+            "the runtime object must win -- the file says the opposite here"
+        )
+        assert calls == [], "the config file must not be re-read when the object answers"
+
+    def test_the_tool_card_switch_reads_the_object_and_not_the_file(self, monkeypatch):
+        calls = self._recording_load(monkeypatch, reasoning=True, tool_card=False)
+        agent = SimpleNamespace(config=_cfg(reasoning=True, tool_card=False))
+
+        assert solver._tool_card_enabled(agent) is False
+        assert calls == []
+
+    def test_the_solver_switch_forwards_the_agents_config(self, monkeypatch):
+        calls = self._recording_load(monkeypatch, reasoning=False, tool_card=True)
+        agent = SimpleNamespace(config=_cfg(reasoning=False, tool_card=True))
+
+        assert solver._reasoning_graph_enabled(agent) is False
+        assert calls == []
+
+    def test_a_runtime_config_that_cannot_answer_still_falls_back_to_the_file(
+        self, config_switch
+    ):
+        """A config object without `session` (many tests, and older callers) is unknowable."""
+        config_switch(reasoning=False, tool_card=False)
+        assert reasoning_graph_enabled(SimpleNamespace(safety=SimpleNamespace())) is False
+        assert solver._tool_card_enabled(SimpleNamespace(config=SimpleNamespace())) is False
+
+    def test_no_config_at_all_still_falls_back_to_the_file(self, config_switch):
+        config_switch(reasoning=False, tool_card=False)
+        assert reasoning_graph_enabled() is False
+        assert solver._tool_card_enabled() is False
+
+    def test_the_tool_schema_path_uses_the_runtime_object_too(self, monkeypatch):
+        """`build_openai_tools` runs every turn, so its switch must not touch the file.
+
+        NOTE what this asserts and what it does not. Measured at this commit, ONE
+        `build_openai_tools()` call makes FIVE config-file reads: the ablation switch (now
+        zero when a config is supplied) plus four from other gates on the same path --
+        `ctf_platform.tools.ctf2_tools_enabled`, `gcs_platform.tools.gcs_tools_enabled` and
+        `platforms.registry._config_enabled` (twice). Those four are a separate, now
+        MEASURED item; this test pins only that the ablation switch stopped contributing.
+        """
+        calls = self._recording_load(monkeypatch, reasoning=False, tool_card=True)
+        names = _names(build_openai_tools(None, config=_cfg(reasoning=False, tool_card=True)))
+        assert not [n for n in names if n.startswith("blackboard_")], names
+        offenders = [c for c in calls if "blackboard" in c]
+        assert offenders == [], (
+            "the ablation switch re-read the config file even though it was given one: "
+            f"{offenders}; all reads seen: {calls}"
+        )
+
+
 def test_prompt_block_is_omitted_when_disabled(config_switch, monkeypatch):
     agent = SimpleNamespace(
         context=SimpleNamespace(state=SimpleNamespace(target="http://example.com")),

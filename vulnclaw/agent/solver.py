@@ -1186,18 +1186,29 @@ def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     return ""
 
 
-def _reasoning_graph_enabled() -> bool:
-    """Model-facing reasoning-graph switch (see blackboard.reasoning_graph_enabled)."""
+def _reasoning_graph_enabled(agent: Any = None) -> bool:
+    """Model-facing reasoning-graph switch (see blackboard.reasoning_graph_enabled).
+
+    Takes the agent so the RUNTIME config answers instead of a per-turn re-read of the
+    config file (round8 L4).
+    """
     from vulnclaw.agent.blackboard import reasoning_graph_enabled
 
-    return reasoning_graph_enabled()
+    return reasoning_graph_enabled(getattr(agent, "config", None))
 
 
-def _tool_card_enabled() -> bool:
-    """Capability-card switch; fails open so a config error cannot hide real tools."""
+def _tool_card_enabled(agent: Any = None) -> bool:
+    """Capability-card switch; fails open so a config error cannot hide real tools.
+
+    Same source rule as `_reasoning_graph_enabled` (round8 L4): the runtime object first,
+    the file only when there is no runtime object to ask.
+    """
     try:
-        from vulnclaw.config.settings import load_config
+        from vulnclaw.config.settings import load_config, session_switch
 
+        runtime = session_switch(getattr(agent, "config", None), "tool_card_enabled")
+        if runtime is not None:
+            return runtime
         return bool(getattr(load_config().session, "tool_card_enabled", True))
     except Exception:  # noqa: BLE001
         return True
@@ -1210,7 +1221,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         rendered = task_constraints.to_prompt_block()
         if rendered:
             constraints = f"\n\n{rendered}"
-    bb_instruction = "" if not _reasoning_graph_enabled() else (
+    bb_instruction = "" if not _reasoning_graph_enabled(agent) else (
         "\n\n# Blackboard\n"
         "Track reasoning across turns: read `blackboard_summary` first each round. "
         "Record findings with `blackboard_add_fact` — always pass the `evidence_ref` "
@@ -1272,7 +1283,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
             runtime.task_mode_reason = mode_reason
         tool_card = (
             (build_tool_card(state.goal or "", mode=mode) or "")
-            if _tool_card_enabled()
+            if _tool_card_enabled(agent)
             else ""
         )
         mode_block = mode_instruction(mode)

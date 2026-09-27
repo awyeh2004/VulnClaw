@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import ValidationError
@@ -158,6 +158,30 @@ def apply_llm_route(config: Any, route: Any) -> None:
 
 
 # ── Load / Save ────────────────────────────────────────────────────
+
+
+def session_switch(config: Any, name: str) -> Optional[bool]:
+    """The value of ``session.<name>`` from a RUNTIME config object, or None if unknowable.
+
+    Round8 L4: two ablation switches of the same kind disagreed about their source. The
+    scratch-path setting reads the runtime object the agent was built with
+    (``builtin_tools._scratch_dir_if_configured``), while ``reasoning_graph_enabled`` and
+    ``_tool_card_enabled`` re-read and re-parse the config FILE on every call -- and they
+    sit on the per-turn prompt/tool-schema path. Two real consequences: the parse happens
+    per turn, and a file edited mid-run changes a setting the run has already made
+    decisions from. Preferring the runtime object fixes both and makes the two switches
+    consistent with the one beside them.
+
+    Returns None -- rather than a default -- when the object cannot answer, so a caller
+    falls back to the file exactly once instead of silently inventing a value.
+    """
+    session = getattr(config, "session", None) if config is not None else None
+    if session is None:
+        return None
+    value = getattr(session, name, None)
+    if value is None:
+        return None
+    return bool(value)
 
 
 def load_config() -> VulnClawConfig:

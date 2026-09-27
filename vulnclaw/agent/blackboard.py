@@ -667,7 +667,7 @@ def _clause_witnessed(
     return hit / len(tokens) >= _OVERLAP_THRESHOLD
 
 
-def reasoning_graph_enabled() -> bool:
+def reasoning_graph_enabled(config: Any = None) -> bool:
     """Whether the model is shown the blackboard tools and prompt block.
 
     Config-only switch (``session.reasoning_graph_enabled``, default True) used to
@@ -676,11 +676,20 @@ def reasoning_graph_enabled() -> bool:
     auto-captured run notes and the stall guard behave exactly as before; only
     the model-facing surface (13 tool schemas + the prompt block) disappears.
 
+    ``config`` is the RUNTIME config object when the caller has one (round8 L4): this runs
+    on the per-turn path, and re-reading the config file there was both a repeated parse
+    and a way for a mid-run edit to change a setting the run already acted on. Without a
+    config object the file is still consulted, so callers that genuinely have none keep
+    working.
+
     Fails open: a config problem must not silently strip tools from a real run.
     """
     try:
-        from vulnclaw.config.settings import load_config
+        from vulnclaw.config.settings import load_config, session_switch
 
+        runtime = session_switch(config, "reasoning_graph_enabled")
+        if runtime is not None:
+            return runtime
         return bool(getattr(load_config().session, "reasoning_graph_enabled", True))
     except Exception:  # noqa: BLE001 - never break the tool face on a config error
         return True

@@ -817,6 +817,9 @@ class AgentCore:
             active_role=self.active_role,
             allowed_tools=allowed,
             include_subagent_tool=include_subagent_tool,
+            # The runtime config, so the ablation switches answer from the object this run
+            # was built with instead of re-reading the file every turn (round8 L4).
+            config=getattr(self, "config", None),
         )
 
     # ── Python code executor ─────────────────────────────────────────
