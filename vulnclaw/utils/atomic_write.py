@@ -28,17 +28,88 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 __all__ = [
     "atomic_write_text",
     "append_line_durable",
+    "file_lock",
     "replace_with_retry",
     "mkdtemp_sibling",
     "RETRY_ATTEMPTS",
 ]
+
+#: Process-wide re-entrant lock shared by EVERY caller of :func:`file_lock`.
+#:
+#: One lock rather than one per lock file, for two reasons: it is the only way a single
+#: implementation can promise "writers in this process cannot interleave", and a store may
+#: nest two of these (see the ordering invariant in the docstring) -- with one lock per file,
+#: a thread taking the second could deadlock against another thread taking them in the other
+#: order, which nothing in the call sites guards against.
+_PROCESS_LOCK = threading.RLock()
+
+
+@contextmanager
+def file_lock(path: str | Path) -> Iterator[None]:
+    """Serialize a read-modify-write across THREADS and PROCESSES, on Windows and POSIX.
+
+    Round5 residual item: this existed as three near-identical copies
+    (``agent/memory.py``, ``kb/experience.py``, ``kb/store.py``) and they had already
+    drifted -- ``kb/store.py`` chmod'd the lock file to 0600 while the other two left it at
+    the process umask, so on POSIX two of the three stores kept a world-readable lock file.
+    Same reasoning as :func:`append_line_durable`: one implementation removes the class of
+    drift rather than the single instance.
+
+    Mechanics that are not obvious:
+
+    * the lock file is created with one byte if empty, and byte 0 is what gets locked. On
+      POSIX ``flock`` takes the whole file and would be fine with a zero-length one, but
+      ``msvcrt.locking`` locks a byte RANGE from the current position -- locking a
+      zero-length file on Windows is not the same thing at all;
+    * the handle is opened ``a+b`` and never truncated, so the byte it locks always exists.
+
+    ORDERING INVARIANT: a caller may hold two of these at once (``ExperienceStore`` takes its
+    own lock and then the shared KB index lock, via ``_write_lesson`` ->
+    ``upsert_index_entry``). Always acquire in that order -- experience before index -- since
+    these are real cross-process locks.
+
+    KNOWN PLATFORM DIFFERENCE, kept because there is no portable alternative: on Windows
+    ``LK_LOCK`` retries for about ten seconds and then raises ``OSError``, while ``flock`` on
+    POSIX blocks indefinitely. Callers must not hold this across a long operation.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _PROCESS_LOCK, open(target, "a+b") as handle:
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 #: How many times to retry a sharing violation before giving up. Measured
 #: behaviour: a scanner's handle lives for milliseconds, so a handful of short

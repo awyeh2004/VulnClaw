@@ -4,49 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from vulnclaw.config.settings import KB_DIR
-from vulnclaw.utils.atomic_write import atomic_write_text, replace_with_retry
+from vulnclaw.utils.atomic_write import atomic_write_text, file_lock, replace_with_retry
 
 _TITLE_MAX = 80
-_INDEX_PROCESS_LOCK = threading.RLock()
-
-
-@contextmanager
-def _index_file_lock(path: Path) -> Iterator[None]:
-    """Serialize index read-modify-write transactions across processes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _INDEX_PROCESS_LOCK, open(path, "a+b") as handle:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+# One lock implementation for the whole repo (round5 residual item): see
+# `vulnclaw.utils.atomic_write.file_lock`. `_index_file_lock` is kept as the local name so
+# the five call sites below are unchanged.
+_index_file_lock = file_lock
 
 
 def _portable_entry_path(path: Path, store_dir: Optional[Path]) -> str:

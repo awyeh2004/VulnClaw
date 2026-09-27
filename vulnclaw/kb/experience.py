@@ -23,18 +23,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import threading
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from vulnclaw.config.settings import KB_DIR
 from vulnclaw.kb.store import KnowledgeStore
+# One lock implementation for the whole repo (round5 residual item): see
+# `vulnclaw.utils.atomic_write.file_lock` for the ordering invariant this store relies on
+# (its own lock first, then the KB index lock inside `_write_lesson`).
+from vulnclaw.utils.atomic_write import file_lock as _file_lock
 from vulnclaw.utils.atomic_write import replace_with_retry
 
 
@@ -115,7 +117,6 @@ class Lesson(BaseModel):
 
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-_PROCESS_LOCK = threading.RLock()
 
 DEFAULT_CONFIDENCE_HALF_LIFE_DAYS = 90.0
 CONFIDENCE_HALF_LIFE_ENV = "VULNCLAW_EXPERIENCE_HALF_LIFE_DAYS"
@@ -138,32 +139,9 @@ def default_confidence_half_life_days() -> float:
     return value if value > 0 else DEFAULT_CONFIDENCE_HALF_LIFE_DAYS
 
 
-@contextmanager
-def _file_lock(path: Path) -> Iterator[None]:
-    """Serialize writers across threads and processes on Windows and POSIX."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _PROCESS_LOCK, open(path, "a+b") as handle:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+# One lock implementation for the whole repo (round5 residual item): this module used to
+# carry its own copy of `_file_lock`, which had drifted from `kb/store.py`'s on the lock
+# file's permissions. The import above aliases the shared one, so call sites are unchanged.
 
 
 class ExperienceStore:

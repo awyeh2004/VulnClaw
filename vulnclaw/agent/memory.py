@@ -4,46 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from collections import deque
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from vulnclaw.config.settings import KB_DIR
+# One lock implementation for the whole repo (round5 residual item): this module used to
+# carry its own copy, which had drifted from `kb/store.py`'s on the lock file's permissions.
+from vulnclaw.utils.atomic_write import file_lock as _file_lock
 from vulnclaw.utils.atomic_write import replace_with_retry
-
-_PROCESS_LOCK = threading.RLock()
-
-
-@contextmanager
-def _file_lock(path: Path) -> Iterator[None]:
-    """Serialize writers across threads and processes on Windows and POSIX."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _PROCESS_LOCK, open(path, "a+b") as handle:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class MemoryStore:
@@ -87,26 +58,53 @@ class MemoryStore:
                 self._cache = {}
 
     def _save(self) -> None:
-        """Atomically persist key/value memory without exposing partial JSON."""
-        lock_path = self.store_dir / ".long_term.lock"
-        with _file_lock(lock_path):
-            temporary = self.store_dir / f".long_term.{os.getpid()}.{uuid4().hex}.tmp"
+        """Persist the in-memory key/value map atomically, under the store lock.
+
+        Kept for callers that have already merged their change (see :meth:`_mutate`, which
+        is what the mutating methods use). Writing ``self._cache`` wholesale is only safe
+        when the cache is known to be the freshest state -- which the lock alone does not
+        establish.
+        """
+        with _file_lock(self.store_dir / ".long_term.lock"):
+            self._write_locked()
+
+    def _write_locked(self) -> None:
+        """Write ``self._cache`` atomically. Caller must hold the store lock."""
+        temporary = self.store_dir / f".long_term.{os.getpid()}.{uuid4().hex}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(self._cache, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            replace_with_retry(temporary, self._memory_file)
             try:
-                with open(temporary, "w", encoding="utf-8") as handle:
-                    json.dump(self._cache, handle, ensure_ascii=False, indent=2)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                replace_with_retry(temporary, self._memory_file)
-                try:
-                    os.chmod(self._memory_file, 0o600)
-                except OSError:
-                    pass
-            finally:
-                temporary.unlink(missing_ok=True)
+                os.chmod(self._memory_file, 0o600)
+            except OSError:
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _mutate(self, mutate: Callable[[dict[str, Any]], None]) -> None:
+        """Read-modify-write the durable map as ONE critical section.
+
+        Round5 residual item: `save`/`delete` mutated the in-memory cache OUTSIDE the lock
+        and `_save` then wrote that cache wholesale, so the lock only ever protected the FILE
+        write, not the read-modify-write around it. Two stores sharing a directory (another
+        process, or a second instance in this one) both loaded the same base state and the
+        later writer silently dropped the earlier writer's key -- a lost update with no error
+        anywhere. Re-reading inside the lock is what makes the merge correct, and it also
+        refreshes this instance's cache with whatever the other writer added.
+        """
+        with _file_lock(self.store_dir / ".long_term.lock"):
+            self._load()
+            mutate(self._cache)
+            self._write_locked()
 
     def save(self, key: str, value: Any) -> None:
-        self._cache[key] = {"value": value, "updated_at": datetime.now().isoformat()}
-        self._save()
+        def _set(cache: dict[str, Any]) -> None:
+            cache[key] = {"value": value, "updated_at": datetime.now().isoformat()}
+
+        self._mutate(_set)
 
     def retrieve(self, key: str) -> Optional[Any]:
         entry = self._cache.get(key)
@@ -116,8 +114,7 @@ class MemoryStore:
         return list(self._cache.keys())
 
     def delete(self, key: str) -> None:
-        self._cache.pop(key, None)
-        self._save()
+        self._mutate(lambda cache: cache.pop(key, None))
 
     def search(self, query: str) -> list[tuple[str, Any, float]]:
         results = []
