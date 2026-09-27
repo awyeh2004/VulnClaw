@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vulnclaw.platforms import base
+from vulnclaw.utils.atomic_write import replace_with_retry
 
 DEFAULT_TIMEOUT = 60.0
 CHUNK = 8192
@@ -200,7 +201,12 @@ def download_attachment(
         )
 
     try:
-        os.replace(partial, local)
+        # `replace_with_retry`, not a bare `os.replace` (round5 residual item): this is the
+        # commit point of an artifact that is then unpacked and executed, and the shared
+        # helper is what carries the Windows sharing-violation retry AND the directory fsync
+        # that makes the rename survive a crash. PermissionError is an OSError, so the
+        # existing handler below still reports a failure the same way.
+        replace_with_retry(partial, local)
     except OSError as exc:  # pragma: no cover - same-dir rename, but never fatal
         _discard_partial(partial)
         return AttachmentDownload(

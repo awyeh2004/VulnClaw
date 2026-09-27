@@ -122,16 +122,24 @@ _RETRY_BASE_DELAY = 0.05
 
 
 def replace_with_retry(src: str | Path, dst: str | Path) -> None:
-    """``os.replace`` that tolerates a briefly-busy destination on Windows.
+    """``os.replace`` that tolerates a briefly-busy destination on Windows -- and is DURABLE.
 
     Only ``PermissionError`` is retried: it is the documented sharing-violation
     signal. Anything else (missing directory, permission denied outright) is a
     real error and propagates immediately rather than being masked by retries.
+
+    The destination DIRECTORY is fsync'd after a successful rename (round5 residual item).
+    That step used to exist only inside :func:`atomic_write_text`, while the other call sites
+    of this helper did not have it -- so "the rename survives a crash" held or not depending
+    on which helper happened to write the file, for no reason the callers could see. The
+    rename IS the commit point; on POSIX the directory ENTRY it creates can still be in
+    cache, so the fsync belongs with the rename rather than with one of its callers.
     """
     last: PermissionError | None = None
     for attempt in range(RETRY_ATTEMPTS):
         try:
             os.replace(src, dst)
+            _fsync_directory(Path(dst).parent)
             return
         except PermissionError as exc:  # Windows sharing violation
             last = exc
@@ -199,8 +207,9 @@ def atomic_write_text(path: str | Path, text: str, *, encoding: str = "utf-8") -
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        # The directory fsync now lives inside `replace_with_retry`, so every caller of the
+        # commit step gets it rather than only this one (round5 residual item).
         replace_with_retry(tmp, target)
-        _fsync_directory(target.parent)
     except BaseException:
         # The rename is the commit point: before it, the target is untouched and
         # the temp file is pure litter.

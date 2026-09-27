@@ -23,6 +23,47 @@ from vulnclaw.utils.atomic_write import file_lock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+class TestEveryCommitPointFsyncsItsDirectory:
+    """Round5 residual item: the directory fsync existed in ONE of the rename call sites.
+
+    `atomic_write_text` fsync'd the destination directory; the other seven callers of
+    `replace_with_retry` (index save, lesson write, long-term memory, archive rotation,
+    remote file write, solve lock, attachment commit) did not, and `attachments.py` did not
+    even use the helper -- a bare `os.replace`. So "the rename survives a crash" depended on
+    which code path happened to write the file.
+    """
+
+    def test_the_helper_fsyncs_the_destination_directory(self, tmp_path, monkeypatch):
+        from vulnclaw.utils import atomic_write
+
+        seen: list[Path] = []
+        monkeypatch.setattr(atomic_write, "_fsync_directory", seen.append)
+        src = tmp_path / "a.tmp"
+        src.write_text("x", encoding="utf-8")
+
+        atomic_write.replace_with_retry(src, tmp_path / "a.txt")
+
+        assert seen == [tmp_path], [str(p) for p in seen]
+
+    def test_no_module_renames_behind_the_helpers_back(self):
+        """A bare `os.replace` anywhere else silently skips both the retry and the fsync."""
+        offenders = []
+        for path in sorted((REPO_ROOT / "vulnclaw").rglob("*.py")):
+            if path.name == "atomic_write.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            if "os.replace(" in source:
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+        assert offenders == [], (
+            "use replace_with_retry (Windows sharing-violation retry + directory fsync): "
+            f"{offenders}"
+        )
+
+    def test_the_attachment_commit_uses_the_helper(self):
+        source = (REPO_ROOT / "vulnclaw/platforms/attachments.py").read_text(encoding="utf-8")
+        assert "replace_with_retry(partial, local)" in source
+
+
 class TestThereIsOnlyOneImplementation:
     def test_every_module_uses_the_same_function_object(self):
         """Identity, not equivalence: three copies that behave alike are still three copies."""
