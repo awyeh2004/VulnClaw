@@ -771,3 +771,121 @@ class TestFetchProxyBypassWiring:
         result = await manager.call_tool("fetch", {"url": "http://127.0.0.1:59876/x"})
         assert result["ok"] is True, result
         assert seen == ["http://127.0.0.1:59876/x"]
+
+
+class TestTheFireAndForgetPreinitIsKeptAlive:
+    """Round5 residual item: `loop.create_task(...)` with no reference to the task.
+
+    The event loop keeps only a WEAK reference, so a fire-and-forget task can be
+    garbage-collected mid-flight -- surfacing as "Task was destroyed but it is pending!" and
+    a chrome-devtools session that was supposed to be warm simply is not.
+    """
+
+    async def test_the_task_is_referenced_then_released(self, monkeypatch):
+        import asyncio
+
+        from vulnclaw.config.schema import BUILTIN_MCP_SERVERS, MCPServerConfig, VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        config = VulnClawConfig()
+        # Built through the shipped dict, like the fetch test above: `transport` is a
+        # nested model, not a string.
+        config.mcp.servers["chrome-devtools"] = MCPServerConfig(
+            **{**BUILTIN_MCP_SERVERS["chrome-devtools"], "enabled": True}
+        )
+        manager = MCPLifecycleManager(config)
+
+        started = asyncio.Event()
+
+        async def fake_preinit():
+            started.set()
+            await asyncio.sleep(0.05)
+
+        monkeypatch.setattr(manager, "_preinit_chrome_devtools", fake_preinit, raising=False)
+        monkeypatch.setattr(manager, "config", config)
+        manager.start_enabled_servers()
+
+        held = manager._background_tasks
+        assert held, "the pre-init task must be held by a strong reference"
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # …and the reference is released once it finishes, so the set cannot grow forever.
+        for _ in range(50):
+            if not held:
+                break
+            await asyncio.sleep(0.02)
+        assert not held, "a finished task must be discarded from the strong-reference set"
+
+
+class TestTheKillIsWaitedFor:
+    """Round5 residual item: the async teardown killed and returned immediately.
+
+    Its synchronous sibling (`_graceful_terminate`) waits after killing, so the two paths
+    disagreed about what "stopped" means: the async one returned while the process was still
+    dying, and the caller then closed pipes / reused the server slot.
+    """
+
+    class _Proc:
+        def __init__(self, dies_on_kill=True):
+            self.dies_on_kill = dies_on_kill
+            self.returncode = None
+            self.signals: list[str] = []
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.signals.append("terminate")
+
+        def kill(self):
+            self.signals.append("kill")
+            if self.dies_on_kill:
+                self.returncode = -9
+
+        @property
+        def pid(self):
+            return 4242
+
+    async def test_a_killed_process_is_observed_dead(self, monkeypatch):
+        from vulnclaw.config.schema import VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        monkeypatch.setattr(manager, "TERMINATE_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(manager, "KILL_GRACE_SECONDS", 0.5)
+        proc = self._Proc(dies_on_kill=True)
+
+        await manager._terminate_process(proc)
+
+        assert proc.signals == ["terminate", "kill"], proc.signals
+        assert proc.poll() is not None, "the kill must be WAITED for, not just issued"
+
+    async def test_a_process_that_survives_the_kill_is_reported(self, monkeypatch, caplog):
+        """Silence here is what makes "the port is still taken" unexplainable later."""
+        import logging
+
+        from vulnclaw.config.schema import VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        monkeypatch.setattr(manager, "TERMINATE_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(manager, "KILL_GRACE_SECONDS", 0.05)
+        proc = self._Proc(dies_on_kill=False)
+
+        with caplog.at_level(logging.WARNING):
+            await manager._terminate_process(proc)
+
+        assert proc.signals == ["terminate", "kill"], proc.signals
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("survived terminate+kill" in message for message in messages), messages
+
+    async def test_an_already_dead_process_is_untouched(self):
+        from vulnclaw.config.schema import VulnClawConfig
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        proc = self._Proc()
+        proc.returncode = 0
+
+        await manager._terminate_process(proc)
+
+        assert proc.signals == [], "a dead process must not be signalled at all"

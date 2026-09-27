@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import time
@@ -23,6 +24,8 @@ from vulnclaw.config.source_render import render_highlighted_source_block
 from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url
 from vulnclaw.mcp._probe_mixin import ProbeMixin
 from vulnclaw.mcp.registry import HealthStatus, MCPRegistry
+
+logger = logging.getLogger(__name__)
 
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -106,6 +109,10 @@ class MCPLifecycleManager(ProbeMixin):
 
     # Graceful stop policy.
     TERMINATE_GRACE_SECONDS = 5.0
+    #: How long to wait for a KILL to be observed (round5 residual item). Kept separate
+    #: from the terminate grace: the process already had that one, and a hard kill either
+    #: lands quickly or the process is unkillable.
+    KILL_GRACE_SECONDS = 2.0
 
     # Health-score thresholds on the recent success-rate window.
     HEALTHY_RATE = 0.9
@@ -118,6 +125,9 @@ class MCPLifecycleManager(ProbeMixin):
         self._mcp_clients: dict[str, Any] = {}  # Server attach capability cache
         self._runtime_tool_aliases: dict[tuple[str, str], str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Strong references to fire-and-forget tasks (round5 residual item): the loop only
+        # keeps a weak one, so an unreferenced task can be collected mid-flight.
+        self._background_tasks: set[asyncio.Task] = set()
         self._loop_exception_handler_loop: asyncio.AbstractEventLoop | None = None
         self._task_constraints: Any = None
         self._fetch_body_cache: dict[str, str] = {}
@@ -313,7 +323,14 @@ class MCPLifecycleManager(ProbeMixin):
         try:
             loop = asyncio.get_running_loop()
             if "chrome-devtools" in self.config.mcp.servers and self.config.mcp.servers["chrome-devtools"].enabled:
-                loop.create_task(self._preinit_chrome_devtools())
+                # Keep a STRONG reference (round5 residual item). `loop.create_task` returns a
+                # task the loop only holds WEAKLY: with no other reference the pre-init can be
+                # garbage-collected mid-flight, which surfaces as the confusing
+                # "Task was destroyed but it is pending!" and a browser session that was
+                # supposed to be warm simply is not. Discarded from the set when it finishes.
+                task = loop.create_task(self._preinit_chrome_devtools())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             pass
         return started
@@ -1170,7 +1187,15 @@ class MCPLifecycleManager(ProbeMixin):
             pass
 
     async def _terminate_process(self, proc: subprocess.Popen) -> None:
-        """Async wrapper: terminate, wait up to grace, then kill — without blocking the loop."""
+        """Async wrapper: terminate, wait up to grace, then kill — without blocking the loop.
+
+        Round5 residual item: the `kill()` used to be the LAST statement, so this returned
+        while the process was still dying. The synchronous sibling above waits after killing
+        (`_graceful_terminate`), and the asymmetry matters at teardown: the caller proceeds
+        to close pipes / reuse the server slot while the old process may still hold them.
+        Now the kill is waited for on the same bounded poll, and a process that survives it
+        is reported instead of silently assumed dead.
+        """
         if proc.poll() is not None:
             return
         try:
@@ -1186,6 +1211,18 @@ class MCPLifecycleManager(ProbeMixin):
 
         with suppress(Exception):
             proc.kill()
+
+        # Wait for the kill to be OBSERVED, with the same bounded poll rather than a second
+        # full grace period (SIGTERM/the Windows TerminateProcess already had one).
+        kill_deadline = time.monotonic() + self.KILL_GRACE_SECONDS
+        while time.monotonic() < kill_deadline:
+            if proc.poll() is not None:
+                return
+            await asyncio.sleep(0.05)
+        logger.warning(
+            "MCP process %s survived terminate+kill; it may still hold ports or pipes",
+            getattr(proc, "pid", "?"),
+        )
 
     def stop_server(self, name: str) -> None:
         """Stop a single MCP server (synchronous; safe to call without a running loop)."""
