@@ -27,6 +27,24 @@
   不再往仓库外写；
 - 于是三个 runner 都能**独立跑**，不依赖任何仓库外目录。
 
+## 凭据不入库（2026-09-25 起）
+
+⚠️ **`d72ca20` 把"逐字节拷贝"做过了头**：它在 `seeds/config*.yaml` 里连**真实凭据**一起提交了
+——操作者当时的 `llm.api_key`（每份文件三处：`api_key`、`api_keys` 列表项、`provider_keys.ds`）、
+一个 `ak_live_…` 的 GCS `access_key`，以及一个不在本机配置里的 `provider_keys.zhipu`。
+两个值经摘要比对与 `~/.vulnclaw/config.yaml` **完全一致**，即**活凭据**，而且已经进了 git 历史。
+
+现在：
+
+- 种子配置里所有凭据字段一律为空（`api_key: ''`、`api_keys: []`、`provider_keys` 各键为空）；
+- 运行时的 key 由 `scripts/ab/_drill_env.py` **从操作者自己的环境或本机配置读取**，
+  再以 `VULNCLAW_LLM_API_KEY` 传给子进程（`settings` 允许它覆盖 `llm.api_key`）；
+  三个 runner 共用这一个实现，避免再各写一份而漂移；
+- 守卫测试 `tests/security/test_no_committed_secrets.py` 会拒绝任何入库的凭据形状
+  （按**键名**扫，因为按值扫描漏掉了 `ak_live_…` 与 `<hex>.<secret>` 两种形态）。
+
+**已经泄漏进历史的那两个 key 应当轮换**：从工作区删除只是止血，`git log -S` 仍可取出旧值。
+
 ## 用法
 
 这些是**实验工装**，不是产品代码，因此默认没有单测覆盖。开跑前按需修改文件顶部的常量：

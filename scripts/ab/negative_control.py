@@ -19,7 +19,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, ".")
-from vulnclaw.ctf_platform import client as c
+# The sibling helper lives next to this file, so make the import independent of the cwd the
+# script is launched from.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _drill_env import with_runtime_credentials  # noqa: E402
+from vulnclaw.ctf_platform import client as c  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 LOGS = Path(".test-tmp/neg-logs")
@@ -85,7 +89,9 @@ def env_for(cfg: Path) -> dict:
         "VULNCLAW_WORK_DIR": str(cfg / "work"),
         "VULNCLAW_LANG": "zh",
     })
-    return env
+    # Credentials come from HERE, not from the seeded config: see `_drill_env` (the seeds used
+    # to carry the operator's live LLM/GCS keys).
+    return with_runtime_credentials(env)
 
 
 async def start_env(cid: str) -> str:
