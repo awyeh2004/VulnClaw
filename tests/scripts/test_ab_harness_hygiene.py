@@ -54,10 +54,16 @@ def _module_assignment(tree: ast.Module, name: str) -> ast.expr | None:
 def _prologue_only(tree: ast.Module) -> list[ast.stmt]:
     """The module statements that RUN at import time, with the dangerous parts removed.
 
-    Function and class BODIES become `pass` (they only run when called), and a trailing
-    module-level `asyncio.run(main())` is dropped -- in these scripts main() is what starts
-    the drill against the live platform. Everything else is kept, so the constant prologue is
-    executed for real: that is what resolves names and catches F1.
+    Function and class BODIES become `pass` (they only run when called), and the drill's
+    entry point -- a module-level `asyncio.run(main())` -- is dropped, because main() is what
+    starts the drill against the live platform. Everything else is kept, so the constant
+    prologue is executed for real: that is what resolves names and catches F1.
+
+    The entry point is matched by NAME (`asyncio.run`), not by "any module-level call". The
+    first version dropped every module-level call, which was fine only while `asyncio.run`
+    happened to be the only one -- adding a `sys.path.insert(...)` for a sibling helper then
+    broke the prologue here while the script itself still ran correctly, i.e. the guard
+    reported a failure that did not exist.
     """
     body: list[ast.stmt] = []
     for node in tree.body:
@@ -65,8 +71,12 @@ def _prologue_only(tree: ast.Module) -> list[ast.stmt]:
             node.body = [ast.Pass()]
             body.append(node)
             continue
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            continue  # the module-level `asyncio.run(main())`
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and ast.unparse(node.value.func) == "asyncio.run"
+        ):
+            continue
         body.append(node)
     return body
 
