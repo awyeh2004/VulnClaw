@@ -57,6 +57,15 @@ class TestModeInstruction:
         assert "TEXT" in text and "5-minute" in text
         assert "flag{" in text  # explicitly tells the model NOT to hunt flags
 
+    def test_ir_discipline_demands_finding_per_question(self):
+        """Mock-exam 1 (2026-09-27): agent scored 9/10 on facts but recorded no
+        per-question answers and dropped the composite cleanup question - the
+        discipline must say the answer sheet IS the findings list."""
+        text = mode_instruction("ir")
+        assert "findings list" in text
+        assert "Q<n>" in text
+        assert "Composite questions" in text and "own finding" in text
+
     def test_ctf_discipline_mentions_flag_and_fail_fast(self):
         text = mode_instruction("ctf")
         assert "flag" in text and "fail-fast" in text

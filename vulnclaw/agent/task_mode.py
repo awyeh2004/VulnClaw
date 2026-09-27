@@ -98,6 +98,13 @@ _MODE_DISCIPLINE: dict[str, str] = {
         "**5-minute budget per surface**; no finding → next surface.\n"
         "- Answer each question as soon as you have one line of evidence, then "
         "keep digging — do not batch answers to the end.\n"
+        "- **The answer sheet IS the findings list**: record every answer as a "
+        "finding titled `Q<n>: <question>` carrying the one-line answer and its "
+        "evidence. A blackboard fact is NOT an answer until it is recorded as a "
+        "finding — the graders only see findings.\n"
+        "- Composite questions (cleanup plan / hardening) are separate answers: "
+        "write the step list (kill process → delete files → remove persistence → "
+        "patch → harden) explicitly as its own finding, never folded into the LOCK.\n"
         "- Paths must be copied verbatim from command output, never reconstructed.\n"
         "Load skill reference `ir-competition-strategy` before sweeping.\n"
     ),
