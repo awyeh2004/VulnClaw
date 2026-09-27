@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, ".")
 from vulnclaw.ctf_platform import client as c
 
-ROOT = Path(r"D:\GitClone\VulnClaw")
+ROOT = REPO.parent  # was a hard-coded `Path(r"D:\GitClone\VulnClaw")` (round8 L9)
 REPO = Path(__file__).resolve().parents[2]
 LOGS = Path(".test-tmp/neg-logs")
 PRACTICE = "2de971ac-26fe-448a-8719-01829e52c1d5"
@@ -110,15 +110,46 @@ async def start_env(cid: str) -> str:
     return ""
 
 
-async def release(cid: str) -> None:
+async def release(cid: str) -> bool:
+    """Release the target env: True when the platform confirms (or reports none).
+
+    Round8 L9 (this file was the worst case of the three -- the drill's whole point is the
+    NEGATIVE arm, so a silently un-released container is exactly the state it must not
+    leave behind): the old version gave up silently after three attempts.
+    """
+    last = ""
     for _ in range(3):
         try:
             await c.stop_target(PRACTICE, cid)
-            return
+            return True
         except Exception as exc:  # noqa: BLE001
-            if "NOT_FOUND" in str(exc):
-                return
+            last = str(exc)[:120]
+            if "NOT_FOUND" in last:
+                return True
             await asyncio.sleep(3)
+    log(f"    release 失败（3 次后放弃）: {last}")
+    return False
+
+
+async def target_state(cid: str) -> str:
+    """What the platform reports for this env, as a short word (round8 L9: the other two
+    scripts already recorded this after release; without it a leaked container is
+    invisible in the results)."""
+    try:
+        payload = await c.get_target(PRACTICE, cid)
+    except Exception as exc:  # noqa: BLE001
+        return f"error:{str(exc)[:40]}"
+    node = payload.get("data") if isinstance(payload, dict) else payload
+    if node is None:
+        return "null"
+    if isinstance(node, dict):
+        return str(node.get("status") or "present")
+    return str(node)[:40]
+
+
+def save(results: list[dict]) -> None:
+    Path(".test-tmp/neg-results.json").write_text(
+        json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def run_once(tag: str, cfg: Path, url: str, name: str) -> dict:
@@ -164,14 +195,22 @@ async def main() -> None:
             await release(cid)
             url = await start_env(cid)
             if not url:
-                log("    开靶机失败，跳过"); continue
+                # Round8 L9: used to `continue` without releasing (or recording) -- see the
+                # note in release(): this drill must not leave a container behind.
+                released = await release(cid)
+                log(f"    开靶机失败，跳过（release={released}）")
+                results.append({"challenge": name, "phase": phase, "error": "start_failed",
+                                "released": released})
+                save(results)
+                continue
             row = run_once(phase, COLD if phase == "cold" else WARM, url, name)
             row["phase"] = phase
             results.append(row)
             await asyncio.sleep(2)
-            await release(cid)
-            Path(".test-tmp/neg-results.json").write_text(
-                json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+            row["released"] = await release(cid)
+            row["target_after_release"] = await target_state(cid)
+            log(f"    {phase}: 释放后 get_target -> {row['target_after_release']}")
+            save(results)
     log("=== 结束 ===")
     for r in results:
         log(f"  {r['challenge'][:28]:30s} {r['phase']:5s} {r['seconds']}s")

@@ -133,15 +133,26 @@ async def start_env(cid: str) -> str:
     return ""
 
 
-async def release(cid: str) -> None:
+async def release(cid: str) -> bool:
+    """Release the target env: True when the platform confirms (or reports none).
+
+    Round8 L9: the old version gave up SILENTLY after three attempts -- no log, no return
+    value, no record. A container the platform still holds was therefore indistinguishable
+    from a released one in the results file, and the next arm (`await release(cid)` at the
+    top of the loop) is the only thing that would ever have noticed.
+    """
+    last = ""
     for _ in range(3):
         try:
             await c.stop_target(PRACTICE, cid)
-            return
+            return True
         except Exception as exc:  # noqa: BLE001
-            if "NOT_FOUND" in str(exc):
-                return
+            last = str(exc)[:120]
+            if "NOT_FOUND" in last:
+                return True
             await asyncio.sleep(3)
+    log(f"    release 失败（3 次后放弃）: {last}")
+    return False
 
 
 async def target_state(cid: str) -> str:
@@ -213,14 +224,26 @@ async def main() -> None:
             await release(cid)
             url = await start_env(cid)
             if not url:
-                log("    开靶机失败，跳过")
-                results.append({"challenge": name, "phase": phase, "error": "start_failed"})
+                # Round8 L9: this used to `continue` WITHOUT releasing. A container that
+                # provisioned but never reported running/ready (the 180s poll above) was
+                # left allocated -- and on the final arm nothing released it afterwards,
+                # so the drill silently left a target running on the platform.
+                released = await release(cid)
+                log(f"    开靶机失败，跳过（release={released}）")
+                results.append(
+                    {
+                        "challenge": name,
+                        "phase": phase,
+                        "error": "start_failed",
+                        "released": released,
+                    }
+                )
                 save(results)
                 continue
             row = run_once(phase, COLD if phase == "cold" else WARM, url, name)
             row["phase"] = phase
             await asyncio.sleep(2)
-            await release(cid)
+            row["released"] = await release(cid)
             row["target_after_release"] = await target_state(cid)
             log(f"    {phase}: 释放后 get_target -> {row['target_after_release']}")
             results.append(row)
