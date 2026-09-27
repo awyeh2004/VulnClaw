@@ -9,7 +9,10 @@
 - **本文档对应的代码 HEAD：`a300d4f`**（文档本身随后作为 `d655e79` 提交；从 `a300d4f` 或更新的
   HEAD 起步都可以，用 `git log --oneline -8` 自己确认）
 - 全量测试基线：**3885 passed / 20 skipped**（`python -X utf8 -m pytest -q --ignore=tests/web`，约 6-8 分钟）
-- ⚠️ 仓库根目录的 `HANDOFF.md` 属于**另一个并发会话**（有未提交改动），**不要动它**
+- ~~⚠️ 仓库根目录的 `HANDOFF.md` 属于**另一个并发会话**（有未提交改动），**不要动它**~~
+  —— **已删除（2026-09-25，作者决定）**：那份交接文档的内容与数字已过期（审计 D2：称领先
+  `origin/main` 29 提交，实际 7；"工作区干净"与自身未提交矛盾），删除即 D2 的处理方式。
+  本文档自身的数字同样以"写于 2026-09-23 夜"为准，引用前先 `git log` 核对 HEAD。
 
 ---
 
@@ -283,9 +286,9 @@ Weblogic（`CVE-2017-10271` / `CVE-2018-2628` / `Weak Password` / `SSRF`）、st
 
 ### 5.5 这仓库的协作状态
 
-**有另一个会话在并发提交**（`HANDOFF.md` 有它的未提交改动）。所以：
+**有另一个会话在并发提交**。所以：
 
-- 不要动 `HANDOFF.md`；
+- ~~不要动 `HANDOFF.md`~~（该文件已于 2026-09-25 删除，见文首说明）；
 - 提交前先 `git status`，只 `git add` 你自己的文件；
 - 改动 `exec_gate.py` / 边界扫描器 allowlist / `command_classifier.py` 前，先看那是不是它的
   地盘（`scripts/verify_execution_boundary.py` 的 key 与调用点强耦合）。
