@@ -51,16 +51,79 @@ def _module_assignment(tree: ast.Module, name: str) -> ast.expr | None:
     return None
 
 
+def _prologue_only(tree: ast.Module) -> list[ast.stmt]:
+    """The module statements that RUN at import time, with the dangerous parts removed.
+
+    Function and class BODIES become `pass` (they only run when called), and a trailing
+    module-level `asyncio.run(main())` is dropped -- in these scripts main() is what starts
+    the drill against the live platform. Everything else is kept, so the constant prologue is
+    executed for real: that is what resolves names and catches F1.
+    """
+    body: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            node.body = [ast.Pass()]
+            body.append(node)
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            continue  # the module-level `asyncio.run(main())`
+        body.append(node)
+    return body
+
+
+def _looks_like_machine_path(text: str) -> bool:
+    """A drive-letter or home-absolute literal, i.e. a path that only exists somewhere."""
+    if len(text) > 2 and text[1] == ":" and text[0].isalpha() and text[2] in "\\/":
+        return True
+    return text.startswith(("/home/", "/Users/", "C:\\"))
+
+
 @pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
 class TestTheDrillCannotLeaveAContainerBehind:
+    def test_the_module_level_prologue_actually_executes(self, path):
+        """F1: `ROOT = REPO.parent` was placed ABOVE `REPO = ...` and nobody noticed.
+
+        Both earlier checks were blind to it by construction -- and they were the only two:
+
+        * `py_compile` (what the commit cited as "compiles") checks SYNTAX; a `NameError` is
+          name resolution, which happens at execution;
+        * the static checks in this file only inspect `ast.unparse`d text, and
+          `test_root_is_not_a_hard_coded_machine_path` accepted anything containing "REPO".
+
+        So this executes the module's constant prologue: imports, top-level assignments and
+        the Path arithmetic between them, with every function BODY replaced by `pass` and the
+        trailing `asyncio.run(main())` dropped. That resolves the real names (a genuine
+        `NameError`/`AttributeError` at module scope fails here) while never reaching the
+        drill -- main() is the only thing that talks to the platform, and it is not called.
+        """
+        tree = _tree(path)
+        stripped = ast.Module(body=_prologue_only(tree), type_ignores=[])
+        code = compile(ast.fix_missing_locations(stripped), str(path), "exec")
+        namespace = {"__file__": str(path), "__name__": "ab_module_prologue_probe"}
+        exec(code, namespace)  # noqa: S102 - executing THIS repo's own constants is the point
+        assert "REPO" in namespace
+        assert Path(namespace["REPO"]) == REPO_ROOT
+
     def test_root_is_not_a_hard_coded_machine_path(self, path):
         """`Path(r"D:\\GitClone\\VulnClaw")` only exists on the author's machine."""
-        value = _module_assignment(_tree(path), "ROOT")
-        assert value is not None, "ROOT must be assigned at module level"
-        rendered = ast.unparse(value)
-        assert "__file__" in rendered or rendered.startswith("REPO"), rendered
-        assert ":" not in rendered.replace("::", ""), (
-            f"a drive-letter path crept back into ROOT: {rendered}"
+        tree = _tree(path)
+        literals = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        offenders = [text for text in literals if _looks_like_machine_path(text)]
+        assert offenders == [], f"absolute machine path(s) in {path.name}: {offenders}"
+
+        repo = _module_assignment(tree, "REPO")
+        assert repo is not None, "REPO must be assigned at module level"
+        assert "__file__" in ast.unparse(repo), ast.unparse(repo)
+
+    def test_the_subprocess_working_directory_is_derived_not_guessed(self, path):
+        """`cwd=ROOT / "VulnClaw"` only worked because this checkout is named VulnClaw."""
+        source = path.read_text(encoding="utf-8")
+        assert '"VulnClaw"' not in source, (
+            "the repo directory must come from __file__, not from a literal name"
         )
 
     def test_a_failed_start_releases_before_it_skips(self, path):

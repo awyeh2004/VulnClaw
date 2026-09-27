@@ -21,7 +21,6 @@ from pathlib import Path
 sys.path.insert(0, ".")
 from vulnclaw.ctf_platform import client as c
 
-ROOT = REPO.parent  # was a hard-coded `Path(r"D:\GitClone\VulnClaw")` (round8 L9)
 REPO = Path(__file__).resolve().parents[2]
 LOGS = Path(".test-tmp/neg-logs")
 PRACTICE = "2de971ac-26fe-448a-8719-01829e52c1d5"
@@ -164,7 +163,7 @@ def run_once(tag: str, cfg: Path, url: str, name: str) -> dict:
     with open(logfile, "w", encoding="utf-8", errors="replace") as fh:
         fh.write(f"# {tag} cfg={cfg}\n")
         fh.flush()
-        proc = subprocess.Popen(cmd, cwd=str(ROOT / "VulnClaw"), env=env_for(cfg),
+        proc = subprocess.Popen(cmd, cwd=str(REPO), env=env_for(cfg),
                                 stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         timed_out = False
         try:
