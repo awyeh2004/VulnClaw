@@ -1204,9 +1204,9 @@ def _tool_card_enabled(agent: Any = None) -> bool:
     the file only when there is no runtime object to ask.
     """
     try:
-        from vulnclaw.config.settings import load_config, session_switch
+        from vulnclaw.config.settings import config_switch, load_config
 
-        runtime = session_switch(getattr(agent, "config", None), "tool_card_enabled")
+        runtime = config_switch(getattr(agent, "config", None), "session", "tool_card_enabled")
         if runtime is not None:
             return runtime
         return bool(getattr(load_config().session, "tool_card_enabled", True))

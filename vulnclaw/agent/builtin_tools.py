@@ -2303,13 +2303,13 @@ def build_openai_tools(
     for tool in traffic_tool_schemas():
         append_tool(tool)
 
-    for tool in ctf2_tool_schemas():
+    for tool in ctf2_tool_schemas(config):
         append_tool(tool)
 
-    for tool in platform_tool_schemas():
+    for tool in platform_tool_schemas(config):
         append_tool(tool)
 
-    for tool in gcs_tool_schemas():
+    for tool in gcs_tool_schemas(config):
         append_tool(tool)
 
     if mcp_manager:

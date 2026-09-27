@@ -685,9 +685,9 @@ def reasoning_graph_enabled(config: Any = None) -> bool:
     Fails open: a config problem must not silently strip tools from a real run.
     """
     try:
-        from vulnclaw.config.settings import load_config, session_switch
+        from vulnclaw.config.settings import config_switch, load_config
 
-        runtime = session_switch(config, "reasoning_graph_enabled")
+        runtime = config_switch(config, "session", "reasoning_graph_enabled")
         if runtime is not None:
             return runtime
         return bool(getattr(load_config().session, "reasoning_graph_enabled", True))

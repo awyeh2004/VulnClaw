@@ -67,16 +67,20 @@ def _ref_schema(description: str) -> dict:
     return {"type": "string", "description": f"{description} {_REF_HELP}"}
 
 
-def platform_tool_schemas() -> list[dict[str, Any]]:
+def platform_tool_schemas(config: Any = None) -> list[dict[str, Any]]:
     """OpenAI schemas for the tools the currently configured platforms support.
 
     Returns [] when nothing is configured: exposing a tool that can only answer
     "not configured" wastes schema budget and invites the model to try it.
+
+    ``config`` is the runtime config when the caller has one: the two
+    ``configured_adapters()`` probes below used to re-read and re-parse the config file on
+    every turn.
     """
     from vulnclaw.platforms.bootstrap import ensure_adapters
 
     ensure_adapters()
-    if not registry.configured_adapters():
+    if not registry.configured_adapters(config):
         return []
 
     tools: list[dict[str, Any]] = [

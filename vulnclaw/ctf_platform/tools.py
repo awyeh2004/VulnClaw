@@ -38,7 +38,7 @@ CTF_READ_TOOLS: set[str] = {
 }
 
 
-def ctf2_tools_enabled() -> bool:
+def ctf2_tools_enabled(config: Any = None) -> bool:
     """Whether the LEGACY ``ctf2_*`` tool names are exposed to the model.
 
     OFF by default. The platform-neutral ``platform_*`` face covers the same verbs,
@@ -51,25 +51,32 @@ def ctf2_tools_enabled() -> bool:
     dispatchable, so the CLI, saved playbooks and programmatic callers keep working,
     and this switch restores the old names exactly as they were.
 
+    ``config`` is the runtime config when the caller has one: this runs inside the per-turn
+    schema build, and re-reading the file there was a repeated parse (and a way for a mid-run
+    edit to change a setting the run had already acted on).
+
     Fails CLOSED on a config error -- not being able to read the switch is not a
     reason to spend the tokens, and the neutral face is always available.
     """
     try:
-        from vulnclaw.config.settings import load_config
+        from vulnclaw.config.settings import config_switch, load_config
 
+        runtime = config_switch(config, "competition", "expose_legacy_tool_names")
+        if runtime is not None:
+            return runtime
         return bool(getattr(load_config().competition, "expose_legacy_tool_names", False))
     except Exception:
         return False
 
 
-def ctf2_tool_schemas() -> list[dict[str, Any]]:
+def ctf2_tool_schemas(config: Any = None) -> list[dict[str, Any]]:
     """OpenAI function schemas for the CTF2 platform tools.
 
     Returns an EMPTY list unless the legacy names are switched on; see
     :func:`ctf2_tools_enabled`. Callers register whatever this returns, so an empty
     list means the tools never enter the schema at all.
     """
-    if not ctf2_tools_enabled():
+    if not ctf2_tools_enabled(config):
         return []
     return [
         {

@@ -469,7 +469,7 @@ class TestIdentityAndExposure:
 
     def test_enabling_it_exposes_the_core_six_plus_its_three_facets(self, monkeypatch):
         monkeypatch.setattr(
-            "vulnclaw.platforms.registry._config_enabled", lambda name: True
+            "vulnclaw.platforms.registry._config_enabled", lambda name, config=None: True
         )
         registry.register_adapter(GCSAdapter(FakeClient()))
         names = {t["function"]["name"] for t in platform_tool_schemas()}
@@ -482,7 +482,7 @@ class TestIdentityAndExposure:
         from vulnclaw.platforms.ctf2 import CTF2Adapter
 
         monkeypatch.setattr(
-            "vulnclaw.platforms.registry._config_enabled", lambda name: True
+            "vulnclaw.platforms.registry._config_enabled", lambda name, config=None: True
         )
         registry.register_adapter(CTF2Adapter(FakeClient()))
         names = {t["function"]["name"] for t in platform_tool_schemas()}
@@ -494,7 +494,7 @@ class TestIdentityAndExposure:
         from vulnclaw.platforms.ctf2 import CTF2Adapter
 
         monkeypatch.setattr(
-            "vulnclaw.platforms.registry._config_enabled", lambda name: True
+            "vulnclaw.platforms.registry._config_enabled", lambda name, config=None: True
         )
         registry.register_adapter(CTF2Adapter(FakeClient()))
         registry.register_adapter(GCSAdapter(FakeClient()))
@@ -508,7 +508,7 @@ class TestIdentityAndExposure:
 
     def test_an_unconfigured_gcs_stays_hidden_even_when_enabled(self, monkeypatch):
         monkeypatch.setattr(
-            "vulnclaw.platforms.registry._config_enabled", lambda name: True
+            "vulnclaw.platforms.registry._config_enabled", lambda name, config=None: True
         )
         registry.register_adapter(GCSAdapter(FakeClient(configured=False)))
         assert platform_tool_schemas() == []

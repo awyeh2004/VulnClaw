@@ -49,7 +49,7 @@ def real_ctf2(monkeypatch):
     adapter = CTF2Adapter(client)
 
     monkeypatch.setattr(registry, "_ADAPTERS", {}, raising=False)
-    monkeypatch.setattr(registry, "is_enabled", lambda adapter: True)
+    monkeypatch.setattr(registry, "is_enabled", lambda adapter, config=None: True)
     registry.register_adapter(adapter)
     # Otherwise bootstrap would re-register the default adapters over this one.
     monkeypatch.setattr("vulnclaw.platforms.bootstrap.ensure_adapters", lambda *a, **k: None)

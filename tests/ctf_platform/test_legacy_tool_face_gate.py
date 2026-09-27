@@ -38,7 +38,9 @@ NEUTRAL_CORE = (
 @pytest.fixture(autouse=True)
 def _legacy_off(monkeypatch):
     """Default: the legacy face is hidden."""
-    monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda: False)
+    # `*a, **k`: the switch takes an optional runtime config now, so the per-turn schema
+    # build does not re-read the config file (round8 L4 follow-up).
+    monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda *a, **k: False)
 
 
 class TestSchemaIsHiddenByDefault:
@@ -65,13 +67,13 @@ class TestSchemaIsHiddenByDefault:
 
 class TestSwitchRestoresThem:
     def test_enabled_returns_all_ten(self, monkeypatch):
-        monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda: True)
+        monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda *a, **k: True)
         names = {s["function"]["name"] for s in ctf2_tool_schemas()}
         assert names == set(CTF_TOOL_NAMES)
 
     def test_enabled_schemas_are_unchanged(self, monkeypatch):
         """Restoring must give back the same schemas, not a rebuilt approximation."""
-        monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda: True)
+        monkeypatch.setattr(ctf2_tools, "ctf2_tools_enabled", lambda *a, **k: True)
         schemas = ctf2_tool_schemas()
         assert len(schemas) == 10
         assert all(s["type"] == "function" for s in schemas)

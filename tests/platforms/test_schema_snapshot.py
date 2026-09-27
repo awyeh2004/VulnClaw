@@ -93,7 +93,7 @@ class TestTokenBudget:
     def test_the_legacy_face_would_break_the_budget(self, monkeypatch):
         """Proves the ceiling is not decorative: this is the regression it catches."""
         monkeypatch.setattr(
-            "vulnclaw.ctf_platform.tools.ctf2_tools_enabled", lambda: True
+            "vulnclaw.ctf_platform.tools.ctf2_tools_enabled", lambda *a, **k: True
         )
         combined = platform_tool_schemas() + ctf2_tool_schemas()
         assert len(combined) == len(EXPECTED_DEFAULT_TOOLS) + 10

@@ -74,24 +74,29 @@ def registered_names() -> list[str]:
 # ── enable switch ─────────────────────────────────────────────────────────
 
 
-def _config_enabled(name: str) -> bool | None:
+def _config_enabled(name: str, config: Any = None) -> bool | None:
     """The explicit ``platforms.<name>.enabled`` value, or None if unset.
 
     Returns False when the config cannot be read at all (fail closed); returns
     None when it reads fine but simply says nothing about this platform, so the
     adapter's own default can apply.
 
+    ``config`` is the runtime config when the caller has one: this is reached from the
+    per-turn schema build (``platform_tool_schemas`` -> ``configured_adapters``), which used
+    to re-read and re-parse the config file twice per turn.
+
     Reads three shapes, because the section is free-form by adapter name
     (``PlatformsConfig`` uses ``extra="allow"``): a nested mapping
     (``{name: {enabled: true}}``), a model instance, and the bare
     ``{name: true}`` shorthand.
     """
-    try:
-        from vulnclaw.config.settings import load_config
+    if config is None:
+        try:
+            from vulnclaw.config.settings import load_config
 
-        config = load_config()
-    except Exception:
-        return False
+            config = load_config()
+        except Exception:
+            return False
 
     section = getattr(config, CONFIG_SECTION, None)
     if section is None:
@@ -119,9 +124,9 @@ def _config_enabled(name: str) -> bool | None:
     return bool(value)
 
 
-def is_enabled(adapter: PlatformAdapter) -> bool:
+def is_enabled(adapter: PlatformAdapter, config: Any = None) -> bool:
     """Whether the adapter's tool face is switched on."""
-    explicit = _config_enabled(str(adapter.name))
+    explicit = _config_enabled(str(adapter.name), config)
     if explicit is None:
         return bool(getattr(adapter, "enabled_by_default", False))
     return explicit
@@ -130,12 +135,16 @@ def is_enabled(adapter: PlatformAdapter) -> bool:
 # ── exposure ──────────────────────────────────────────────────────────────
 
 
-def configured_adapters() -> dict[str, PlatformAdapter]:
-    """Adapters that are enabled AND have credentials: what the agent may use."""
+def configured_adapters(config: Any = None) -> dict[str, PlatformAdapter]:
+    """Adapters that are enabled AND have credentials: what the agent may use.
+
+    ``config`` is forwarded to the enable switch so the per-turn schema build does not
+    re-read the config file once per adapter (``platform_tool_schemas`` calls this twice).
+    """
     exposed: dict[str, PlatformAdapter] = {}
     for name, adapter in _ADAPTERS.items():
         try:
-            if is_enabled(adapter) and adapter.is_configured():
+            if is_enabled(adapter, config) and adapter.is_configured():
                 exposed[name] = adapter
         except Exception:
             # A broken adapter must not take the whole tool face down.

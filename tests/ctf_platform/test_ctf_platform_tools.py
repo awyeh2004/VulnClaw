@@ -29,7 +29,7 @@ def _legacy_face_on(monkeypatch):
     """
     import vulnclaw.ctf_platform.tools as _tools
 
-    monkeypatch.setattr(_tools, "ctf2_tools_enabled", lambda: True)
+    monkeypatch.setattr(_tools, "ctf2_tools_enabled", lambda *a, **k: True)
 
 
 def test_schemas_expose_submit_flag():

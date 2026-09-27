@@ -87,7 +87,7 @@ def stub_platforms(monkeypatch):
     ctf2 = _StubAdapter("ctf2")
 
     monkeypatch.setattr(registry, "_ADAPTERS", {}, raising=False)
-    monkeypatch.setattr(registry, "is_enabled", lambda adapter: True)
+    monkeypatch.setattr(registry, "is_enabled", lambda adapter, config=None: True)
     registry.register_adapter(gcs)
     registry.register_adapter(ctf2)
     monkeypatch.setattr("vulnclaw.platforms.bootstrap.ensure_adapters", lambda *a, **k: None)

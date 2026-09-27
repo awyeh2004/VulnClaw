@@ -36,7 +36,7 @@ GCS_READ_TOOLS: set[str] = {
 }
 
 
-def gcs_tools_enabled() -> bool:
+def gcs_tools_enabled(config: Any = None) -> bool:
     """Whether the LEGACY ``gcs_*`` tool names should be exposed to the agent.
 
     OFF by default. The GCS integration is legacy (one online qualifier the team did
@@ -52,12 +52,19 @@ def gcs_tools_enabled() -> bool:
     other. ``gcs.tools_enabled`` is still honoured so an existing config keeps
     working, and is deprecated in favour of the newer field.
 
+    ``config`` is the runtime config when the caller has one (this runs inside the per-turn
+    schema build; see `ctf2_tools_enabled` for why the file is not re-read there).
+
     Fails CLOSED on a config error: not being able to read the setting is not a
     reason to expose a tool face that performs irreversible actions.
     """
     try:
-        from vulnclaw.config.settings import load_config
+        from vulnclaw.config.settings import config_switch, load_config
 
+        runtime_unified = config_switch(config, "competition", "expose_legacy_tool_names")
+        runtime_legacy = config_switch(config, "gcs", "tools_enabled")
+        if runtime_unified is not None or runtime_legacy is not None:
+            return bool(runtime_unified) or bool(runtime_legacy)
         config = load_config()
     except Exception:
         return False
@@ -68,14 +75,14 @@ def gcs_tools_enabled() -> bool:
     return unified or legacy
 
 
-def gcs_tool_schemas() -> list[dict[str, Any]]:
+def gcs_tool_schemas(config: Any = None) -> list[dict[str, Any]]:
     """OpenAI function schemas for all GCS competition tools.
 
     Returns an EMPTY list when the GCS tool face is disabled (the default) --
     see :func:`gcs_tools_enabled`. Callers register whatever this returns, so an
     empty list means the tools never enter the schema at all.
     """
-    if not gcs_tools_enabled():
+    if not gcs_tools_enabled(config):
         return []
     return [
         {

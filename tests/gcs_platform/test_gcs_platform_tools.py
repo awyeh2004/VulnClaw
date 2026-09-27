@@ -31,7 +31,7 @@ def _enable_gcs_tools(monkeypatch):
     explicitly rather than being deleted. The default-off behaviour is asserted
     separately in :class:`TestToolFaceGate`.
     """
-    monkeypatch.setattr(gcs_tools, "gcs_tools_enabled", lambda: True)
+    monkeypatch.setattr(gcs_tools, "gcs_tools_enabled", lambda *a, **k: True)
 
 
 def test_schemas_expose_submit_flag_and_env_lifecycle():

@@ -22,11 +22,27 @@ from vulnclaw.agent.builtin_tools import build_openai_tools
 from vulnclaw.config import settings as settings_module
 
 
-def _cfg(*, reasoning: bool = True, tool_card: bool = True):
+def _cfg(
+    *,
+    reasoning: bool = True,
+    tool_card: bool = True,
+    legacy_names: bool = False,
+    gcs_legacy: bool = False,
+):
+    """A stand-in for the real config, with EVERY section the switches read.
+
+    `competition`/`gcs`/`platforms` are here because the per-turn schema path reads its four
+    gates out of them: a config object that lacks a section is legitimately "cannot answer"
+    and falls back to the file, which would make the no-file-read assertions below pass for
+    the wrong reason.
+    """
     return SimpleNamespace(
         session=SimpleNamespace(
             reasoning_graph_enabled=reasoning, tool_card_enabled=tool_card
-        )
+        ),
+        competition=SimpleNamespace(expose_legacy_tool_names=legacy_names),
+        gcs=SimpleNamespace(tools_enabled=gcs_legacy),
+        platforms=SimpleNamespace(),
     )
 
 
@@ -147,24 +163,26 @@ class TestTheSwitchesPreferTheRuntimeConfig:
         assert reasoning_graph_enabled() is False
         assert solver._tool_card_enabled() is False
 
-    def test_the_tool_schema_path_uses_the_runtime_object_too(self, monkeypatch):
-        """`build_openai_tools` runs every turn, so its switch must not touch the file.
+    def test_the_tool_schema_path_reads_no_config_file_at_all(self, monkeypatch):
+        """`build_openai_tools` runs every turn: it must not parse the config file there.
 
-        NOTE what this asserts and what it does not. Measured at this commit, ONE
-        `build_openai_tools()` call makes FIVE config-file reads: the ablation switch (now
-        zero when a config is supplied) plus four from other gates on the same path --
-        `ctf_platform.tools.ctf2_tools_enabled`, `gcs_platform.tools.gcs_tools_enabled` and
-        `platforms.registry._config_enabled` (twice). Those four are a separate, now
-        MEASURED item; this test pins only that the ablation switch stopped contributing.
+        Measured before this fix, with the runtime config already supplied: FIVE reads per
+        call -- the ablation switch plus `ctf2_tools_enabled`, `gcs_tools_enabled` and
+        `registry._config_enabled` (twice, once per `configured_adapters()` probe). They are
+        all threaded now, and the count is zero; the `config=None` shape below still falls
+        back to the file exactly once per switch, which is what callers without a runtime
+        object need.
         """
         calls = self._recording_load(monkeypatch, reasoning=False, tool_card=True)
         names = _names(build_openai_tools(None, config=_cfg(reasoning=False, tool_card=True)))
         assert not [n for n in names if n.startswith("blackboard_")], names
-        offenders = [c for c in calls if "blackboard" in c]
-        assert offenders == [], (
-            "the ablation switch re-read the config file even though it was given one: "
-            f"{offenders}; all reads seen: {calls}"
-        )
+        assert calls == [], f"the per-turn schema path re-read the config file: {calls}"
+
+    def test_without_a_runtime_config_the_file_is_still_read(self, monkeypatch):
+        """The fallback is the whole reason the parameter is optional."""
+        calls = self._recording_load(monkeypatch, reasoning=True, tool_card=True)
+        build_openai_tools(None)
+        assert calls, "a caller with no runtime config must still get an answer"
 
 
 def test_prompt_block_is_omitted_when_disabled(config_switch, monkeypatch):
