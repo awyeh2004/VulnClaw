@@ -695,6 +695,68 @@ def reasoning_graph_enabled(config: Any = None) -> bool:
         return True
 
 
+def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
+    """Record one graded answer: a blackboard fact AND a finding (double write).
+
+    Mock exams 1-3 (2026-09-27) showed why the double write matters: the agent
+    put every answer on the blackboard, but the grading-visible surface
+    (session findings) only ever held the generic auto-detected entries, so a
+    full-score run looked like two stray findings. The answer sheet IS the
+    findings list; this verb makes recording one cheap and unambiguous.
+
+    Args: question (e.g. "Q1: attacker IP"), answer, evidence (text, verbatim
+    command output), optional evidence_ref (e001-style, for board verification).
+    """
+    question = str(args.get("question") or "").strip()
+    answer = str(args.get("answer") or "").strip()
+    evidence = str(args.get("evidence") or "").strip()
+    evidence_ref = args.get("evidence_ref")
+    if not question or not answer:
+        return "[!] blackboard_record_answer requires 'question' and 'answer'"
+
+    desc = f"{question} 答案: {answer}"
+    if evidence:
+        desc += "\n证据: " + evidence
+    verified = False
+    verify_note = ""
+    if evidence_ref:
+        content = _evidence_content(str(evidence_ref))
+        if content and _witnessed_in_evidence(desc, content):
+            verified = True
+        elif content:
+            verify_note = " (candidate: description not witnessed in referenced evidence)"
+        else:
+            verify_note = f" (candidate: evidence {evidence_ref} not found)"
+    else:
+        verify_note = " (candidate: no evidence_ref)"
+    node = bb.create_fact(desc, evidence_ref=evidence_ref, verified=verified)
+
+    finding_written = ""
+    state = getattr(getattr(agent, "context", None), "state", None)
+    if state is not None and hasattr(state, "add_finding"):
+        try:
+            from vulnclaw.config.domain_models import VulnerabilityFinding
+
+            finding = VulnerabilityFinding(
+                title=question,
+                severity="Info",
+                vuln_type="ir-answer",
+                description=answer,
+                evidence=evidence or f"blackboard {node.id}",
+                target=str(getattr(getattr(agent, "session_state", None), "target", "") or ""),
+            )
+            if state.add_finding(finding):
+                finding_written = f"finding recorded: {question}"
+            else:
+                finding_written = f"duplicate of an existing finding ({question})"
+        except Exception as exc:  # finding store failure must not lose the board write
+            finding_written = f"finding write FAILED: {exc}"
+
+    tag = f"fact {node.id} CONFIRMED" if verified else f"fact {node.id} candidate"
+    return f"[blackboard] {tag}: {desc}{verify_note}" + "\n[answer-sheet] " + finding_written
+
+
+
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
     """Dispatch a blackboard tool call to the blackboard instance bound to this agent."""
     bb = getattr(agent.runtime, "blackboard", None)
@@ -713,6 +775,9 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
 
     if tool_name == "blackboard_summary":
         return bb.summary()
+
+    if tool_name == "blackboard_record_answer":
+        return _tool_record_answer(agent, bb, args)
 
     if tool_name == "blackboard_add_fact":
         desc = args.get("description", "")

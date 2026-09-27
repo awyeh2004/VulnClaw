@@ -1501,7 +1501,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         return execute_evidence_tool(agent, tool_name, args)
 
 # ── Blackboard reasoning graph ──
-    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_verify_fact", "blackboard_challenge_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent", "blackboard_review", "blackboard_set_lock", "blackboard_create_angle", "blackboard_hit_angle", "blackboard_miss_angle", "blackboard_create_tension"):
+    if tool_name in ("blackboard_summary", "blackboard_add_fact", "blackboard_record_answer", "blackboard_verify_fact", "blackboard_challenge_fact", "blackboard_add_intent", "blackboard_reject_intent", "blackboard_start_intent", "blackboard_review", "blackboard_set_lock", "blackboard_create_angle", "blackboard_hit_angle", "blackboard_miss_angle", "blackboard_create_tension"):
         try:
             from vulnclaw.agent.blackboard import dispatch_blackboard_tool
             return await dispatch_blackboard_tool(agent, tool_name, args)
@@ -1793,6 +1793,7 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "shell_command",
     "blackboard_summary",
     "blackboard_add_fact",
+    "blackboard_record_answer",
     "blackboard_verify_fact",
     "blackboard_challenge_fact",
     "blackboard_add_intent",
@@ -2015,6 +2016,37 @@ def build_openai_tools(
                         },
                     },
                     "required": ["description"],
+                },
+            },
+        }
+    )
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "blackboard_record_answer",
+                "description": "Record ONE graded answer (IR answer rounds): writes the answer as a blackboard fact AND as a session finding — findings are the only surface the grader sees, so every answer must go through this. Use question='Q1: 攻击者 IP 是什么？' style, answer as the one-line final answer, evidence as the verbatim command output that proves it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question with its number, e.g. 'Q1: 攻击者 IP 是什么？'",
+                        },
+                        "answer": {
+                            "type": "string",
+                            "description": "The final answer, stated exactly (IP / path / time / account name / step list). Never a paraphrase.",
+                        },
+                        "evidence": {
+                            "type": "string",
+                            "description": "Verbatim command output or log line that proves the answer",
+                        },
+                        "evidence_ref": {
+                            "type": "string",
+                            "description": "Optional evidence ID (e.g. e007) to link the board fact to stored evidence",
+                        },
+                    },
+                    "required": ["question", "answer"],
                 },
             },
         }
