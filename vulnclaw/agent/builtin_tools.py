@@ -3913,6 +3913,14 @@ _bg_tasks: dict[str, dict] = {}
 _bg_lock = _threading.Lock()
 _bg_seq = 0
 _BG_MAX_CONCURRENT = 3
+#: How many FINISHED tasks stay queryable via `bg_result`. Running tasks are never evicted,
+#: so the table is bounded by `_BG_MAX_CONCURRENT + _BG_MAX_FINISHED`.
+#
+# Round5 residual item: the table grew without limit. Each row keeps up to 4KB of stdout
+# and 2KB of stderr, and nothing ever removed one -- a long run that launches a
+# brute-force job per hypothesis accumulated every one for the life of the process. The
+# concurrency cap above bounds how many RUN at once, which is a different question.
+_BG_MAX_FINISHED = 50
 
 # 允许后台运行的命令前缀（爆破/纯计算类）。拒绝 shell 管道、下载、编码执行。
 _BG_ALLOWED_PREFIXES = (
@@ -3972,6 +3980,33 @@ def _bg_new_id() -> str:
     with _bg_lock:
         _bg_seq += 1
         return f"bg{_bg_seq}"
+
+
+def _evict_finished_bg_tasks() -> None:
+    """Drop the oldest FINISHED tasks once the table exceeds ``_BG_MAX_FINISHED``.
+
+    Caller must hold ``_bg_lock``. Running tasks are never touched: evicting one would
+    leave a live thread writing into a row nobody can query. An evicted id answers
+    `bg_result` with the existing "unknown task" message, which already tells the model
+    what ids look like -- losing the record of a 10-minute-old finished task is the
+    smaller loss against unbounded growth.
+
+    Ordered by launch SEQUENCE, not by `started`: tasks launched in a burst share a
+    timestamp to within microseconds, and the tie-break then fell through to the task id as
+    a STRING -- where "bg10" sorts before "bg7" -- so "oldest first" was arbitrary
+    (measured: a test asserting the first ten ids were evicted failed 2 runs in 3).
+    """
+    finished = [
+        (int(task.get("seq") or 0), float(task.get("started") or 0.0), task_id)
+        for task_id, task in _bg_tasks.items()
+        if task.get("status") != "running"
+    ]
+    excess = len(finished) - _BG_MAX_FINISHED
+    if excess <= 0:
+        return
+    finished.sort()
+    for _, _, task_id in finished[:excess]:
+        _bg_tasks.pop(task_id, None)
 
 
 def _bg_split_tokens(text: str) -> list[str]:
@@ -4112,14 +4147,20 @@ def _bg_run(task_id: str, cmd: list[str], timeout: int) -> None:
             _bg_tasks[task_id]["returncode"] = proc.returncode
             _bg_tasks[task_id]["output"] = (proc.stdout or "")[:4000]
             _bg_tasks[task_id]["stderr"] = (proc.stderr or "")[:2000]
+            # Also enforce the bound at the terminal transition, not only at insert: a row
+            # that finishes between two launches would otherwise push the finished count to
+            # cap+1 and stay there until the next launch happened to evict it.
+            _evict_finished_bg_tasks()
     except _sp.TimeoutExpired:
         with _bg_lock:
             _bg_tasks[task_id]["status"] = "timeout"
             _bg_tasks[task_id]["output"] = ""
+            _evict_finished_bg_tasks()
     except Exception as e:
         with _bg_lock:
             _bg_tasks[task_id]["status"] = "failed"
             _bg_tasks[task_id]["error"] = str(e)[:500]
+            _evict_finished_bg_tasks()
 
 
 async def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
@@ -4187,7 +4228,14 @@ async def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
         cmd = shlex.split(cmd_raw)
     task_id = _bg_new_id()
     with _bg_lock:
-        _bg_tasks[task_id] = {"status": "running", "cmd": cmd_raw, "started": time.time()}
+        _bg_tasks[task_id] = {
+            "status": "running",
+            "cmd": cmd_raw,
+            "started": time.time(),
+            # Launch order, used for eviction ordering (see _evict_finished_bg_tasks).
+            "seq": _bg_seq,
+        }
+        _evict_finished_bg_tasks()
     t = _threading.Thread(target=_bg_run, args=(task_id, cmd, timeout), daemon=True)
     t.start()
     return (
