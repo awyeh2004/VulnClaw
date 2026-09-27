@@ -668,12 +668,16 @@ class SessionState(BaseModel):
     # 委托方法（委托给子状态类）
     # ==========================================================================
 
-    def add_finding(self, finding: VulnerabilityFinding) -> bool:
+    def add_finding(self, finding: VulnerabilityFinding, skip_dedup: bool = False) -> bool:
         """添加漏洞发现，自动去重（新增/去重的唯一实现所在处）。
 
         去重策略:
         1. finding_id 精确 hash 匹配（快）
         2. 语义相似度匹配（捕获同一漏洞的不同表述），命中后保留证据更强者
+
+        skip_dedup: 跳过两层去重。IR 答案卡（blackboard_record_answer）必须
+        传 True——不同问题的答案天然共享证据源（同一条 auth.log），语义去重
+        会把相邻题目的答案误判为重复并静默吞掉（模拟考第 4 场实测 Q2 被吞）。
 
         写入 self.findings / self._finding_ids_cache，并把同一引用同步给
         VulnerabilityStore（只读查询视图）。成功新增或替换时触发 checkpoint，
@@ -690,32 +694,33 @@ class SessionState(BaseModel):
             finding.target = self.target
 
         # 第一层：finding_id 精确去重
-        if finding.finding_id in self._finding_ids_cache:
+        if not skip_dedup and finding.finding_id in self._finding_ids_cache:
             logger.debug("跳过重复漏洞: %s (ID: %s)", finding.title, finding.finding_id)
             return False
 
         # 第二层：语义相似度去重
-        from vulnclaw.agent.finding_similarity import (
-            _evidence_strength,
-            finding_similarity,
-        )
+        if not skip_dedup:
+            from vulnclaw.agent.finding_similarity import (
+                _evidence_strength,
+                finding_similarity,
+            )
 
-        for idx, existing in enumerate(self.findings):
-            if finding_similarity(finding, existing) >= self.semantic_dedup_threshold:
-                # 命中语义重复：保留证据更强者
-                if _evidence_strength(finding) > _evidence_strength(existing):
-                    logger.debug(
-                        "语义重复，替换为证据更强的漏洞: %s 取代 %s",
-                        finding.title,
-                        existing.title,
-                    )
-                    self._finding_ids_cache.discard(existing.finding_id)
-                    self._finding_ids_cache.add(finding.finding_id)
-                    self.findings[idx] = finding
-                    self._notify_checkpoint("finding_updated")
-                else:
-                    logger.debug("跳过语义重复漏洞: %s", finding.title)
-                return False
+            for idx, existing in enumerate(self.findings):
+                if finding_similarity(finding, existing) >= self.semantic_dedup_threshold:
+                    # 命中语义重复：保留证据更强者
+                    if _evidence_strength(finding) > _evidence_strength(existing):
+                        logger.debug(
+                            "语义重复，替换为证据更强的漏洞: %s 取代 %s",
+                            finding.title,
+                            existing.title,
+                        )
+                        self._finding_ids_cache.discard(existing.finding_id)
+                        self._finding_ids_cache.add(finding.finding_id)
+                        self.findings[idx] = finding
+                        self._notify_checkpoint("finding_updated")
+                    else:
+                        logger.debug("跳过语义重复漏洞: %s", finding.title)
+                    return False
 
         # 附加 skill 溯源（若未显式提供且当前有活跃选择）。深拷贝以免其中的
         # references_loaded 列表与 active_skill_selection 共享 —— 否则之后

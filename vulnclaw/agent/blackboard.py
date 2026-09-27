@@ -745,7 +745,7 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
                 evidence=evidence or f"blackboard {node.id}",
                 target=str(getattr(getattr(agent, "session_state", None), "target", "") or ""),
             )
-            if state.add_finding(finding):
+            if state.add_finding(finding, skip_dedup=True):
                 finding_written = f"finding recorded: {question}"
             else:
                 finding_written = f"duplicate of an existing finding ({question})"
