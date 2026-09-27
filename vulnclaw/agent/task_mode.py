@@ -105,6 +105,10 @@ _MODE_DISCIPLINE: dict[str, str] = {
         "- Composite questions (cleanup plan / hardening) are separate answers: "
         "write the step list (kill process → delete files → remove persistence → "
         "patch → harden) explicitly as its own finding, never folded into the LOCK.\n"
+        "- Before declaring completion: count your answer findings and compare "
+        "against the number of questions — if any question has no card, record it "
+        "now. Every question gets exactly one card; adjacent questions sharing the "
+        "same evidence log are STILL separate cards.\n"
         "- Paths must be copied verbatim from command output, never reconstructed.\n"
         "Load skill reference `ir-competition-strategy` before sweeping.\n"
     ),
