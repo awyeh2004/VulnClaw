@@ -695,6 +695,22 @@ def reasoning_graph_enabled(config: Any = None) -> bool:
         return True
 
 
+def _evidence_content_for(agent: "AgentContext", ref: str) -> str:
+    """Look up one evidence entry's content by id (module-level so the
+    record_answer helper can share it — it used to be a closure inside
+    dispatch_blackboard_tool and _tool_record_answer's evidence_ref branch
+    died with NameError, silently dropping the findings half of the double
+    write while the board half survived)."""
+    state = getattr(getattr(agent, "context", None), "state", None)
+    agent_state = getattr(state, "agent_state", None)
+    if agent_state is None:
+        return ""
+    for ev in getattr(agent_state, "evidence", []):
+        if ev.id == ref:
+            return ev.content or ""
+    return ""
+
+
 def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
     """Record one graded answer: a blackboard fact AND a finding (double write).
 
@@ -720,7 +736,7 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
     verified = False
     verify_note = ""
     if evidence_ref:
-        content = _evidence_content(str(evidence_ref))
+        content = _evidence_content_for(agent, str(evidence_ref))
         if content and _witnessed_in_evidence(desc, content):
             verified = True
         elif content:
@@ -782,14 +798,7 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         return "[!] blackboard not available on agent.runtime"
 
     def _evidence_content(ref: str) -> str:
-        state = getattr(getattr(agent, "context", None), "state", None)
-        agent_state = getattr(state, "agent_state", None)
-        if agent_state is None:
-            return ""
-        for ev in getattr(agent_state, "evidence", []):
-            if ev.id == ref:
-                return ev.content or ""
-        return ""
+        return _evidence_content_for(agent, ref)
 
     if tool_name == "blackboard_summary":
         return bb.summary()

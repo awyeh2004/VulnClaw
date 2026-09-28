@@ -323,8 +323,16 @@ def _merge_config(base: VulnClawConfig, raw: dict[str, Any]) -> VulnClawConfig:
 
     try:
         return VulnClawConfig(**data)
-    except ValidationError:
-        # If merged data is invalid, return base
+    except ValidationError as exc:
+        # If merged data is invalid, return base. This MUST NOT be silent: a
+        # config file with one bad field (e.g. `api_keys:` parsed as null)
+        # otherwise degrades the whole run to factory defaults -- openai/gpt-4o
+        # with no key -- and the only symptom is timeouts against the wrong
+        # endpoint (measured in the model-tier A/B, 2026-09-28).
+        logger.error(
+            "config.yaml 校验失败，已回退到默认配置（这会丢弃你的全部自定义设置）：\n%s",
+            str(exc)[:1500],
+        )
         return base
 
 
