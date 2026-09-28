@@ -374,6 +374,10 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
     if v := os.environ.get("VULNCLAW_LLM_TEMPERATURE"):
         with suppress(ValueError):
             config.llm.temperature = float(v)
+    if v := os.environ.get("VULNCLAW_LLM_REASONING_EFFORT"):
+        # Model-tier switch: 'fast' tier maps to 'none' (DeepSeek omits the
+        # field entirely when the effort is 'none'), 'deep' tier to 'high'.
+        config.llm.reasoning_effort = v.strip().lower()
 
     # ── LLM auth mode (static / oauth) ──────────────────────────────────
     if v := os.environ.get("VULNCLAW_LLM_AUTH_MODE"):

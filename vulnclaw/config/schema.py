@@ -205,7 +205,14 @@ class LLMConfig(BaseModel):
     )
     temperature: float = Field(default=0.1, description="Sampling temperature")
     reasoning_effort: str = Field(
-        default="high", description="Reasoning effort level (OpenAI o-series only)"
+        default="high",
+        description=(
+            "Reasoning effort level. Consumed by providers that take a top-level "
+            "reasoning_effort: OpenAI o-series, Zhipu GLM (low/high/max), and "
+            "DeepSeek v4 (none/low/medium/high/max — omitting the field keeps "
+            "the model in fast no-reasoning mode, which is the fast tier of the "
+            "model-tier A/B). Routed models can override it per-route."
+        ),
     )
     thinking_disabled: bool = Field(
         default=False,

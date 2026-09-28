@@ -74,6 +74,19 @@ def build_chat_completion_kwargs(
         effort = str(getattr(llm_config, "reasoning_effort", "") or "").strip().lower()
         if effort in {"low", "high", "max"}:
             kwargs["reasoning_effort"] = effort
+    # DeepSeek v4 (probed 2026-09-28 against api.deepseek.com, model
+    # deepseek-flash): the TOP-LEVEL `reasoning_effort` controls reasoning depth
+    # (none/low/high/max accepted; anything else 422). Omitting the field keeps
+    # the model in its default no-reasoning mode — that omission IS the fast
+    # tier of the model-tier A/B. Only forward the configured effort when it is
+    # a legal variant, so a stale config value degrades to fast instead of 422.
+    if provider in {"ds", "deepseek"}:
+        effort = str(getattr(llm_config, "reasoning_effort", "") or "").strip().lower()
+        if effort in {"low", "medium", "high", "max"}:
+            kwargs["reasoning_effort"] = effort
+        # 'none'/'minimal'/unset/unknown -> omit the field entirely: the API's
+        # default mode is no reasoning, which is exactly the fast tier. This
+        # also degrades stale/invalid config values to fast instead of a 422.
     return kwargs
 
 
