@@ -737,18 +737,36 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
         try:
             from vulnclaw.config.domain_models import VulnerabilityFinding
 
-            finding = VulnerabilityFinding(
-                title=question,
-                severity="Info",
-                vuln_type="ir-answer",
-                description=answer,
-                evidence=evidence or f"blackboard {node.id}",
-                target=str(getattr(getattr(agent, "session_state", None), "target", "") or ""),
+            # Idempotency: the self-check discipline may re-record a question
+            # that is already on the sheet (mock exam 6 produced 20 cards for
+            # 10 questions). Same-question re-records update nothing and just
+            # confirm — the card already counts.
+            existing = next(
+                (
+                    f
+                    for f in getattr(state, "findings", []) or []
+                    if str(getattr(f, "vuln_type", "")) == "ir-answer"
+                    and str(getattr(f, "title", "")) == question
+                ),
+                None,
             )
-            if state.add_finding(finding, skip_dedup=True):
-                finding_written = f"finding recorded: {question}"
+            if existing is not None:
+                if evidence and evidence not in str(getattr(existing, "evidence", "")):
+                    existing.evidence = (str(getattr(existing, "evidence", "")) + " | " + evidence).strip(" |")
+                finding_written = f"answer already recorded ({question}) — card confirmed, no duplicate"
             else:
-                finding_written = f"duplicate of an existing finding ({question})"
+                finding = VulnerabilityFinding(
+                    title=question,
+                    severity="Info",
+                    vuln_type="ir-answer",
+                    description=answer,
+                    evidence=evidence or f"blackboard {node.id}",
+                    target=str(getattr(getattr(agent, "session_state", None), "target", "") or ""),
+                )
+                if state.add_finding(finding, skip_dedup=True):
+                    finding_written = f"finding recorded: {question}"
+                else:
+                    finding_written = f"duplicate of an existing finding ({question})"
         except Exception as exc:  # finding store failure must not lose the board write
             finding_written = f"finding write FAILED: {exc}"
 

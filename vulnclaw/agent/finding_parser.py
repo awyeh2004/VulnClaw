@@ -116,6 +116,16 @@ class FindingParser:
         """
         existing_titles = {f.title for f in self.context.state.findings}
 
+        # IR answer rounds keep the findings list as the pure answer sheet:
+        # the natural-language auto-detector would add [Auto] entries (弱口令,
+        # 版本暴露, …) next to the Q<n> answer cards, which is exactly the
+        # noise the record_answer verb was introduced to remove. Layers 1/3
+        # stay — explicit [Severity] tags and confirmed-fact elevations are
+        # substantive, not pattern noise.
+        suppress_generic = (
+            str(getattr(self.runtime, "task_mode", "") or "") == "ir"
+        )
+
         severity_patterns = [
             (r"\[Critical\]\s*(.+?)(?:\n|$)", "Critical"),
             (r"\[High\]\s*(.+?)(?:\n|$)", "High"),
@@ -146,6 +156,8 @@ class FindingParser:
             evidence_pool = clean_response
 
         for pattern, severity, vuln_type in NATURAL_LANG_PATTERNS:
+            if suppress_generic:
+                continue
             # Use stable vuln_type for dedup, not the localized title
             # (same vuln_type from different languages must dedupe correctly)
             if vuln_type in {f.vuln_type for f in self.context.state.findings if f.vuln_type}:
