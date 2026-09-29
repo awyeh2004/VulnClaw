@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 from vulnclaw.agent.agent_graph import AgentGraph, AgentOutcome
 from vulnclaw.agent.context import SessionState, VulnerabilityFinding
+from vulnclaw.config.domain_models import is_answer_card
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,11 @@ def extract_attack_surfaces(session: SessionState, *, limit: int = 20) -> list[A
                 surfaces.append(AttackSurface(target=target, kind=kind, reason=f"recon {key}"))
 
     for finding in session.findings:
+        if is_answer_card(finding):
+            # An answer card's description IS the answer (e.g. the attacker IP); mining it
+            # with _extract_location would dispatch the answer sheet to child agents as
+            # attack surfaces (round-11 follow-up to round-10 #1).
+            continue
         location = _extract_location(finding)
         if location:
             surfaces.append(

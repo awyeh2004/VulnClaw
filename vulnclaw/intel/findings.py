@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from vulnclaw.config.domain_models import is_answer_card
 from vulnclaw.intel.compliance import map_findings
 
 SEVERITY_WEIGHTS = {
@@ -309,6 +310,10 @@ def _findings_from_agent(agent: Any) -> list[dict[str, Any]]:
     findings = getattr(session, "findings", None) or []
     out: list[dict[str, Any]] = []
     for f in findings:
+        if is_answer_card(f):
+            # IR answer cards are not vulnerabilities; scoring them inflates "Top Risks"
+            # and misleads the model about its own answer sheet (round-10 #1 follow-up).
+            continue
         if isinstance(f, dict):
             out.append(f)
         elif hasattr(f, "model_dump"):
@@ -321,6 +326,7 @@ async def findings_report_tool(agent: Any, args: dict[str, Any]) -> str:
     findings = args.get("findings")
     if not isinstance(findings, list) or not findings:
         findings = _findings_from_agent(agent)
+    findings = [f for f in findings if not is_answer_card(f)]
     if not findings:
         return "[findings_report] No findings to score. Pass a 'findings' array or run after findings exist."
     with_compliance = bool(args.get("with_compliance", False))
@@ -336,6 +342,8 @@ async def findings_diff_tool(agent: Any, args: dict[str, Any]) -> str:
         current = _findings_from_agent(agent)
     if not isinstance(baseline, list):
         baseline = []
+    baseline = [f for f in baseline if not is_answer_card(f)]
+    current = [f for f in current if not is_answer_card(f)]
     if not baseline and not current:
         return "[findings_diff] Provide 'baseline' and 'current' finding arrays to diff."
     report = diff_assessments(baseline, current, target=str(args.get("target", "") or ""))

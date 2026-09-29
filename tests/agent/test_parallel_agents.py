@@ -183,3 +183,20 @@ async def test_surface_wave_strategy_honors_max_total_cap(tmp_path):
     assert len(worker_nodes) == 1  # second surface rejected by max_total
     assert len(root.session_state.findings) == 1  # rejected child never merged
     assert graph.get_node(graph.root_id).outcome == AgentOutcome.FINISHED
+
+
+def test_extract_attack_surfaces_skips_answer_cards():
+    """Round-10 #1 follow-up: an answer card's description IS the answer; mining it would
+    dispatch the answer sheet to child agents as attack surfaces."""
+    state = SessionState(target="127.0.0.1:2224")
+    state.add_finding(
+        VulnerabilityFinding(
+            title="Q1: 攻击者 IP 是什么？",
+            severity="Info",
+            vuln_type="ir-answer",
+            description="http://evil.example.com/steal",
+            evidence="203.0.113.77",
+        )
+    )
+
+    assert extract_attack_surfaces(state) == []

@@ -10,7 +10,7 @@ from pathlib import Path
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V2 违规 — 叶子类型已移至 config/domain_models.py。
 from vulnclaw.agent.context import SessionState
-from vulnclaw.config.domain_models import VulnerabilityFinding
+from vulnclaw.config.domain_models import VulnerabilityFinding, is_answer_card
 from vulnclaw.report.verifier import PoCGenerator
 
 PYTHON_POC_TEMPLATE = '''\
@@ -119,6 +119,11 @@ def generate_pocs(session: SessionState, output_dir: Path) -> list[Path]:
     generated: list[Path] = []
 
     for i, finding in enumerate(session.findings, 1):
+        if is_answer_card(finding):
+            # An IR answer card is not a vulnerability; a PoC per question would drop
+            # nonsense `poc_NN_<question>.py` scripts into the report and set
+            # poc_script on the card (round-11 follow-up to round-10 #1).
+            continue
         safe_name = _sanitize_filename_component(finding.title)
         cve_suffix = (
             f"_{_sanitize_filename_component(finding.cve, max_length=24)}" if finding.cve else ""

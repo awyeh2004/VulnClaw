@@ -131,3 +131,29 @@ async def test_diff_tool_explicit_arrays():
     )
     assert "Assessment Diff: t" in out
     assert "+1 new" in out
+
+
+ANSWER_CARD = {
+    "title": "Q1: 攻击者 IP 是什么？",
+    "severity": "Info",
+    "vuln_type": "ir-answer",
+    "description": "203.0.113.77",
+}
+
+
+@pytest.mark.asyncio
+async def test_report_tool_ignores_answer_cards():
+    """Round-10 #1 follow-up: an IR answer card must not enter risk scoring / Top Risks."""
+    out = await findings_report_tool(agent=None, args={"findings": [SQLI, ANSWER_CARD]})
+    assert "SQL Injection" in out
+    assert "ir-answer" not in out
+    assert "Q1" not in out
+
+
+@pytest.mark.asyncio
+async def test_diff_tool_ignores_answer_cards():
+    out = await findings_diff_tool(
+        agent=None, args={"baseline": [], "current": [SQLI, ANSWER_CARD], "target": "t"}
+    )
+    assert "ir-answer" not in out
+    assert "Q1" not in out

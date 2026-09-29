@@ -1041,3 +1041,30 @@ class TestPoCBuilder:
             init_i18n()
         content = Path(output).read_text(encoding="utf-8")
         assert "需人工复核" in content
+
+
+def test_generate_pocs_skips_answer_cards(tmp_path):
+    """Round-10 #1 follow-up: no nonsense `poc_NN_<question>.py` per IR answer card."""
+    from vulnclaw.agent.context import SessionState, VulnerabilityFinding
+    from vulnclaw.report.poc_builder import generate_pocs
+
+    session = SessionState(target="https://example.com")
+    session.add_finding(
+        VulnerabilityFinding(
+            title="Verified SQLi",
+            severity="High",
+            vuln_type="SQLi",
+            evidence="union select",
+        )
+    )
+    card = VulnerabilityFinding(
+        title="Q1: 攻击者 IP 是什么？",
+        severity="Info",
+        vuln_type="ir-answer",
+        description="203.0.113.77",
+    )
+    session.add_finding(card)
+
+    generated = generate_pocs(session, tmp_path / "pocs")
+    assert len(generated) == 1
+    assert not card.poc_script
