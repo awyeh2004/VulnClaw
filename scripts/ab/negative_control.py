@@ -129,7 +129,8 @@ async def release(cid: str) -> bool:
             return True
         except Exception as exc:  # noqa: BLE001
             last = str(exc)[:120]
-            if "NOT_FOUND" in last:
+            # Search the FULL message, not the truncated log slice (round-9 leftover).
+            if "NOT_FOUND" in str(exc):
                 return True
             await asyncio.sleep(3)
     log(f"    release 失败（3 次后放弃）: {last}")
