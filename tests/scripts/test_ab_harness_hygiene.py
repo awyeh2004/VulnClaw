@@ -34,7 +34,17 @@ SCRIPTS = [
 #: prologue-execution check must cover a NEW script automatically: round-10 finding #3,
 #: `model_tier_pair.py` landed with no F1 guard because the list was hard-coded.
 AB_DIR = REPO_ROOT / "scripts" / "ab"
-AB_SCRIPTS = sorted(p for p in AB_DIR.glob("*.py") if not p.name.startswith("__"))
+#: Bare top-level programs: their work runs AT MODULE SCOPE (not under a guarded entry
+#: `if __name__ == "__main__"`, nor a trailing `asyncio.run(main())`), so "executing the
+#: prologue" would execute the real program -- `parse_run_logs.py` reads `.test-tmp`,
+#: prints, and writes `.test-tmp/rate-analysis.json` when imported. Excluded on purpose;
+#: add here only with a reason, never to silence a failure.
+NON_PROLOGUE_SCRIPTS = {"parse_run_logs.py"}
+AB_SCRIPTS = sorted(
+    p
+    for p in AB_DIR.glob("*.py")
+    if not p.name.startswith("__") and p.name not in NON_PROLOGUE_SCRIPTS
+)
 
 
 def _tree(path: Path) -> ast.Module:
@@ -204,4 +214,8 @@ class TestEveryAbScriptsPrologueExecutes:
 
 
 def test_the_tier_script_is_discovered():
-    assert "model_tier_pair.py" in {p.name for p in AB_SCRIPTS}, AB_SCRIPTS
+    names = {p.name for p in AB_SCRIPTS}
+    assert "model_tier_pair.py" in names, AB_SCRIPTS
+    # A bare top-level script must stay OUT of the execute-the-prologue guard: running it
+    # would run the real program (see NON_PROLOGUE_SCRIPTS).
+    assert "parse_run_logs.py" not in names, AB_SCRIPTS
