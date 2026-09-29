@@ -711,6 +711,16 @@ def _evidence_content_for(agent: "AgentContext", ref: str) -> str:
     return ""
 
 
+def _normalize_question(text: str) -> str:
+    """Whitespace- and case-folded question text for answer-card idempotency.
+
+    The model re-records the same question with different spacing
+    ("Q1: 攻击者 IP 是什么？" vs "Q1:攻击者IP"), and the previous exact string
+    comparison let that through as a second card (round-10 finding #4).
+    """
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
 def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
     """Record one graded answer: a blackboard fact AND a finding (double write).
 
@@ -751,30 +761,42 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
     state = getattr(getattr(agent, "context", None), "state", None)
     if state is not None and hasattr(state, "add_finding"):
         try:
-            from vulnclaw.config.domain_models import VulnerabilityFinding
+            from vulnclaw.config.domain_models import (
+                ANSWER_CARD_VULN_TYPE,
+                VulnerabilityFinding,
+            )
 
             # Idempotency: the self-check discipline may re-record a question
             # that is already on the sheet (mock exam 6 produced 20 cards for
             # 10 questions). Same-question re-records update nothing and just
-            # confirm — the card already counts.
+            # confirm — the card already counts. Compared on a whitespace- and
+            # case-normalised form: the model writes the same question with or
+            # without spaces ("Q1: 攻击者 IP" vs "Q1:攻击者IP"), and an exact
+            # string match let that through as a duplicate card.
+            wanted = _normalize_question(question)
             existing = next(
                 (
                     f
                     for f in getattr(state, "findings", []) or []
-                    if str(getattr(f, "vuln_type", "")) == "ir-answer"
-                    and str(getattr(f, "title", "")) == question
+                    if str(getattr(f, "vuln_type", "")) == ANSWER_CARD_VULN_TYPE
+                    and _normalize_question(getattr(f, "title", "")) == wanted
                 ),
                 None,
             )
             if existing is not None:
                 if evidence and evidence not in str(getattr(existing, "evidence", "")):
                     existing.evidence = (str(getattr(existing, "evidence", "")) + " | " + evidence).strip(" |")
+                    # The merge mutates a finding in place; without this the new
+                    # evidence only lands at the NEXT unrelated checkpoint.
+                    notify = getattr(state, "_notify_checkpoint", None)
+                    if callable(notify):
+                        notify("finding_updated")
                 finding_written = f"answer already recorded ({question}) — card confirmed, no duplicate"
             else:
                 finding = VulnerabilityFinding(
                     title=question,
                     severity="Info",
-                    vuln_type="ir-answer",
+                    vuln_type=ANSWER_CARD_VULN_TYPE,
                     description=answer,
                     evidence=evidence or f"blackboard {node.id}",
                     target=str(getattr(getattr(agent, "session_state", None), "target", "") or ""),

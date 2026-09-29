@@ -96,3 +96,48 @@ class TestRecordAnswer:
         assert "工具执行错误" not in result
         assert len(findings) == 1
         assert findings[0].title.startswith("Q1")
+
+    async def test_same_question_with_different_spacing_is_idempotent(self):
+        """Round-10 #4: the model writes the same question with/without spaces; the
+        previous exact ``title == question`` match created a second card, and the
+        evidence merge mutated the card without reaching a checkpoint."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+
+        findings = []
+        notifications = []
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+            _notify_checkpoint=lambda reason: notifications.append(reason),
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+        first = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "Q1: 攻击者 IP 是什么？",
+                "answer": "203.0.113.77",
+                "evidence": "ev-1",
+            },
+        )
+        assert "finding recorded" in first
+        # Identical question once whitespace is folded away.
+        second = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "Q1:攻击者IP是什么？",
+                "answer": "203.0.113.77",
+                "evidence": "ev-2",
+            },
+        )
+        assert "already recorded" in second, second
+        assert len(findings) == 1
+        assert "ev-2" in findings[0].evidence
+        assert "finding_updated" in notifications, "the evidence merge did not checkpoint"
