@@ -29,6 +29,12 @@ SCRIPTS = [
     REPO_ROOT / "scripts" / "ab" / "cold_warm_pair_round2.py",
     REPO_ROOT / "scripts" / "ab" / "negative_control.py",
 ]
+#: Every ab script, auto-discovered for the F1 prologue guard. The release/target rules
+#: below stay on the explicit three (a tier/parse script has no release step), but the
+#: prologue-execution check must cover a NEW script automatically: round-10 finding #3,
+#: `model_tier_pair.py` landed with no F1 guard because the list was hard-coded.
+AB_DIR = REPO_ROOT / "scripts" / "ab"
+AB_SCRIPTS = sorted(p for p in AB_DIR.glob("*.py") if not p.name.startswith("__"))
 
 
 def _tree(path: Path) -> ast.Module:
@@ -88,6 +94,22 @@ def _looks_like_machine_path(text: str) -> bool:
     return text.startswith(("/home/", "/Users/", "C:\\"))
 
 
+def _exec_module_prologue(path: Path) -> dict:
+    """Execute a script's module-level constant prologue and return its namespace.
+
+    Imports, top-level assignments and the Path arithmetic between them run for real;
+    every function body becomes ``pass`` and a trailing module-level ``asyncio.run(main())``
+    is dropped, so a genuine ``NameError``/``AttributeError`` at module scope fails here
+    while the drill (which talks to the platform) is never reached.
+    """
+    tree = _tree(path)
+    stripped = ast.Module(body=_prologue_only(tree), type_ignores=[])
+    code = compile(ast.fix_missing_locations(stripped), str(path), "exec")
+    namespace = {"__file__": str(path), "__name__": "ab_module_prologue_probe"}
+    exec(code, namespace)  # noqa: S102 - executing THIS repo's own constants is the point
+    return namespace
+
+
 @pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
 class TestTheDrillCannotLeaveAContainerBehind:
     def test_the_module_level_prologue_actually_executes(self, path):
@@ -99,18 +121,8 @@ class TestTheDrillCannotLeaveAContainerBehind:
           name resolution, which happens at execution;
         * the static checks in this file only inspect `ast.unparse`d text, and
           `test_root_is_not_a_hard_coded_machine_path` accepted anything containing "REPO".
-
-        So this executes the module's constant prologue: imports, top-level assignments and
-        the Path arithmetic between them, with every function BODY replaced by `pass` and the
-        trailing `asyncio.run(main())` dropped. That resolves the real names (a genuine
-        `NameError`/`AttributeError` at module scope fails here) while never reaching the
-        drill -- main() is the only thing that talks to the platform, and it is not called.
         """
-        tree = _tree(path)
-        stripped = ast.Module(body=_prologue_only(tree), type_ignores=[])
-        code = compile(ast.fix_missing_locations(stripped), str(path), "exec")
-        namespace = {"__file__": str(path), "__name__": "ab_module_prologue_probe"}
-        exec(code, namespace)  # noqa: S102 - executing THIS repo's own constants is the point
+        namespace = _exec_module_prologue(path)
         assert "REPO" in namespace
         assert Path(namespace["REPO"]) == REPO_ROOT
 
@@ -176,3 +188,20 @@ class TestTheDrillCannotLeaveAContainerBehind:
             "record the platform's view of the env after release, as the other drills do"
         )
         assert "released" in source, "and record release()'s own verdict"
+
+
+@pytest.mark.parametrize("path", AB_SCRIPTS, ids=lambda p: p.name)
+class TestEveryAbScriptsPrologueExecutes:
+    """The F1 guard must cover every ab script, including ones added later.
+
+    Round-10 finding #3: the F1 prologue check ran only over a hard-coded three-file
+    list, so ``model_tier_pair.py`` landed with no F1 guard. Discovery from the
+    directory closes the "remember to add the new script" gap for this check.
+    """
+
+    def test_module_level_prologue_executes(self, path):
+        _exec_module_prologue(path)
+
+
+def test_the_tier_script_is_discovered():
+    assert "model_tier_pair.py" in {p.name for p in AB_SCRIPTS}, AB_SCRIPTS
