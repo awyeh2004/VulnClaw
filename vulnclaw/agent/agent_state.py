@@ -16,6 +16,8 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from vulnclaw.utils.redaction import redact_credentials
+
 DEFAULT_EVIDENCE_PREVIEW_CHARS = 3500
 DEFAULT_EVIDENCE_VIEW_CHARS = 0
 FULL_EVIDENCE_RANGE_END = 2**63 - 1
@@ -480,7 +482,7 @@ class AgentState(BaseModel):
         status: int = 0,
         preview_chars: int = DEFAULT_EVIDENCE_PREVIEW_CHARS,
     ) -> EvidenceRecord:
-        raw = str(output or "")
+        raw = redact_credentials(str(output or ""))
         args = dict(arguments or {})
         key_args = json.dumps(args, ensure_ascii=False, sort_keys=True)[:500]
         content_hash = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:24]
