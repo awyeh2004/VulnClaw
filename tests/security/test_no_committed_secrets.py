@@ -24,11 +24,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Files whose SECRET-LOOKING strings are deliberate fixtures, with the reason.
+#: Only REPO-TRACKED files belong here: this map is checked with `.exists()`, so an entry
+#: for a local, untracked scratch file (the old `AUDIT-FINDINGS.md`) made the suite depend
+#: on the author's machine. Removed with that file.
 FIXTURE_ALLOWLIST = {
     "tests/test_codescan.py": "fixtures for the secret scanner under test",
     "tests/agent/test_recon_tools.py": "sample `AKIA…`/JWT strings for recon output parsing",
     "tests/skills/test_skills.py": "a sample JWT for skill-output parsing",
-    "AUDIT-FINDINGS.md": "the audit report quotes the finding it describes",
 }
 
 SECRET_PATTERNS = {
