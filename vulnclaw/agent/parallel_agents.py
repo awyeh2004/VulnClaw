@@ -241,7 +241,10 @@ async def _run_surface_wave(
 def merge_session_state(parent: SessionState, child: SessionState) -> None:
     """Merge child findings, recon data, notes, and steps into a parent session."""
     for finding in child.findings:
-        parent.add_finding(finding)
+        # Answer cards all share finding_id "ir-answer" and similar evidence; the default
+        # dedup would silently drop every card after the first on merge (blackboard itself
+        # writes them with skip_dedup for the same reason).
+        parent.add_finding(finding, skip_dedup=is_answer_card(finding))
 
     for key, value in child.recon_data.items():
         existing = parent.recon_data.get(key)

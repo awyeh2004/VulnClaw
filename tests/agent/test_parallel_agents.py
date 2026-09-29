@@ -6,7 +6,11 @@ import pytest
 
 from vulnclaw.agent.agent_graph import AgentGraph, AgentOutcome, AgentStatus, FanOutCaps
 from vulnclaw.agent.context import SessionState, VulnerabilityFinding
-from vulnclaw.agent.parallel_agents import extract_attack_surfaces, run_parallel_pentest
+from vulnclaw.agent.parallel_agents import (
+    extract_attack_surfaces,
+    merge_session_state,
+    run_parallel_pentest,
+)
 
 
 class FakeAgent:
@@ -200,3 +204,24 @@ def test_extract_attack_surfaces_skips_answer_cards():
     )
 
     assert extract_attack_surfaces(state) == []
+
+
+def test_merge_session_state_keeps_adjacent_answer_cards():
+    """All answer cards share finding_id "ir-answer"; a plain merge dedup would keep only
+    the first, silently losing the rest of a child's answer sheet."""
+    parent = SessionState(target="127.0.0.1:2224")
+    child = SessionState(target="127.0.0.1:2224")
+    for i in range(3):
+        child.add_finding(
+            VulnerabilityFinding(
+                title=f"Q{i + 1}: 问题",
+                severity="Info",
+                vuln_type="ir-answer",
+                description=f"answer-{i}",
+            ),
+            skip_dedup=True,
+        )
+
+    merge_session_state(parent, child)
+
+    assert len(parent.findings) == 3
