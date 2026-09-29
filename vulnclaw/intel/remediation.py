@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from vulnclaw.config.domain_models import is_answer_card
+
 logger = logging.getLogger(__name__)
 
 
@@ -534,6 +536,8 @@ def _findings_from_agent(agent: Any) -> List[Dict[str, Any]]:
     findings = getattr(session, "findings", None) or []
     out: List[Dict[str, Any]] = []
     for f in findings:
+        if is_answer_card(f):
+            continue
         if isinstance(f, dict):
             out.append(f)
         elif hasattr(f, "model_dump"):
@@ -556,6 +560,7 @@ async def remediation_advice_tool(agent: Any, args: Dict[str, Any]) -> str:
                          "description": query}]
         else:
             findings = _findings_from_agent(agent)
+    findings = [f for f in findings if not is_answer_card(f)]
     if not findings:
         return (
             "[remediation_advice] No findings to remediate. Pass a 'findings' array, "

@@ -104,3 +104,22 @@ async def test_tool_no_matching_mappings():
         agent=None, args={"findings": [{"title": "nothing relevant", "severity": "Info"}]}
     )
     assert "No control mappings" in out
+
+
+@pytest.mark.asyncio
+async def test_tool_ignores_answer_cards():
+    """Round-10 #1 follow-up: an IR answer card is not a control-mappable finding."""
+    class _Card:
+        vuln_type = "ir-answer"
+
+        def model_dump(self):
+            return {"title": "Q1", "severity": "Info", "vuln_type": "ir-answer"}
+
+    class _Session:
+        findings = [_Card()]
+
+    class _Agent:
+        session_state = _Session()
+
+    out = await compliance_map_tool(agent=_Agent(), args={})
+    assert out.startswith("[compliance_map] No findings")

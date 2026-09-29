@@ -71,3 +71,22 @@ async def test_tool_session_fallback():
 
     out = await remediation_advice_tool(agent=_A(), args={})
     assert "Remediation Report" in out
+
+
+@pytest.mark.asyncio
+async def test_tool_ignores_answer_cards():
+    """Round-10 #1 follow-up: an IR answer card warrants no remediation."""
+    class _Card:
+        vuln_type = "ir-answer"
+
+        def model_dump(self):
+            return {"title": "Q1", "severity": "Info", "vuln_type": "ir-answer"}
+
+    class _S:
+        findings = [_Card()]
+
+    class _A:
+        session_state = _S()
+
+    out = await remediation_advice_tool(agent=_A(), args={})
+    assert out.startswith("[remediation_advice] No findings")

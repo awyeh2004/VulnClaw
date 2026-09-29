@@ -79,3 +79,22 @@ async def test_tool_session_fallback():
 
     out = await attack_map_tool(agent=_A(), args={})
     assert "MITRE ATT&CK" in out
+
+
+@pytest.mark.asyncio
+async def test_tool_ignores_answer_cards():
+    """Round-10 #1 follow-up: an IR answer card is not a finding to map to ATT&CK."""
+    class _Card:
+        vuln_type = "ir-answer"
+
+        def model_dump(self):
+            return {"title": "Q1: 攻击者 IP", "severity": "Info", "vuln_type": "ir-answer"}
+
+    class _S:
+        findings = [_Card()]
+
+    class _A:
+        session_state = _S()
+
+    out = await attack_map_tool(agent=_A(), args={})
+    assert out.startswith("[attack_map] No findings")

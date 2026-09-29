@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from vulnclaw.config.domain_models import is_answer_card
+
 
 class Framework(str, Enum):
     PCI_DSS = "PCI DSS v4.0"
@@ -381,6 +383,8 @@ def _findings_from_agent(agent: Any) -> list[dict[str, Any]]:
     findings = getattr(session, "findings", None) or []
     out: list[dict[str, Any]] = []
     for f in findings:
+        if is_answer_card(f):
+            continue
         if isinstance(f, dict):
             out.append(f)
         elif hasattr(f, "model_dump"):
@@ -399,6 +403,7 @@ async def compliance_map_tool(agent: Any, args: dict[str, Any]) -> str:
     findings = args.get("findings")
     if not isinstance(findings, list) or not findings:
         findings = _findings_from_agent(agent)
+    findings = [f for f in findings if not is_answer_card(f)]
     if not findings:
         return (
             "[compliance_map] No findings to map. Pass a 'findings' array "

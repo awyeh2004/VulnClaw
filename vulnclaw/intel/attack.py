@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from vulnclaw import __version__
+from vulnclaw.config.domain_models import is_answer_card
 
 # ── ATT&CK Data Models ──────────────────────────────────────────────────────
 
@@ -1036,6 +1037,8 @@ def _findings_from_agent(agent: Any) -> List[Dict[str, Any]]:
     findings = getattr(session, "findings", None) or []
     out: List[Dict[str, Any]] = []
     for f in findings:
+        if is_answer_card(f):
+            continue
         if isinstance(f, dict):
             out.append(f)
         elif hasattr(f, "model_dump"):
@@ -1052,6 +1055,7 @@ async def attack_map_tool(agent: Any, args: Dict[str, Any]) -> str:
     findings = args.get("findings")
     if not isinstance(findings, list) or not findings:
         findings = _findings_from_agent(agent)
+    findings = [f for f in findings if not is_answer_card(f)]
     tool_history = args.get("tool_history")
     if not isinstance(tool_history, list):
         tool_history = None
