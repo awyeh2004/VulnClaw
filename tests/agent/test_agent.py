@@ -1631,10 +1631,14 @@ class TestAgentCoreLoop:
         class DummyAgent:
             class _DummyConfig:
                 class _DummyLLM:
-                    model = "deepseek-chat"
+                    # A plain OpenAI-compatible provider. `deepseek` used to stand in
+                    # here, but it now forwards reasoning_effort (config/llm_utils DS
+                    # branch, 5ae4e27), so it is no longer a "keep the legacy fields,
+                    # add nothing" example.
+                    model = "moonshot-v1-8k"
                     max_tokens = 512
                     temperature = 0.2
-                    provider = "deepseek"
+                    provider = "moonshot"
                     reasoning_effort = "high"
 
                 llm = _DummyLLM()
