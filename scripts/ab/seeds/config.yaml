@@ -1,0 +1,214 @@
+competition:
+  allow_flag_submission: true
+  easy_first: true
+  enabled: true
+  expose_legacy_tool_names: false
+  predownload_attachments: true
+  slow_llm_threshold_s: 5.0
+  stall_turns: 8
+gcs:
+  access_key: ''
+  base_url: https://pro.dasctf.com
+  tools_enabled: false
+llm:
+  api_key: ''
+  api_keys: []
+  auth_mode: static
+  base_url: https://api.deepseek.com/v1
+  chatgpt_auto_proxy: false
+  max_context_tokens: 128000
+  max_tokens: 8192
+  model: deepseek-flash
+  oauth_client_id: ''
+  oauth_token_url: ''
+  provider: ds
+  provider_keys:
+    ds: ''
+    zhipu: ''
+  reasoning_effort: low
+  route_enabled: false
+  routes: []
+  temperature: 0.1
+  thinking_disabled: false
+  vision_model: deepseek-v4-flash-vision-exp
+mcp:
+  servers:
+    burp:
+      description: Burp Suite proxy integration for HTTP interception via SSE
+      enabled: true
+      name: burp
+      priority: 0
+      transport:
+        args: null
+        command: null
+        env: null
+        startup_timeout: 30000
+        tool_timeout: 300000
+        type: sse
+        url: http://127.0.0.1:9876
+    chrome-devtools:
+      description: Browser automation for Web app pentest
+      enabled: true
+      name: chrome-devtools
+      priority: 0
+      transport:
+        args:
+        - -y
+        - chrome-devtools-mcp@latest
+        command: npx
+        env: null
+        startup_timeout: 30000
+        tool_timeout: 300000
+        type: stdio
+        url: null
+    fetch:
+      description: HTTP request tool for API testing & web interaction
+      enabled: true
+      name: fetch
+      priority: 0
+      transport:
+        args:
+        - mcp-server-fetch
+        command: uvx
+        env: null
+        startup_timeout: 30000
+        tool_timeout: 300000
+        type: stdio
+        url: null
+    memory:
+      description: Context memory & session state persistence
+      enabled: true
+      name: memory
+      priority: 0
+      transport:
+        args:
+        - -y
+        - '@modelcontextprotocol/server-memory'
+        command: npx
+        env: null
+        startup_timeout: 30000
+        tool_timeout: 300000
+        type: stdio
+        url: null
+platforms: {}
+recon:
+  dir_max_requests: 1500
+  dir_wordlist_path: ''
+  fofa_email: ''
+  fofa_key: ''
+  http_timeout: 15.0
+  hunter_key: ''
+  js_max_files: 30
+  max_concurrency: 20
+  quake_key: ''
+  shodan_key: ''
+  space_size: 100
+  zerozone_key: ''
+  zoomeye_key: ''
+remote:
+  command_timeout_s: 60.0
+  connect_timeout_s: 15.0
+  hosts: {}
+  max_output_chars: 60000
+safety:
+  approval_timeout_seconds: 300
+  enable_python_execute: true
+  permission_mode: full_access
+  python_execute_audit_enabled: true
+  python_execute_max_lines: 300
+  python_execute_max_output_chars: 0
+  python_execute_mode: trusted-local
+  python_execute_restricted: false
+  python_execute_show_warning: true
+  tool_max_concurrent: 8
+  tool_parallel: true
+  trusted_commands: []
+session:
+  auto_save: true
+  context_auto_compact: false
+  context_compact_target_ratio: 0.55
+  context_compact_trigger_ratio: 0.9
+  context_compaction_audit_enabled: true
+  context_compaction_mode: structured
+  context_hot_max_messages: 48
+  context_hot_max_tokens: 32000
+  context_output_reserve_tokens: 0
+  context_recent_message_groups: 12
+  context_summary_max_tokens: 3500
+  engine: solve
+  escalation_max_level: 4
+  evidence_min_report_level: L4
+  language: auto
+  max_rounds: 40
+  memory_archive_max_bytes: 67108864
+  memory_archive_max_files: 8
+  memory_search_max_chars: 6000
+  output_dir: E:\vulnclaw\work
+  persistent_auto_report: true
+  persistent_max_cycles: 10
+  persistent_rounds_per_cycle: 100
+  plugin_default_timeout: 10
+  plugin_max_requests_per_target: 30
+  plugin_runtime_enabled: true
+  poc_language: python
+  reasoning_state_enabled: true
+  reflexion_enabled: true
+  reflexion_max_same_vuln_fails: 2
+  reflexion_max_total_no_progress: 5
+  repeat_tool_limit_default: 8
+  repeat_tool_limits:
+    brute_force_login: 2
+    dir_enum: 2
+    fetch: 50
+    http_probe_batch: 2
+    js_recon: 2
+    python_execute: 30
+    runtime_diff_probe: 2
+    shell_command: 30
+    source_extract: 2
+    space_search: 2
+    subdomain_enum: 2
+  repl_parallel_agents: 3
+  repl_parallel_depth: 1
+  repl_parallel_enabled: true
+  repl_parallel_surface_limit: 20
+  repl_parallel_worker_rounds: 3
+  report_format: markdown
+  runs_dir: null
+  show_thinking: false
+  solve_auto_compact: false
+  solve_auto_report: true
+  solve_compact_trigger_ratio: 0.9
+  solve_max_directions: 3
+  solve_max_model_tokens: 6000000
+  solve_max_parallel: 1
+  solve_max_steps: 240
+  solve_max_tool_rounds: 12
+  solve_report_show: true
+  solve_work_root: E:\vulnclaw\work
+  stale_rounds_threshold: 5
+  tui_scope_allow_actions: ''
+  tui_scope_block_actions: ''
+  tui_scope_blocked_host: ''
+  tui_scope_blocked_path: ''
+  tui_scope_mode: standard
+  tui_scope_only_host: ''
+  tui_scope_only_path: ''
+  tui_scope_only_port: ''
+  tui_scope_resume: true
+subagent:
+  enabled: true
+  finalization_timeout_seconds: 120.0
+  group_timeout_seconds: 1200.0
+  leaf_max_tool_rounds: 4
+  leaf_timeout_seconds: 900.0
+  max_background_groups: 3
+  max_concurrent_leaf_per_group: 3
+  max_concurrent_leaf_total: 4
+  max_leaf_per_group: 6
+  max_model_tokens_per_group: 1000000
+  max_model_tokens_per_solve: 8000000
+  max_steps_per_leaf: 12
+  max_waves_per_group: 3
+  merge_max_evidence_per_group: 48
+  result_max_chars: 16000
