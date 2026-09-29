@@ -140,6 +140,22 @@ class EvidenceRef(BaseModel):
     )
 
 
+#: ``vuln_type`` marker for IR answer-sheet cards. ``blackboard_record_answer``
+#: stores the answer sheet as Info / always-pending findings so it lives in the
+#: finding store, but an answer card is NOT a vulnerability: report / SARIF /
+#: verify-pending / ``--fail-on`` consumers must skip these, or a question that
+#: merely names a class (e.g. "漏洞名称") is promoted to a verified finding and
+#: printed in the report (round-10 finding #1).
+ANSWER_CARD_VULN_TYPE = "ir-answer"
+
+
+def is_answer_card(finding: Any) -> bool:
+    """Whether ``finding`` (a finding model or a raw finding dict) is an answer card."""
+    if isinstance(finding, dict):
+        return str(finding.get("vuln_type") or "") == ANSWER_CARD_VULN_TYPE
+    return str(getattr(finding, "vuln_type", "") or "") == ANSWER_CARD_VULN_TYPE
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 

@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from vulnclaw.agent.subagent.models import SubagentContext, get_subagent_context
+from vulnclaw.config.domain_models import is_answer_card
 
 if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
@@ -174,6 +175,11 @@ def sync_verified_findings(
     owners = owner_ids(session, evidence_ids)
     promoted: list[str] = []
     for finding in getattr(session, "findings", []) or []:
+        if is_answer_card(finding):
+            # An IR answer card is not a vulnerability: it always sits at pending,
+            # and its title/class can name a real class ("漏洞名称" -> rce/sqli), so
+            # promoting it here would print the question as a finding (round-10 #1).
+            continue
         if getattr(finding, "verified", False) or str(
             getattr(finding, "verification_status", "")
         ).lower() in {"verified", "rejected"}:

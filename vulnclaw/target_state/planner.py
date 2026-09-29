@@ -6,7 +6,7 @@ from typing import Any
 # 修改者: Nyaecho
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V3 违规 — 叶子类型已移至 config/domain_models.py。
-from vulnclaw.config.domain_models import PentestPhase
+from vulnclaw.config.domain_models import PentestPhase, is_answer_card
 
 
 def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
@@ -24,8 +24,16 @@ def build_resume_plan(raw: dict[str, Any]) -> dict[str, Any]:
     low_value_rounds = int(runtime_meta.get("rounds_without_progress", 0) or 0)
     current_attack_path = runtime_meta.get("current_attack_path")
 
-    pending = [f for f in findings if f.get("verification_status", "pending") == "pending"]
-    verified = [f for f in findings if f.get("verification_status") == "verified"]
+    pending = [
+        f
+        for f in findings
+        if f.get("verification_status", "pending") == "pending" and not is_answer_card(f)
+    ]
+    verified = [
+        f
+        for f in findings
+        if f.get("verification_status") == "verified" and not is_answer_card(f)
+    ]
 
     pending_sorted = sorted(
         pending,

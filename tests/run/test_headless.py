@@ -27,9 +27,15 @@ from vulnclaw.headless import (
 class _Finding:
     """Minimal stand-in for VulnerabilityFinding for exit-code classification."""
 
-    def __init__(self, verified: bool = False, verification_status: str = "pending"):
+    def __init__(
+        self,
+        verified: bool = False,
+        verification_status: str = "pending",
+        vuln_type: str = "",
+    ):
         self.verified = verified
         self.verification_status = verification_status
+        self.vuln_type = vuln_type
 
 
 class _Session:
@@ -103,6 +109,25 @@ class TestClassifyFindings:
     def test_empty_session(self):
         c = classify_findings(_Session([]))
         assert not c.has_verified and not c.has_candidates
+
+    def test_answer_cards_are_not_candidates(self):
+        """Round-10 #1: an IR answer-sheet card is Info/pending but not a vuln, so a
+        clean answer-only run must not exit 3 under ``--fail-on any``."""
+        session = _Session(
+            [
+                _Finding(vuln_type="ir-answer"),
+                _Finding(vuln_type="ir-answer"),
+                _Finding(verified=False),  # a real candidate
+            ]
+        )
+        c = classify_findings(session)
+        assert c.verified == 0
+        assert c.candidates == 1
+        assert determine_exit_code(c, "any") == EXIT_CANDIDATES
+
+    def test_an_answer_only_session_is_clean(self):
+        session = _Session([_Finding(vuln_type="ir-answer")])
+        assert determine_exit_code(classify_findings(session), "any") == EXIT_CLEAN
 
 
 class TestExitCodeContract:

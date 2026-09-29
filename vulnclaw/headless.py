@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from vulnclaw.config.domain_models import is_answer_card
+
 # ── Exit-code contract ──────────────────────────────────────────────
 #
 #   0  ran clean, nothing confirmed          → CI pass
@@ -199,6 +201,11 @@ def classify_findings(session_state: Any) -> FindingClassification:
     verified = 0
     candidates = 0
     for finding in findings:
+        if is_answer_card(finding):
+            # IR answer cards are Info / always-pending and are not vulnerabilities;
+            # counting them as candidates made a clean answer-only run exit 3 under
+            # ``--fail-on any`` (round-10 finding #1).
+            continue
         if getattr(finding, "verified", False):
             verified += 1
         elif getattr(finding, "verification_status", "pending") != "rejected":
