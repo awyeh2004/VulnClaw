@@ -156,6 +156,21 @@ def is_answer_card(finding: Any) -> bool:
     return str(getattr(finding, "vuln_type", "") or "") == ANSWER_CARD_VULN_TYPE
 
 
+def answer_card_number(title_or_question: str) -> str:
+    """Extract 'Q<n>' from an answer-card title/question, '' if absent.
+
+    NFKC-folded first: the model drifts between full- and half-width
+    punctuation ('：' vs ':', 'Ｑ' vs 'Q'), and idempotency/merge guards that
+    match by number must survive that drift (round-11 finding #3).
+    """
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", str(title_or_question or ""))
+    m = re.match(r"\s*(Q\d+)\b", normalized)
+    return m.group(1) if m else ""
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 

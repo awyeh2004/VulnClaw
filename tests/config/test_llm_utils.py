@@ -67,12 +67,59 @@ class TestOtherProviderPathsUnchanged:
     def test_plain_openai_model_has_no_reasoning_field(self):
         assert "reasoning_effort" not in _kwargs("high", provider="openai", model="gpt-4o")
 
-    def test_env_override_is_the_tier_switch(self, monkeypatch):
+    def test_env_override_is_the_tier_switch(self, monkeypatch, tmp_path):
+        """The env tier switch must override the config FILE's reasoning_effort.
+
+        Round-11 finding #2: the previous version monkeypatched the CONFIG_DIR
+        env var, but settings.CONFIG_DIR/CONFIG_FILE are import-time constants —
+        the patch did nothing, the test read the developer's real config.yaml,
+        and only passed because the env override outranks the file. Now the
+        file lives in tmp_path (patched via setattr, which load_config DOES
+        honor) and asserts the file value loses to the env value explicitly.
+        """
+        import vulnclaw.config.settings as settings_mod
+
+        config_file = tmp_path / "config.yaml"
+        # the FILE says deep; the env says none — env must win
+        config_file.write_text(
+            "llm:\n"
+            "  provider: ds\n"
+            "  model: deepseek-flash\n"
+            "  base_url: https://api.deepseek.com/v1\n"
+            "  api_key: sk-test\n"
+            "  reasoning_effort: high\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_mod, "CONFIG_FILE", config_file)
+        monkeypatch.setenv("VULNCLAW_LLM_REASONING_EFFORT", "none")
+
         from vulnclaw.config.settings import load_config
 
-        monkeypatch.setenv("VULNCLAW_LLM_REASONING_EFFORT", "none")
-        monkeypatch.setenv("VULNCLAW_CONFIG_DIR", r"D:\GitClone\VulnClaw\VulnClaw\.test-tmp\tier-cfg\fast")
         cfg = load_config()
+        assert cfg.llm.provider == "ds", "tmp config file must actually be loaded"
         assert cfg.llm.reasoning_effort == "none"
         kw = build_chat_completion_kwargs(cfg.llm, [{"role": "user", "content": "x"}])
         assert "reasoning_effort" not in kw  # fast arm sends no reasoning field
+
+    def test_config_file_value_used_without_env(self, monkeypatch, tmp_path):
+        import vulnclaw.config.settings as settings_mod
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "llm:\n"
+            "  provider: ds\n"
+            "  model: deepseek-flash\n"
+            "  base_url: https://api.deepseek.com/v1\n"
+            "  api_key: sk-test\n"
+            "  reasoning_effort: high\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(settings_mod, "CONFIG_FILE", config_file)
+        monkeypatch.delenv("VULNCLAW_LLM_REASONING_EFFORT", raising=False)
+
+        from vulnclaw.config.settings import load_config
+
+        cfg = load_config()
+        assert cfg.llm.reasoning_effort == "high"
+        kw = build_chat_completion_kwargs(cfg.llm, [{"role": "user", "content": "x"}])
+        assert kw["reasoning_effort"] == "high"  # deep arm sends the field

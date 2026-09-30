@@ -243,7 +243,20 @@ def merge_session_state(parent: SessionState, child: SessionState) -> None:
     for finding in child.findings:
         # Answer cards all share finding_id "ir-answer" and similar evidence; the default
         # dedup would silently drop every card after the first on merge (blackboard itself
-        # writes them with skip_dedup for the same reason).
+        # writes them with skip_dedup for the same reason). skip_dedup also means a
+        # second (parent, child) merge would copy the cards again, so same-number
+        # cards already on the parent are skipped instead (round-11 finding #5).
+        if is_answer_card(finding):
+            from vulnclaw.config.domain_models import answer_card_number
+
+            number = answer_card_number(str(getattr(finding, "title", "") or ""))
+            already = any(
+                is_answer_card(f)
+                and answer_card_number(str(getattr(f, "title", "") or "")) == number
+                for f in parent.findings
+            ) if number else False
+            if already:
+                continue
         parent.add_finding(finding, skip_dedup=is_answer_card(finding))
 
     for key, value in child.recon_data.items():

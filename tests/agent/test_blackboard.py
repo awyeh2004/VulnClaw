@@ -141,3 +141,33 @@ class TestRecordAnswer:
         assert len(findings) == 1
         assert "ev-2" in findings[0].evidence
         assert "finding_updated" in notifications, "the evidence merge did not checkpoint"
+
+
+    async def test_fullwidth_punctuation_stays_one_card(self):
+        """Round-11 finding #3: NFKC folding must catch the width variants
+        ('Q1：攻击者IP？' vs 'Q1:攻击者IP') or the duplicate channel reopens."""
+        import asyncio
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+
+        findings = []
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+        half = await dispatch_blackboard_tool(
+            agent, "blackboard_record_answer",
+            {"question": "Q1: 攻击者 IP 是什么？", "answer": "203.0.113.77"},
+        )
+        full = await dispatch_blackboard_tool(
+            agent, "blackboard_record_answer",
+            {"question": "Ｑ１：攻击者ＩＰ是什么？", "answer": "203.0.113.77"},
+        )
+        assert "already recorded" in full, full
+        assert len(findings) == 1

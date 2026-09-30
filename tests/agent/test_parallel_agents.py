@@ -225,3 +225,49 @@ def test_merge_session_state_keeps_adjacent_answer_cards():
     merge_session_state(parent, child)
 
     assert len(parent.findings) == 3
+
+
+def test_merge_twice_does_not_duplicate_answer_cards():
+    """Round-11 finding #5: skip_dedup means a second (parent, child) merge
+    would copy the answer cards again — same-number cards already on the
+    parent must be skipped."""
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.parallel_agents import merge_session_state
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    parent_findings: list = []
+    seen_ids: set = set()
+
+    def fake_add_finding(finding, skip_dedup=False):
+        # mirror SessionState.add_finding's first (exact-id) dedup layer
+        if not skip_dedup and finding.finding_id in seen_ids:
+            return False
+        seen_ids.add(finding.finding_id)
+        parent_findings.append(finding)
+        return True
+
+    parent = SimpleNamespace(
+        findings=parent_findings, recon_data={}, notes={}, executed_steps=[],
+        add_finding=fake_add_finding,
+        _notify_checkpoint=lambda *a, **k: None,
+    )
+    card_q1 = VulnerabilityFinding(title="Q1: 攻击者 IP", vuln_type="ir-answer",
+                                   description="203.0.113.77")
+    card_q2 = VulnerabilityFinding(title="Q2: 首次入侵时间", vuln_type="ir-answer",
+                                   description="2026-09-19 03:41")
+    real_vuln = VulnerabilityFinding(title="RCE on /api", vuln_type="RCE",
+                                     description="real vuln")
+    child = SimpleNamespace(findings=[card_q1, card_q2, real_vuln],
+                            recon_data={}, notes={}, executed_steps=[],
+                            step_records=[])
+
+    merge_session_state(parent, child)
+    first = len(parent_findings)
+    merge_session_state(parent, child)  # same parent+child merged a second time
+
+    cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
+    assert len(cards) == 2, f"duplicated on re-merge: {len(cards)} cards"
+    assert first == 3  # 2 cards + 1 real vuln
+    # the plain vulnerability keeps default dedup semantics (skipped on re-merge)
+    assert parent_findings.count(real_vuln) == 1

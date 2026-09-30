@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vulnclaw.agent.agent_state import EvidenceRecord, extract_flags, one_line
+from vulnclaw.utils.redaction import redact_credentials
 
 if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
@@ -232,6 +233,14 @@ def after_tool_call(
     state = _agent_state(agent)
     if state is None:
         return signal
+
+    # Round-11 finding #1: the raw output is redacted for the evidence store
+    # (remember_tool_result), but it ALSO feeds the extractors below, whose
+    # output lands in state files (pinned_facts / progress_signals /
+    # tool_health) that the redaction never covered — a credential inside a
+    # URL line survived verbatim in current.json. Redact once at the entry so
+    # every extractor sees the masked text.
+    raw = redact_credentials(raw)
 
     error_text = str(error or "").strip() or _first_failure_line(raw)
     state.record_tool_health(

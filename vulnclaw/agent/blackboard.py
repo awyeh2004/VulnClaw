@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -712,13 +713,15 @@ def _evidence_content_for(agent: "AgentContext", ref: str) -> str:
 
 
 def _normalize_question(text: str) -> str:
-    """Whitespace- and case-folded question text for answer-card idempotency.
+    """NFKC-folded question text for answer-card idempotency.
 
-    The model re-records the same question with different spacing
-    ("Q1: 攻击者 IP 是什么？" vs "Q1:攻击者IP"), and the previous exact string
-    comparison let that through as a second card (round-10 finding #4).
+    NFKC handles the width variants the model drifts between — full-width
+    colon/question-mark/Q ('：' '？' 'Ｑ' → ':' '?' 'Q') — on top of the
+    whitespace and case folding (round-11 finding #3: without it, "Q1：攻击者
+    IP？" vs "Q1:攻击者IP" still produced two cards).
     """
-    return re.sub(r"\s+", "", str(text or "")).lower()
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    return re.sub(r"\s+", "", normalized).lower()
 
 
 def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
