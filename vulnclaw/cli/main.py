@@ -1113,7 +1113,13 @@ def _run_repl() -> None:
 
             except KeyboardInterrupt:
                 if is_auto_mode:
-                    auto_mode_active = False
+                    # KEEP auto mode active after an interrupt (round-11 UX
+                    # finding: clearing the flag here meant the agent stopped
+                    # self-resuming after every Ctrl+C — the operator had to
+                    # re-trigger autonomous mode by hand each time). Sticky
+                    # auto stays on; an empty Enter resumes the in-flight run
+                    # via _repl_has_in_progress_run, and "exit auto"/"manual"
+                    # remains the explicit way out.
                     console.print()
                     console.print(_("cli.interrupted"))
                     console.print(_("cli.auto_resume_hint"))
