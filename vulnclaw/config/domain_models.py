@@ -171,6 +171,40 @@ def answer_card_number(title_or_question: str) -> str:
     return m.group(1) if m else ""
 
 
+def normalize_answer_question(text: str) -> str:
+    """Canonical identity key for an answer card: NFKC + whitespace-stripped +
+    case-folded question text.
+
+    This is THE single identity mechanism for answer-card idempotency and
+    merge dedup (round-12 finding F1): matching by question NUMBER alone
+    silently dropped same-number/different-question cards together with their
+    evidence on merge, while matching by raw title let width/punctuation
+    drift reopen the duplicate channel. Every consumer — record_answer
+    idempotency and merge_session_state — must key on this function.
+    """
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    return re.sub(r"\s+", "", normalized).lower()
+
+
+def answer_card_evidence_merge(existing_evidence: str, new_evidence: str) -> str:
+    """Merge new evidence into an existing card's evidence, dropping duplicates.
+
+    Returns the combined string; empty/new-identical inputs are no-ops. Used
+    by both record_answer re-records and cross-session merges so incremental
+    evidence is never dropped with the card.
+    """
+    existing = str(existing_evidence or "").strip()
+    new = str(new_evidence or "").strip()
+    if not new or new in existing:
+        return existing
+    if not existing:
+        return new
+    return f"{existing} | {new}"
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 

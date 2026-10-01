@@ -386,6 +386,9 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
         # Model-tier switch: 'fast' tier maps to 'none' (DeepSeek omits the
         # field entirely when the effort is 'none'), 'deep' tier to 'high'.
         config.llm.reasoning_effort = v.strip().lower()
+    if v := os.environ.get("VULNCLAW_SESSION_TASK_MODE"):
+        # Per-run task-mode override (auto/pentest/ir/ctf) — beats session.task_mode
+        config.session.task_mode = v.strip().lower()
 
     # ── LLM auth mode (static / oauth) ──────────────────────────────────
     if v := os.environ.get("VULNCLAW_LLM_AUTH_MODE"):

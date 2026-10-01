@@ -228,9 +228,9 @@ def test_merge_session_state_keeps_adjacent_answer_cards():
 
 
 def test_merge_twice_does_not_duplicate_answer_cards():
-    """Round-11 finding #5: skip_dedup means a second (parent, child) merge
-    would copy the answer cards again — same-number cards already on the
-    parent must be skipped."""
+    """Round-11 #5 / round-12 F1: skip_dedup means a second (parent, child)
+    merge would copy the answer cards again — same-question cards already on
+    the parent must be skipped (keyed on normalized question text)."""
     from types import SimpleNamespace
 
     from vulnclaw.agent.parallel_agents import merge_session_state
@@ -271,3 +271,123 @@ def test_merge_twice_does_not_duplicate_answer_cards():
     assert first == 3  # 2 cards + 1 real vuln
     # the plain vulnerability keeps default dedup semantics (skipped on re-merge)
     assert parent_findings.count(real_vuln) == 1
+
+
+def test_merge_same_number_wording_drift_merges_not_drops():
+    """Round-12 F1: same question number with drifted wording merges the
+    child card's evidence into the parent card instead of being dropped —
+    a competition sheet has exactly one Q1."""
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.parallel_agents import merge_session_state
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    parent_findings: list = []
+    seen_ids: set = set()
+
+    def fake_add_finding(finding, skip_dedup=False):
+        if not skip_dedup and finding.finding_id in seen_ids:
+            return False
+        seen_ids.add(finding.finding_id)
+        parent_findings.append(finding)
+        return True
+
+    parent = SimpleNamespace(
+        findings=parent_findings, recon_data={}, notes={}, executed_steps=[],
+        add_finding=fake_add_finding,
+        _notify_checkpoint=lambda *a, **k: None,
+    )
+    child = SimpleNamespace(
+        findings=[
+            VulnerabilityFinding(title="Q1:攻击者IP", vuln_type="ir-answer",
+                                 description="203.0.113.77", evidence="ev-parent"),
+            VulnerabilityFinding(title="Q1:攻击者的IP是什么", vuln_type="ir-answer",
+                                 description="203.0.113.77 + port 8080", evidence="ev-child"),
+        ],
+        recon_data={}, notes={}, executed_steps=[], step_records=[],
+    )
+    merge_session_state(parent, child)
+
+    cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
+    assert len(cards) == 1, f"same-number card duplicated: {[f.title for f in cards]}"
+    assert "ev-parent" in cards[0].evidence and "ev-child" in cards[0].evidence
+
+
+def test_merge_same_question_merges_evidence():
+    """Round-12 F1 leg 2: a same-question card from the child merges its
+    evidence into the parent card instead of being dropped wholesale."""
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.parallel_agents import merge_session_state
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    parent_findings: list = []
+    seen_ids: set = set()
+
+    def fake_add_finding(finding, skip_dedup=False):
+        if not skip_dedup and finding.finding_id in seen_ids:
+            return False
+        seen_ids.add(finding.finding_id)
+        parent_findings.append(finding)
+        return True
+
+    parent = SimpleNamespace(
+        findings=parent_findings, recon_data={}, notes={}, executed_steps=[],
+        add_finding=fake_add_finding,
+        _notify_checkpoint=lambda *a, **k: None,
+    )
+    child = SimpleNamespace(
+        findings=[
+            VulnerabilityFinding(title="Q1: 攻击者 IP 是什么", vuln_type="ir-answer",
+                                 description="203.0.113.77", evidence="ev-A"),
+            # same question, drifted spelling + NEW evidence the parent lacks
+            VulnerabilityFinding(title="Q1:攻击者的IP是什么？", vuln_type="ir-answer",
+                                 description="203.0.113.77", evidence="ev-B-new"),
+        ],
+        recon_data={}, notes={}, executed_steps=[], step_records=[],
+    )
+    merge_session_state(parent, child)
+
+    cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
+    assert len(cards) == 1, f"same-question card duplicated: {len(cards)}"
+    assert "ev-A" in cards[0].evidence and "ev-B-new" in cards[0].evidence, (
+        f"child evidence lost on merge: {cards[0].evidence!r}"
+    )
+
+
+def test_merge_non_q_prefixed_card_does_not_duplicate():
+    """Round-12 F1 leg 3: cards whose title has no 'Q<n>' prefix (e.g.
+    '1. 攻击者IP') get the same double-merge protection via the normalized
+    question-text key — the old number-keyed guard returned '' for them."""
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.parallel_agents import merge_session_state
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    parent_findings: list = []
+    seen_ids: set = set()
+
+    def fake_add_finding(finding, skip_dedup=False):
+        if not skip_dedup and finding.finding_id in seen_ids:
+            return False
+        seen_ids.add(finding.finding_id)
+        parent_findings.append(finding)
+        return True
+
+    parent = SimpleNamespace(
+        findings=parent_findings, recon_data={}, notes={}, executed_steps=[],
+        add_finding=fake_add_finding,
+        _notify_checkpoint=lambda *a, **k: None,
+    )
+    child = SimpleNamespace(
+        findings=[
+            VulnerabilityFinding(title="1. 攻击者IP", vuln_type="ir-answer",
+                                 description="203.0.113.77"),
+        ],
+        recon_data={}, notes={}, executed_steps=[], step_records=[],
+    )
+    merge_session_state(parent, child)
+    merge_session_state(parent, child)  # second merge
+
+    cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
+    assert len(cards) == 1, f"non-Q card duplicated on re-merge: {len(cards)}"

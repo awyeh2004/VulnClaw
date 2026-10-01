@@ -713,15 +713,13 @@ def _evidence_content_for(agent: "AgentContext", ref: str) -> str:
 
 
 def _normalize_question(text: str) -> str:
-    """NFKC-folded question text for answer-card idempotency.
+    """Delegate to the shared canonical answer-card identity (round-12 F1:
+    record_answer idempotency and merge_session_state must key on the SAME
+    normalization — two mechanisms produced same-number card drops and
+    width-drift duplicate channels at the same time)."""
+    from vulnclaw.config.domain_models import normalize_answer_question
 
-    NFKC handles the width variants the model drifts between — full-width
-    colon/question-mark/Q ('：' '？' 'Ｑ' → ':' '?' 'Q') — on top of the
-    whitespace and case folding (round-11 finding #3: without it, "Q1：攻击者
-    IP？" vs "Q1:攻击者IP" still produced two cards).
-    """
-    normalized = unicodedata.normalize("NFKC", str(text or ""))
-    return re.sub(r"\s+", "", normalized).lower()
+    return normalize_answer_question(text)
 
 
 def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
@@ -787,8 +785,13 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
                 None,
             )
             if existing is not None:
-                if evidence and evidence not in str(getattr(existing, "evidence", "")):
-                    existing.evidence = (str(getattr(existing, "evidence", "")) + " | " + evidence).strip(" |")
+                from vulnclaw.config.domain_models import answer_card_evidence_merge
+
+                merged = answer_card_evidence_merge(
+                    str(getattr(existing, "evidence", "")), evidence
+                )
+                if merged != str(getattr(existing, "evidence", "")):
+                    existing.evidence = merged
                     # The merge mutates a finding in place; without this the new
                     # evidence only lands at the NEXT unrelated checkpoint.
                     notify = getattr(state, "_notify_checkpoint", None)

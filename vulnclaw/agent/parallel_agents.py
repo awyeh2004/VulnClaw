@@ -243,19 +243,66 @@ def merge_session_state(parent: SessionState, child: SessionState) -> None:
     for finding in child.findings:
         # Answer cards all share finding_id "ir-answer" and similar evidence; the default
         # dedup would silently drop every card after the first on merge (blackboard itself
-        # writes them with skip_dedup for the same reason). skip_dedup also means a
-        # second (parent, child) merge would copy the cards again, so same-number
-        # cards already on the parent are skipped instead (round-11 finding #5).
+        # writes them with skip_dedup for the same reason). Identity is the
+        # NORMALIZED QUESTION TEXT (round-12 F1: the previous number-keyed guard
+        # dropped same-number/different-question cards together with their new
+        # evidence, and let non-Q-prefixed cards through to double on re-merge).
+        # A same-question card already on the parent MERGES its evidence instead
+        # of being dropped; a genuinely different question coexists.
         if is_answer_card(finding):
-            from vulnclaw.config.domain_models import answer_card_number
+            from vulnclaw.config.domain_models import (
+                answer_card_evidence_merge,
+                answer_card_number,
+                normalize_answer_question,
+            )
 
-            number = answer_card_number(str(getattr(finding, "title", "") or ""))
-            already = any(
-                is_answer_card(f)
-                and answer_card_number(str(getattr(f, "title", "") or "")) == number
-                for f in parent.findings
-            ) if number else False
-            if already:
+            # Identity: question NUMBER when both cards carry one (a competition
+            # sheet has exactly one Q1 — same number is always the same question
+            # re-recorded with drifting wording), falling back to the normalized
+            # question TEXT for non-numbered cards. Round-12 F1: a number-only
+            # key dropped same-number/different-wording cards with their
+            # evidence; a text-only key missed wording-level drift.
+            child_num = answer_card_number(str(getattr(finding, "title", "") or ""))
+            child_key = normalize_answer_question(str(getattr(finding, "title", "") or ""))
+            existing = next(
+                (
+                    f
+                    for f in parent.findings
+                    if is_answer_card(f)
+                    and (
+                        (
+                            child_num
+                            and answer_card_number(str(getattr(f, "title", "") or "")) == child_num
+                        )
+                        or (
+                            not child_num
+                            and normalize_answer_question(
+                                str(getattr(f, "title", "") or "")
+                            )
+                            == child_key
+                        )
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                # Merge, never drop: the child card may carry evidence or a
+                # re-worded answer the parent lacks.
+                merged = answer_card_evidence_merge(
+                    str(getattr(existing, "evidence", "")),
+                    str(getattr(finding, "evidence", "")),
+                )
+                if str(getattr(finding, "description", "")) and str(
+                    getattr(finding, "description", "")
+                ) != str(getattr(existing, "description", "")):
+                    merged = answer_card_evidence_merge(
+                        merged, str(getattr(finding, "description", ""))
+                    )
+                if merged != str(getattr(existing, "evidence", "")):
+                    existing.evidence = merged
+                    notify = getattr(parent, "_notify_checkpoint", None)
+                    if callable(notify):
+                        notify("finding_updated")
                 continue
         parent.add_finding(finding, skip_dedup=is_answer_card(finding))
 
