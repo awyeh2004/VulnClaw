@@ -442,8 +442,12 @@ _LESSON_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                         "required": ["finding_id", "path"],
                         "properties": {
-                            "finding_id": {"type": ["string", "null"]},
-                            "path": {"type": ["string", "null"]},
+                            # single-type strings, NOT ["string", "null"]: strict
+                            # gateways (minimax fallback tiers) reject JSON-Schema
+                            # type arrays with a 400, which killed the whole
+                            # distillation call (2026-10-01 run).
+                            "finding_id": {"type": "string"},
+                            "path": {"type": "string"},
                         },
                     },
                 },
