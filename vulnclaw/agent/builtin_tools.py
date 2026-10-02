@@ -1731,9 +1731,18 @@ def enforce_host_path_constraints(
     if host and host_in_scope(host, constraints.blocked_hosts):
         return f"[constraint_violation] Host {host} is blocked by task constraints for target {target or host}."
 
-    if constraints.allowed_paths and path and path not in constraints.allowed_paths:
-        allowed = ", ".join(constraints.allowed_paths)
-        return f"[constraint_violation] Path {path} is outside allowed scope [{allowed}] for target {target or host}."
+    if constraints.allowed_paths and path:
+        # Prefix semantics: an allowed entry "/storage" covers "/storage" and
+        # every subpath ("/storage/{addr}/{slot}"). Exact-match here made a
+        # task description that mentioned the API path lock the whole run to
+        # a single unusable literal path (round-12 UX postmortem).
+        in_scope = any(
+            path == a or path.startswith(a.rstrip("/") + "/")
+            for a in constraints.allowed_paths
+        )
+        if not in_scope:
+            allowed = ", ".join(constraints.allowed_paths)
+            return f"[constraint_violation] Path {path} is outside allowed scope [{allowed}] for target {target or host}."
 
     if path and path in constraints.blocked_paths:
         return f"[constraint_violation] Path {path} is blocked by task constraints for target {target or host}."

@@ -65,3 +65,27 @@ class TestQuizTargetSwitchGuard:
     def test_guard_is_narrow(self):
         assert _looks_like_quiz(REAL_PENTEST_ASK) is False
         assert _looks_like_quiz(QUIZ_WITH_IP) is True
+
+
+class TestApiPathProseNotATarget:
+    """Round-12 postmortem (PrizeEscrow): a task description citing API paths
+    ('/storage/{addr}/{slot}', '/logs') must not retarget the session to a
+    literal path — that once replaced a live HTTP target with '/storage' and
+    applied local-path constraints that locked every real request out of
+    scope."""
+
+    TASK = "对 impl 地址 0x31f4b2... 做全槽扫描：/storage/{impl}/0x0 到 0xf，对照 /logs 里 upgradeTo 事件。"
+    NEW = _extract_target_from_input(TASK)
+
+    def test_api_path_prose_extracts_a_path_target(self):
+        # the extractor DOES return the path (documenting the hazard)
+        assert self.NEW == "/storage"
+
+    def test_api_path_target_does_not_switch(self):
+        assert _should_switch_target(self.TASK, self.NEW, CURRENT_TARGET) is False
+
+    def test_real_path_retarget_still_works_for_local_files(self):
+        # multi-segment local file paths remain valid retargets
+        assert _should_switch_target(
+            "审计 E:/vulnclaw/work/manual/App.php", "E:/vulnclaw/work/manual/App.php", CURRENT_TARGET
+        ) is True

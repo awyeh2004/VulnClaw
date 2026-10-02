@@ -4646,13 +4646,20 @@ def _should_switch_target(
     Genuine mid-quiz retargeting to a bare IP can still use the ``target``
     command.
     """
+    import re
+
     if not new_target or not current_target or new_target == current_target:
+        return False
+    # A single-segment POSIX path ("/storage", "/logs", "/session") extracted
+    # from a task description is API-path prose, not a retarget: switching on
+    # it once replaced a live HTTP target with a literal path AND applied local
+    # path constraints that locked every real request out of scope
+    # (2026-10-01 PrizeEscrow postmortem).
+    if re.match(r"^/[A-Za-z0-9_.\-{}]+$", new_target):
         return False
     if not _looks_like_quiz(user_input):
         return True
     if new_target.startswith(("http://", "https://")):
-        import re
-
         return bool(
             re.search(r"改打|切换到|切换目标|换成|目标改为|换个目标|转打", user_input)
         )
