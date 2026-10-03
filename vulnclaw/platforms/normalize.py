@@ -165,6 +165,11 @@ _STOPPED_ALIASES = {
     "removed",
 }
 _EXPIRED_ALIASES = {"expired", "expire", "timeout", "timed_out", "timedout", "overdue"}
+# CTF2's Open API environment route answers {"status": "none"} both before the
+# first start and after a DELETE. That is "no environment exists", not an
+# unknowable state: mapping it to STATE_NONE keeps the renderer's
+# start-the-environment guidance (STATE_UNKNOWN would read as a probe failure).
+_NONE_ALIASES = {"none", "no_environment", "not_created", "absent"}
 
 
 def normalize_status(raw_status: Any) -> str:
@@ -188,6 +193,8 @@ def normalize_status(raw_status: Any) -> str:
         return STATE_STOPPED
     if text in _EXPIRED_ALIASES:
         return STATE_EXPIRED
+    if text in _NONE_ALIASES:
+        return STATE_NONE
     return STATE_UNKNOWN
 
 

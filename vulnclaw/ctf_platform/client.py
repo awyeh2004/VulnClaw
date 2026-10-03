@@ -6,9 +6,11 @@ Two API surfaces share the same host:
   access token via the ``X-CTF2-API-Key`` header. Covers practice listing /
   challenge reads / environment start / flag submission.
 - ``/api/v1`` 鈥?the front-end session API. Authenticated with the Bearer JWT
-  that the SPA keeps in localStorage. Needed for the pieces the Open API
-  deliberately omits: live target connection info (host/port after start) and
-  challenge attachment downloads.
+  the SPA keeps in localStorage. Needed for practice challenge enumeration and
+  attachment downloads, and as the fallback for every environment action when
+  no PAT is configured. (The Open API's environment routes DO cover live
+  target connection info since the 2026-10-04 route check -- the session API
+  answered ``{"data": null}`` for a running agent-owned environment.)
 
 Token sources, in order of precedence:
 1. ``VULNCLAW_CTF2_API_KEY`` 鈥?Open API personal access token.
@@ -356,9 +358,11 @@ async def _session_request(
 #
 # WHY: the two APIs disagree about who may read the same data. The Open API
 # (``/api/open/v1/user`` + ``X-CTF2-API-Key``) covers practice listing, challenge
-# reads, environment start and flag submission; the front-end session API
-# (``/api/v1`` + the SPA's Bearer JWT) exposes the SAME resources and also the
-# pieces the Open API deliberately omits (live target address, attachments).
+# reads, the full environment lifecycle (start / status / extend / delete,
+# measured 2026-10-04) and flag submission; the front-end session API
+# (``/api/v1`` + the SPA's Bearer JWT) exposes practice challenge enumeration
+# and attachments, and serves as the fallback surface for accounts without a
+# personal access token.
 #
 # Measured on a real account with only a browser session (no personal access
 # token): every Open API call returned
@@ -464,16 +468,57 @@ async def create_target(practice_id: str, challenge_id: str) -> dict:
 
 
 async def stop_target(practice_id: str, challenge_id: str) -> dict:
-    """Release a practice target (DELETE the session target resource).
+    """Release a practice target so the container slot is freed.
 
-    Call after the flag is captured/submitted so the container slot is freed
-    instead of lingering until the platform TTL reclaims it.
+    Same two-API split as :func:`start_environment` (measured 2026-10-03):
+      * Open API: `DELETE /practice/<p>/challenges/<c>/environment/`
+        (scope ``environment:write``; works with the agent PAT alone)
+      * session : `DELETE /practice/<p>/challenges/<c>/target/` (Bearer JWT)
+
+    The session DELETE answered 404 on the live platform while the Open API
+    environment DELETE released the slot, so the Open API route is tried
+    first whenever a PAT is configured.
     """
     client = get_client()
+    if api_token():
+        try:
+            return await _request(
+                client,
+                "DELETE",
+                f"/practice/{practice_id}/challenges/{challenge_id}/environment/",
+                timeout=MEDIUM_TIMEOUT,
+            )
+        except RuntimeError as exc:
+            text = str(exc)
+            if not (" 401:" in text or " 403:" in text or " 404:" in text) or not session_token():
+                raise
+    if not session_token():
+        raise RuntimeError(
+            "CTF2 cannot release a target: set VULNCLAW_CTF2_API_KEY, or log in "
+            "to CTF2 in Edge/Chrome so the session token can be read from localStorage."
+        )
     return await _session_request(
         client,
         "DELETE",
         f"/practice/{practice_id}/challenges/{challenge_id}/target/",
+        timeout=MEDIUM_TIMEOUT,
+    )
+
+
+async def get_environment(practice_id: str, challenge_id: str) -> dict:
+    """Read the practice environment status via the Open API (agent PAT).
+
+    ``GET /practice/<p>/challenges/<c>/environment/`` (scope
+    ``environment:read``) returns status, access URLs and remaining time -- the
+    facts the session target lookup carries, without needing the front-end
+    Bearer JWT. Prefer it when a PAT is configured; keep the session
+    :func:`get_target` for accounts that only have a browser session.
+    """
+    client = get_client()
+    return await _request(
+        client,
+        "GET",
+        f"/practice/{practice_id}/challenges/{challenge_id}/environment/",
         timeout=MEDIUM_TIMEOUT,
     )
 

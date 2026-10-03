@@ -414,20 +414,42 @@ class TestAdapterLifecycle:
         assert info.usable is True
         assert info.transports() == frozenset({base.TRANSPORT_TLS})
 
-    async def test_read_env_requires_the_session_token(self):
-        adapter = CTF2Adapter(FakeClient(session="", get_target=fx.RUNNING_PAYLOAD))
+    async def test_read_env_requires_a_credential(self):
+        adapter = CTF2Adapter(FakeClient(session="", api="", get_target=fx.RUNNING_PAYLOAD))
         with pytest.raises(CTF2Error) as excinfo:
             await adapter.read_env(PRACTICE_REF)
-        assert "session token" in str(excinfo.value)
+        assert "credential" in str(excinfo.value)
+
+    async def test_read_env_prefers_the_open_api_environment_route(self):
+        # Measured 2026-10-04: with a PAT the Open API GET environment answers
+        # with the full status/access_urls payload, while the session target
+        # lookup returned {"data": null} for a RUNNING agent-owned environment.
+        client = FakeClient(api="pat", get_environment=fx.RUNNING_PAYLOAD)
+        info = await CTF2Adapter(client).read_env(PRACTICE_REF)
+        assert info.usable is True
+        assert ("get_environment", (fx.PRACTICE_ID, fx.CHALLENGE_ID)) in client.calls
+        assert ("get_target", (fx.PRACTICE_ID, fx.CHALLENGE_ID)) not in client.calls
+
+    async def test_read_env_falls_back_to_the_session_target_without_a_pat(self):
+        client = FakeClient(api="", get_target=fx.RUNNING_PAYLOAD)
+        assert (await CTF2Adapter(client).read_env(PRACTICE_REF)).usable is True
+        assert ("get_target", (fx.PRACTICE_ID, fx.CHALLENGE_ID)) in client.calls
 
     async def test_read_env_normalizes(self):
         adapter = CTF2Adapter(FakeClient(get_target=fx.RUNNING_PAYLOAD))
         assert (await adapter.read_env(PRACTICE_REF)).usable is True
 
-    async def test_stop_env_requires_the_session_token(self):
-        adapter = CTF2Adapter(FakeClient(session=""))
+    async def test_stop_env_requires_a_credential(self):
+        adapter = CTF2Adapter(FakeClient(session="", api=""))
         with pytest.raises(CTF2Error):
             await adapter.stop_env(PRACTICE_REF)
+
+    async def test_stop_env_works_with_only_a_pat(self):
+        # The Open API environment DELETE takes the PAT alone; the session JWT
+        # is no longer a precondition for releasing the slot.
+        client = FakeClient(session="", api="pat")
+        await CTF2Adapter(client).stop_env(PRACTICE_REF)
+        assert client.calls == [("stop_target", (fx.PRACTICE_ID, fx.CHALLENGE_ID))]
 
     async def test_submit_flag_is_judged_and_reports_acceptance(self):
         adapter = CTF2Adapter(FakeClient(submit_flag={"data": {"accepted": False}}))

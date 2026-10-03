@@ -154,6 +154,72 @@ class TestFallbackRouting:
         assert ctf_client.is_configured() is False
 
 
+# ── target release / environment status routing ─────────────────────────
+
+
+def _client(monkeypatch, rec):
+    """Point the module's shared-client accessor at the recorder."""
+    monkeypatch.setattr(ctf_client, "get_client", lambda timeout=ctf_client.DEFAULT_TIMEOUT: rec)
+
+
+class TestTargetRelease:
+    """`stop_target` route choice, measured 2026-10-03: the session DELETE
+    (`/api/v1/.../target/`) answered 404 while the Open API environment DELETE
+    released the slot. The Open API route goes first whenever a PAT exists."""
+
+    async def test_open_api_environment_delete_preferred_with_a_pat(self, both_credentials, monkeypatch):
+        rec = _Recorder()
+        _client(monkeypatch, rec)
+        await ctf_client.stop_target("p1", "c1")
+        assert len(rec.calls) == 1
+        method, url, headers = rec.calls[0]
+        assert method == "DELETE"
+        assert url.endswith("/api/open/v1/user/practice/p1/challenges/c1/environment/")
+        assert headers.get("X-CTF2-API-Key") == "pat-123"
+
+    async def test_session_delete_used_without_a_pat(self, no_credentials, monkeypatch):
+        rec = _Recorder()
+        _client(monkeypatch, rec)
+        await ctf_client.stop_target("p1", "c1")
+        method, url, headers = rec.calls[0]
+        assert method == "DELETE"
+        assert url.endswith("/api/v1/practice/p1/challenges/c1/target/")
+        assert headers.get("Authorization") == "Bearer eyJ.fake.jwt"
+
+    async def test_pat_404_falls_back_to_the_session_delete(self, both_credentials, monkeypatch):
+        rec = _Recorder(status=404)
+
+        class _FlipAfterFirst(_Recorder):
+            async def request(self, method, url, headers=None, **kwargs):
+                if self.calls:
+                    self.status = 200
+                return await super().request(method, url, headers, **kwargs)
+
+        rec = _FlipAfterFirst(status=404)
+        _client(monkeypatch, rec)
+        await ctf_client.stop_target("p1", "c1")
+        assert len(rec.calls) == 2
+        assert rec.calls[0][1].endswith("/api/open/v1/user/practice/p1/challenges/c1/environment/")
+        assert rec.calls[1][1].endswith("/api/v1/practice/p1/challenges/c1/target/")
+
+    async def test_release_without_any_credential_is_refused(self, neither_credential, monkeypatch):
+        rec = _Recorder()
+        _client(monkeypatch, rec)
+        with pytest.raises(RuntimeError) as exc:
+            await ctf_client.stop_target("p1", "c1")
+        assert "VULNCLAW_CTF2_API_KEY" in str(exc.value)
+        assert not rec.calls
+
+    async def test_get_environment_uses_the_open_api_with_a_pat(self, both_credentials, monkeypatch):
+        rec = _Recorder()
+        _client(monkeypatch, rec)
+        await ctf_client.get_environment("p1", "c1")
+        method, url, headers = rec.calls[0]
+        assert method == "GET"
+        assert url.endswith("/api/open/v1/user/practice/p1/challenges/c1/environment/")
+        assert headers.get("X-CTF2-API-Key") == "pat-123"
+
+
 # ── the submission gate ─────────────────────────────────────────────────
 
 

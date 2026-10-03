@@ -24,12 +24,16 @@ class FakeClient:
         self.payloads = payloads
         self.calls: list[tuple] = []
         self._session = payloads.pop("session", "token")
+        self._api = payloads.pop("api", "")
 
     def is_configured(self) -> bool:
         return True
 
     def session_token(self) -> str:
         return self._session
+
+    def api_token(self) -> str:
+        return self._api
 
     async def _get(self, name, *args, **kwargs):
         self.calls.append((name, args))
@@ -58,6 +62,9 @@ class FakeClient:
 
     async def get_target(self, pid, cid):
         return await self._get("get_target", pid, cid)
+
+    async def get_environment(self, pid, cid):
+        return await self._get("get_environment", pid, cid)
 
     async def stop_target(self, pid, cid):
         return await self._get("stop_target", pid, cid)

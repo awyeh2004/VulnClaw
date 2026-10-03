@@ -499,21 +499,36 @@ class CTF2Adapter:
 
     async def read_env(self, ref: ChallengeRef) -> EnvInfo | None:
         practice_id, challenge_id = self._pair(ref)
-        if not self.client.session_token():
+        # The Open API environment route (agent PAT) carries the same
+        # status/access_urls/nc_ssl/expires_at payload the session target
+        # lookup gives, and measured 2026-10-04 it is the more reliable of the
+        # two: the session route answered {"data": null} for a RUNNING
+        # agent-owned environment. Session lookup stays as the fallback for
+        # accounts that only have a browser session.
+        if self.client.api_token():
+            payload = await self.client.get_environment(practice_id, challenge_id)
+            data = payload.get("data") if isinstance(payload, Mapping) else None
+            if isinstance(data, Mapping):
+                return normalize_target_payload(payload, ref)
+            # Unrecognized envelope: fall through to the session lookup rather
+            # than reporting a false STATE_NONE from a shape we do not know.
+        elif not self.client.session_token():
             raise CTF2Error(
-                "CTF2 target lookup needs the front-end session token "
-                "(VULNCLAW_CTF2_SESSION_TOKEN, or a logged-in Edge/Chrome profile). "
-                "The Open API cannot see target addresses."
+                "CTF2 target lookup needs a credential: VULNCLAW_CTF2_API_KEY "
+                "(Open API, preferred) or the front-end session token "
+                "(VULNCLAW_CTF2_SESSION_TOKEN, or a logged-in Edge/Chrome profile)."
             )
         payload = await self.client.get_target(practice_id, challenge_id)
         return normalize_target_payload(payload, ref)
 
     async def stop_env(self, ref: ChallengeRef) -> None:
         practice_id, challenge_id = self._pair(ref)
-        if not self.client.session_token():
+        if not self.client.api_token() and not self.client.session_token():
             raise CTF2Error(
-                "releasing a CTF2 target needs the front-end session token; the "
-                "instance still expires on the platform TTL, but its slot stays busy."
+                "releasing a CTF2 target needs a credential: VULNCLAW_CTF2_API_KEY "
+                "(Open API environment DELETE, preferred) or the front-end session "
+                "token. Without one the instance still expires on the platform TTL, "
+                "but its slot stays busy."
             )
         await self.client.stop_target(practice_id, challenge_id)
 
