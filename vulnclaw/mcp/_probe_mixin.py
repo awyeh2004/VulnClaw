@@ -134,7 +134,16 @@ class ProbeMixin:
         return True
 
     def _try_attach_http_client(self, name: str, config: MCPServerConfig) -> bool:
-        """Validate a Streamable HTTP MCP server and mark it for lazy connection."""
+        """Validate a Streamable HTTP MCP server and mark it for lazy connection.
+
+        The bounded probe is also the tool-discovery step: an http-lazy server
+        has no KNOWN_TOOLS entry (unlike fetch/memory/chrome-devtools/burp), so
+        a pure reachability attach leaves the registry empty and `call_tool`
+        can never route to it — runtime discovery only runs *after* routing
+        succeeded. Probe failure stays soft: the server keeps its lazy attach
+        so the first real call retries the connect with the full startup
+        budget, and the probe error is recorded for diagnostics.
+        """
         if ClientSession is None or streamablehttp_client is None:
             self.registry.set_server_error(
                 name, "MCP Python SDK is not installed", error_type="sdk_unavailable"
@@ -162,8 +171,17 @@ class ProbeMixin:
             )
             return False
 
+        ok, details, tools = self._probe_http_server(config)
+        if ok:
+            if tools:
+                self._register_runtime_tools(name, tools)
+        else:
+            self.registry.set_server_error(
+                name, details or "http probe failed", error_type="attach_failed"
+            )
+            self._register_known_tools(name)
+
         self._mcp_clients[name] = {"kind": "http-lazy", "config": config}
-        self._register_known_tools(name)
         return True
 
     def _check_http_reachable(self, url: str, timeout_s: float) -> bool:

@@ -468,6 +468,50 @@ class TestStreamableHttp:
         assert state.health_status == HealthStatus.DEGRADED.value
         assert "chrome_navigate" in m.list_available_tools()
 
+    def test_attach_probe_registers_runtime_tools_for_an_unknown_server(self, monkeypatch):
+        # An http server with no KNOWN_TOOLS entry (e.g. ctf2) gets its tools
+        # ONLY from the attach probe: without it the registry stays empty and
+        # call_tool can never route to the server (discovery runs after
+        # routing in the lazy path).
+        m = _manager()
+        cfg = _http_server_config("ctf2-vulnclaw-aw")
+        m.config.mcp.servers["ctf2-vulnclaw-aw"] = cfg
+        m.registry.register_server("ctf2-vulnclaw-aw")
+
+        monkeypatch.setattr(m, "_check_http_reachable", lambda url, timeout: True)
+        monkeypatch.setattr(
+            m,
+            "_probe_http_server",
+            lambda config: (
+                True,
+                "initialized with 1 tools",
+                [{"name": "ctf2_agent_whoami", "description": "", "inputSchema": {"type": "object"}}],
+            ),
+        )
+
+        assert m._start_server("ctf2-vulnclaw-aw", cfg) is True
+        state = m.registry.get_all_servers()["ctf2-vulnclaw-aw"]
+        assert state.running is True
+        assert state.execution_mode == "http"
+        assert "ctf2_agent_whoami" in m.list_available_tools()
+
+    def test_attach_probe_failure_keeps_the_lazy_attach(self, monkeypatch):
+        # A failed probe is soft: the attach stays http-lazy so the first real
+        # call retries the connect with the full startup budget.
+        m = _manager()
+        cfg = _http_server_config("ctf2-vulnclaw-aw")
+        m.config.mcp.servers["ctf2-vulnclaw-aw"] = cfg
+        m.registry.register_server("ctf2-vulnclaw-aw")
+
+        monkeypatch.setattr(m, "_check_http_reachable", lambda url, timeout: True)
+        monkeypatch.setattr(m, "_probe_http_server", lambda config: (False, "boom", []))
+
+        assert m._start_server("ctf2-vulnclaw-aw", cfg) is True
+        assert m._mcp_clients["ctf2-vulnclaw-aw"]["kind"] == "http-lazy"
+        state = m.registry.get_all_servers()["ctf2-vulnclaw-aw"]
+        assert state.error == "boom"
+        assert state.last_error_type == "attach_failed"
+
     async def test_get_or_create_session_dispatches_http(self, monkeypatch):
         m = _manager()
         m.config.mcp.servers["streamable-mcp-server"] = _http_server_config()
