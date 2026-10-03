@@ -184,10 +184,15 @@ def adapter_for(token: str) -> PlatformAdapter:
     return adapter
 
 
-def capabilities() -> frozenset[str]:
-    """Union of the optional capabilities the exposed platforms declare."""
+def capabilities(config: Any = None) -> frozenset[str]:
+    """Union of the optional capabilities the exposed platforms declare.
+
+    ``config`` is forwarded to the enable switch: this sits on the per-turn
+    schema path (``platform_tool_schemas``), where a bare ``configured_adapters()``
+    re-read and re-parsed the config file once per registered adapter.
+    """
     merged: set[str] = set()
-    for adapter in configured_adapters().values():
+    for adapter in configured_adapters(config).values():
         declared = getattr(adapter, "capabilities", frozenset())
         merged |= {str(item) for item in declared}
     return frozenset(merged)

@@ -195,7 +195,7 @@ def platform_tool_schemas(config: Any = None) -> list[dict[str, Any]]:
         },
     ]
 
-    capabilities = registry.capabilities()
+    capabilities = registry.capabilities(config)
     for name, capability in _CAPABILITY_TOOLS:
         if capability in capabilities:
             tools.append(_optional_schema(name, capability))
