@@ -646,6 +646,17 @@ class SessionConfig(BaseModel):
         default=True,
         description="Print the generated solve replay report in the terminal after completion",
     )
+    disable_streaming: bool = Field(
+        default=False,
+        description=(
+            "Force non-streaming LLM calls even when a stream sink is present. "
+            "Added for intermittent SSE hangs between this host and the LLM "
+            "gateway (streaming stalled with zero tokens for 10-16 min while "
+            "non-streaming requests to the same endpoint completed in ~1s). "
+            "The full text is replayed to the sink in one chunk, so the TUI "
+            "still shows the result."
+        ),
+    )
     show_thinking: bool = Field(
         default=False, description="Show LLM thinking/reasoning output (default: off)"
     )

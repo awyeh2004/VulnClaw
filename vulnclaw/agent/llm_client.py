@@ -755,6 +755,18 @@ async def call_llm(
     stream_sink: Optional["StreamSink"] = None,
 ) -> str:
     """Call the LLM with the current context and system prompt (single turn)."""
+    # session.disable_streaming: force the non-streaming path even when a sink
+    # is present — added for intermittent SSE hangs between this host and the
+    # LLM gateway (streaming stalled with zero tokens for 10-16 min while
+    # non-streaming requests to the same endpoint completed in ~1s, 3/3).
+    # The full text is replayed to the sink in one chunk so the TUI still
+    # shows the result.
+    if (
+        stream_sink is not None
+        and getattr(getattr(agent, "config", None), "session", None) is not None
+        and getattr(agent.config.session, "disable_streaming", False)
+    ):
+        stream_sink = None
     if stream_sink is not None:
         return await call_llm_stream(agent, system_prompt, stream_sink)
 

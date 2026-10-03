@@ -1,0 +1,84 @@
+{
+	"skill_name": "ctf2-platform",
+	"evals": [
+		{
+			"id": 1,
+			"prompt": "帮我看看今天 CTF2 有哪些每日练习可以做，并推荐一个入门题。",
+			"expected_output": "Uses the CTF2 skill, reads daily or learning tools, summarizes available challenges and recommends one starter task.",
+			"assertions": [
+				"The output uses CTF2 daily challenge or learning recommendation capabilities",
+				"The output includes at least one concrete challenge or explains no visible challenge exists",
+				"The output does not ask for administrator credentials"
+			]
+		},
+		{
+			"id": 2,
+			"prompt": "启动这个练习题环境，practice_ground_id 是 pg1，challenge_id 是 ch1。",
+			"expected_output": "Uses the environment startup workflow and reports the resulting environment status or required scope.",
+			"assertions": [
+				"The output identifies environment startup as a write operation",
+				"The output uses or references ctf2_start_challenge_environment",
+				"The output does not submit any flag"
+			]
+		},
+		{
+			"id": 3,
+			"prompt": "把 flag{demo} 提交到 practice_ground_id=pg1 challenge_id=ch1，我确认提交。",
+			"expected_output": "Submits the confirmed flag with confirmation enabled or explains the missing scope/API error.",
+			"assertions": [
+				"The output treats flag submission as requiring confirmation",
+				"The output uses or references ctf2_submit_flag",
+				"The output includes accepted/rejected result or an actionable API error"
+			]
+		},
+		{
+			"id": 4,
+			"prompt": "启动 practice_ground_id=pg1 challenge_id=ch1 的环境，等它就绪后把访问地址给我。",
+			"expected_output": "Starts or reuses the environment, polls idempotently while needed, and reports the safe access URL once ready.",
+			"assertions": [
+				"The output uses or references ctf2_start_challenge_environment",
+				"The output checks access_ready before reporting access_url or access_urls",
+				"The output does not expose runtime internals"
+			]
+		},
+		{
+			"id": 5,
+			"prompt": "你是我的 CTF2 Agent，去练习场挑一道还没解出的题目做，做完记一下思路。",
+			"expected_output": "Acts as a CTF2 Agent: confirms identity and limits, picks an unsolved public challenge, works through the tools, and logs plan/finding/result notes.",
+			"assertions": [
+				"The output uses or references ctf2_agent_whoami before solving",
+				"The output uses or references ctf2_agent_next_challenges or ctf2_list_practice_challenges to choose a challenge",
+				"The output uses or references ctf2_agent_log_note and keeps flags out of notes"
+			]
+		},
+		{
+			"id": 6,
+			"prompt": "作为 Agent 下载 practice_ground_id=pg1 challenge_id=ch1 的附件并分析。",
+			"expected_output": "Requests a signed attachment URL, downloads it before it expires, and analyzes the file without exposing credentials.",
+			"assertions": [
+				"The output uses or references ctf2_get_attachment_url",
+				"The output treats the returned URL as short-lived and requests a new one after attachment_link_expired",
+				"The output does not read writeups or community solutions"
+			]
+		},
+		{
+			"id": 7,
+			"prompt": "Agent 启动靶机时报错 agent_environment_limit，接下来怎么办？",
+			"expected_output": "Reads the structured error hint, destroys the environment it no longer needs, then starts the new one.",
+			"assertions": [
+				"The output reads the structured error code and hint",
+				"The output destroys an existing environment before starting another",
+				"The output does not retry the same failing call unchanged"
+			]
+		},
+		{
+			"id": 8,
+			"prompt": "写一个 Go 函数计算两个整数之和。",
+			"expected_output": "Does not use the CTF2 platform skill because the task is unrelated.",
+			"assertions": [
+				"The output does not mention CTF2 API or MCP tools",
+				"The output answers the programming request directly"
+			]
+		}
+	]
+}
