@@ -1062,3 +1062,136 @@ class TestCallLlmAutoStream:
 
         # 验证返回值包含响应文本
         assert "Analysis complete" in result
+
+
+class _RecordingSink:
+    """Minimal StreamSink recorder for the disable_streaming replay tests."""
+
+    def __init__(self):
+        self.status: list[str] = []
+        self.content: list[str] = []
+        self.ended = 0
+
+    def on_status(self, message: str) -> None:
+        self.status.append(message)
+
+    def on_thinking_token(self, token: str) -> None:
+        pass
+
+    def on_content_token(self, token: str) -> None:
+        self.content.append(token)
+
+    def on_tool_call(self, tool_name: str, args: str) -> None:
+        pass
+
+    def on_tool_result(self, result_summary: str) -> None:
+        pass
+
+    def on_stream_end(self) -> None:
+        self.ended += 1
+
+
+class TestDisableStreaming:
+    """round13 F1/F2: session.disable_streaming must force the non-streaming
+    path AND still show the answer through the sink — the CLI prints only via
+    the sink, so a dropped-sink-without-replay made single-turn replies fully
+    invisible, and the guard used to cover call_llm only (the autonomous loop
+    stayed on the SSE path the switch exists to avoid)."""
+
+    def _agent(self, disable: bool):
+        agent = MagicMock()
+        agent.config.session.disable_streaming = disable
+        return agent
+
+    @staticmethod
+    def _response(text: str):
+        message = SimpleNamespace(content=text, tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    def _patch_nonstream(self, monkeypatch, text: str):
+        import vulnclaw.agent.llm_client as mod
+
+        monkeypatch.setattr(
+            mod, "_fit_context_window", lambda agent, messages, tools, purpose: messages
+        )
+        monkeypatch.setattr(
+            mod, "build_chat_completion_kwargs", lambda agent, messages, tools: {}
+        )
+        monkeypatch.setattr(
+            mod, "_apply_repetition_guard", lambda agent, t, detected_count=0: t
+        )
+
+        async def fake_retries(agent, factory, label):
+            return self._response(text), 0
+
+        monkeypatch.setattr(mod, "_call_with_persistent_retries", fake_retries)
+
+    @pytest.mark.asyncio
+    async def test_call_llm_replays_full_text_to_sink_when_disabled(self, monkeypatch):
+        import vulnclaw.agent.llm_client as mod
+
+        self._patch_nonstream(monkeypatch, "final answer")
+
+        async def stream_must_not_run(*a, **k):
+            raise AssertionError("streaming path used despite disable_streaming")
+
+        monkeypatch.setattr(mod, "call_llm_stream", stream_must_not_run)
+
+        agent = self._agent(disable=True)
+        sink = _RecordingSink()
+        result = await mod.call_llm(agent, "sys", stream_sink=sink)
+
+        assert result == "final answer"
+        assert "".join(sink.content) == "final answer"
+        assert sink.ended == 1
+
+    @pytest.mark.asyncio
+    async def test_call_llm_still_streams_when_not_disabled(self, monkeypatch):
+        import vulnclaw.agent.llm_client as mod
+
+        async def fake_stream(agent, system_prompt, sink):
+            return "streamed answer"
+
+        monkeypatch.setattr(mod, "call_llm_stream", fake_stream)
+
+        agent = self._agent(disable=False)
+        result = await mod.call_llm(agent, "sys", stream_sink=_RecordingSink())
+        assert result == "streamed answer"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_auto_replays_to_sink_when_disabled(self, monkeypatch):
+        import vulnclaw.agent.llm_client as mod
+
+        self._patch_nonstream(monkeypatch, "auto answer")
+        monkeypatch.setattr(
+            mod,
+            "_build_tool_loop_messages",
+            lambda agent, sp, rc, include_history: ([{"role": "system", "content": sp}], {}),
+        )
+        monkeypatch.setattr(mod, "_resolve_auto_tool_rounds", lambda agent, cap: 0)
+
+        async def auto_stream_must_not_run(*a, **k):
+            raise AssertionError("auto loop used the streaming path despite disable_streaming")
+
+        monkeypatch.setattr(mod, "call_llm_auto_stream", auto_stream_must_not_run)
+
+        agent = self._agent(disable=True)
+        sink = _RecordingSink()
+        result = await mod.call_llm_auto(agent, "sys", "ctx", stream_sink=sink)
+
+        assert result == "auto answer"
+        assert "".join(sink.content) == "auto answer"
+        assert sink.ended == 1
+
+    @pytest.mark.asyncio
+    async def test_call_llm_auto_still_streams_when_not_disabled(self, monkeypatch):
+        import vulnclaw.agent.llm_client as mod
+
+        async def fake_auto_stream(agent, sp, rc, sink, include_history=True, max_tool_rounds=None):
+            return "auto streamed"
+
+        monkeypatch.setattr(mod, "call_llm_auto_stream", fake_auto_stream)
+
+        agent = self._agent(disable=False)
+        result = await mod.call_llm_auto(agent, "sys", "ctx", stream_sink=_RecordingSink())
+        assert result == "auto streamed"

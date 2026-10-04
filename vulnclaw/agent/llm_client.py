@@ -748,6 +748,41 @@ def _format_tool_results_fallback(
     return "\n".join(parts)
 
 
+def _streaming_disabled(agent: AgentContext) -> bool:
+    """Whether ``session.disable_streaming`` is set on the runtime config.
+
+    Shared by every entry point that can hold a sink (round13 F2: the guard
+    used to live only in ``call_llm``, so the autonomous loop — the path whose
+    SSE stalls motivated the switch — stayed streaming regardless of the flag).
+    """
+    return bool(
+        getattr(
+            getattr(getattr(agent, "config", None), "session", None),
+            "disable_streaming",
+            False,
+        )
+    )
+
+
+async def _replay_to_sink(stream_sink: Optional["StreamSink"], text: str) -> None:
+    """Emit a complete non-streamed answer through a display sink in one chunk.
+
+    Round13 F1: the disable_streaming guard used to drop the sink without any
+    replay, so a single-turn reply became invisible in the TUI (the CLI prints
+    only through the sink — the ``result.output`` print is deliberately
+    commented out in cli/main.py). Mirrors the content emission of the
+    streaming paths; best-effort, since the answer itself is already obtained.
+    """
+    if stream_sink is None or not text:
+        return
+    try:
+        stream_sink.on_content_token(text)
+        stream_sink.on_stream_end()
+    except Exception:
+        # A broken display sink must not destroy an answer we already hold.
+        pass
+
+
 async def call_llm(
     agent: AgentContext,
     system_prompt: str,
@@ -761,11 +796,8 @@ async def call_llm(
     # non-streaming requests to the same endpoint completed in ~1s, 3/3).
     # The full text is replayed to the sink in one chunk so the TUI still
     # shows the result.
-    if (
-        stream_sink is not None
-        and getattr(getattr(agent, "config", None), "session", None) is not None
-        and getattr(agent.config.session, "disable_streaming", False)
-    ):
+    original_sink = stream_sink
+    if stream_sink is not None and _streaming_disabled(agent):
         stream_sink = None
     if stream_sink is not None:
         return await call_llm_stream(agent, system_prompt, stream_sink)
@@ -784,11 +816,17 @@ async def call_llm(
 
     choice = response.choices[0]
     if choice.message.tool_calls:
-        return _prepend_retry_notice(await handle_tool_calls(agent, choice.message), retry_attempts)
-    return _prepend_retry_notice(
+        result = _prepend_retry_notice(
+            await handle_tool_calls(agent, choice.message), retry_attempts
+        )
+        await _replay_to_sink(original_sink, result)
+        return result
+    text = _prepend_retry_notice(
         _apply_repetition_guard(agent, extract_response(choice.message)),
         retry_attempts,
     )
+    await _replay_to_sink(original_sink, text)
+    return text
 
 
 async def call_llm_auto(
@@ -807,7 +845,11 @@ async def call_llm_auto(
     AgentState evidence and represented here by bounded high-signal previews,
     which keeps the active context useful without discarding raw evidence.
     """
-    if stream_sink is not None:
+    # round13 F2: the disable_streaming guard must cover the autonomous loop —
+    # its SSE stalls are what motivated the switch. When disabled, run the
+    # non-streaming body and replay the final text to the sink once, so the
+    # TUI (which prints only through the sink) still shows every answer.
+    if stream_sink is not None and not _streaming_disabled(agent):
         return await call_llm_auto_stream(
             agent,
             system_prompt,
@@ -816,7 +858,26 @@ async def call_llm_auto(
             include_history=include_history,
             max_tool_rounds=max_tool_rounds,
         )
+    result = await _call_llm_auto_nonstream(
+        agent,
+        system_prompt,
+        round_context,
+        include_history=include_history,
+        max_tool_rounds=max_tool_rounds,
+    )
+    await _replay_to_sink(stream_sink, result)
+    return result
 
+
+async def _call_llm_auto_nonstream(
+    agent: AgentContext,
+    system_prompt: str,
+    round_context: str,
+    *,
+    include_history: bool = True,
+    max_tool_rounds: int | None = None,
+) -> str:
+    """The non-streaming auto-mode body (tool loop, no display sink)."""
     messages, round_message = _build_tool_loop_messages(
         agent,
         system_prompt,
