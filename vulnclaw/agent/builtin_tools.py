@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -1715,6 +1716,27 @@ def enforce_port_constraints(agent: AgentContext, ports: list[int], *, target: s
     return None
 
 
+def _normalize_url_path(path: str) -> str:
+    """Resolve dot segments in a URL path before scope matching (round13 F3).
+
+    ``urlparse().path`` does NOT normalize ``..``/``.`` segments, and servers
+    resolve them (and percent-encoded dots) before routing — so a raw-path
+    prefix check let ``/storage/../admin`` pass an allowed ``/storage`` prefix
+    while the request landed on ``/admin``. Returns a dot-segment-free path
+    with collapsed duplicate leading slashes (``posixpath.normpath`` keeps
+    ``//x`` intact); relative inputs pass through unchanged.
+    """
+    from urllib.parse import unquote
+
+    text = unquote(str(path or ""))
+    if not text:
+        return ""
+    text = re.sub(r"^/+", "/", text)
+    if not text.startswith("/"):
+        return text
+    return posixpath.normpath(text)
+
+
 def enforce_host_path_constraints(
     agent: AgentContext, *, host: str = "", path: str = "", target: str = ""
 ) -> str | None:
@@ -1731,20 +1753,27 @@ def enforce_host_path_constraints(
     if host and host_in_scope(host, constraints.blocked_hosts):
         return f"[constraint_violation] Host {host} is blocked by task constraints for target {target or host}."
 
+    # Both checks below match on the DOT-SEGMENT-RESOLVED path (round13 F3) so
+    # a request cannot walk out of (or into) a scope edge behind ``..`` — the
+    # raw path from urlparse is only kept as an additional exact-match input.
+    normalized_path = _normalize_url_path(path)
+    normalized_blocked = {_normalize_url_path(b) for b in constraints.blocked_paths}
+
     if constraints.allowed_paths and path:
         # Prefix semantics: an allowed entry "/storage" covers "/storage" and
         # every subpath ("/storage/{addr}/{slot}"). Exact-match here made a
         # task description that mentioned the API path lock the whole run to
         # a single unusable literal path (round-12 UX postmortem).
         in_scope = any(
-            path == a or path.startswith(a.rstrip("/") + "/")
+            normalized_path == _normalize_url_path(a)
+            or normalized_path.startswith(_normalize_url_path(a).rstrip("/") + "/")
             for a in constraints.allowed_paths
         )
         if not in_scope:
             allowed = ", ".join(constraints.allowed_paths)
             return f"[constraint_violation] Path {path} is outside allowed scope [{allowed}] for target {target or host}."
 
-    if path and path in constraints.blocked_paths:
+    if path and (path in constraints.blocked_paths or normalized_path in normalized_blocked):
         return f"[constraint_violation] Path {path} is blocked by task constraints for target {target or host}."
 
     return None
