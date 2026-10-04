@@ -205,13 +205,39 @@ def _slugify(text: str) -> str:
     return text[:48] or "playbook"
 
 
+_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+
+
+def _cjk_tokens(text: str) -> set[str]:
+    """Bigram tokens from runs of CJK ideographs.
+
+    ``re.findall(r"[a-z0-9]+")`` drops every CJK character, so a Chinese
+    fingerprint tokenized to an EMPTY set and a Chinese query scored 0 against
+    every note — playbook recall was structurally dead for Chinese (measured
+    2026-10-04: ten drill lessons stored with a Chinese fingerprint were
+    unfindable by the exact checklist queries they were written for). Bigrams
+    of consecutive ideographs are the dependency-free standard fix: "应急响应"
+    yields {应急, 急响, 响应}, which overlaps any other text containing those
+    character pairs. A lone ideograph run of length 1 is kept as a unigram.
+    """
+    out: set[str] = set()
+    for run in _CJK_RUN.findall(text):
+        if len(run) == 1:
+            out.add(run)
+        else:
+            out.update(run[i:i + 2] for i in range(len(run) - 1))
+    return out
+
+
 def _tokenize(fingerprint: str) -> set[str]:
     """Normalize a fingerprint into a comparable token set.
 
     The fingerprint is free text produced by the agent from its first-round
     probe (page title, distinguishing paths, form fields). We lowercase,
-    split on non-alphanumerics, drop stop words and pure-numeric/short tokens,
-    and dedupe.
+    split ASCII on non-alphanumerics, drop stop words and pure-numeric/short
+    tokens, and dedupe. CJK runs are additionally tokenized into bigrams (see
+    :func:`_cjk_tokens`) so Chinese fingerprints and queries participate in
+    recall instead of vanishing.
     """
     text = unicodedata.normalize("NFKD", (fingerprint or "").lower())
     tokens: set[str] = set()
@@ -223,6 +249,7 @@ def _tokenize(fingerprint: str) -> set[str]:
         if tok.isdigit():
             continue
         tokens.add(tok)
+    tokens |= _cjk_tokens(text)
     return tokens
 
 

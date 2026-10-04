@@ -761,13 +761,36 @@ class TestCaptureRefusesToWriteANoteNobodyCanRecall:
 
         A stored note with an empty token set is a net loss: it occupies a slot, it is
         offered to nobody, and it makes the store look richer than it is.
+
+        (The goal here used to be a Chinese phrase, back when ``_tokenize`` dropped
+        CJK entirely; since the CJK-bigram fix a Chinese goal is a legitimate
+        recallable key, so the degenerate stand-in is punctuation-only.)
         """
         bb = _seed_blackboard()
         assert (
-            pb.capture_run_notes(target="E:", goal="中文目标", blackboard=bb, outcome="solved")
+            pb.capture_run_notes(target="E:", goal="!!!???---", blackboard=bb, outcome="solved")
             is None
         )
         assert list(tmp_playbooks.glob("*.md")) == []
+
+    def test_a_chinese_goal_now_widens_and_the_note_is_recallable(self, tmp_playbooks):
+        """CJK-bigram flip side (2026-10-04): a Chinese GOAL is a real key now.
+
+        Before the fix this exact call declined to write (the goal tokenized to
+        nothing); now it widens the fingerprint with queryable bigrams and the
+        note is found by a pure-Chinese query.
+        """
+        bb = _seed_blackboard()
+        ack = pb.capture_run_notes(
+            target="E:", goal="中文应急响应排查目标", blackboard=bb, outcome="solved"
+        )
+        assert ack is not None, "a Chinese goal is a queryable key since the CJK fix"
+        note = next(n for n in pb.list_playbooks() if n.slug == ack["slug"])
+        assert note.tokens(), "the widened fingerprint must be tokenizable"
+        hits = pb.lookup_playbook("应急响应 排查", limit=5)
+        assert any(h["slug"] == note.slug for h in hits), (
+            "the note must be found by a pure-Chinese query sharing its goal tokens"
+        )
 
     def test_a_normal_target_is_stored_unchanged(self, tmp_playbooks):
         """The widening must not touch the normal path (URL / binary fingerprints)."""
