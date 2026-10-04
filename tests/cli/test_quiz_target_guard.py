@@ -89,3 +89,37 @@ class TestApiPathProseNotATarget:
         assert _should_switch_target(
             "审计 E:/vulnclaw/work/manual/App.php", "E:/vulnclaw/work/manual/App.php", CURRENT_TARGET
         ) is True
+
+
+class TestApiPathProseFirstAdoption:
+    """round13 F4: the first-adoption branch (``new_target and not
+    current_target``) needs the same API-path gate the switch guard got in
+    6208773 — a FIRST message citing bare API-path prose must not lock the run
+    to a literal path target + strict local constraints (the remaining
+    first-shot variant of the 2026-10-01 PrizeEscrow postmortem)."""
+
+    def test_shared_predicate_flags_single_segment_paths(self):
+        from vulnclaw.cli.main import _is_api_path_prose
+
+        assert _is_api_path_prose("/storage") is True
+        assert _is_api_path_prose("/logs") is True
+        assert _is_api_path_prose("http://x.example.com") is False
+        assert _is_api_path_prose("192.168.1.1") is False
+
+    def test_multi_segment_paths_stay_adoptable(self):
+        from vulnclaw.cli.main import _is_api_path_prose
+
+        # A multi-segment path is a deliberate local-file target, not prose.
+        assert _is_api_path_prose("/home/user/ctf") is False
+        assert _is_api_path_prose("E:/vulnclaw/work/App.php") is False
+
+    def test_prizeescrow_first_message_would_not_adopt(self):
+        # The adoption branch is `new_target and not current_target and not
+        # _is_api_path_prose(new_target)`; the prose target the extractor
+        # returns is refused there, so current_target stays unset and no
+        # local-path constraints are applied.
+        from vulnclaw.cli.main import _is_api_path_prose
+
+        new_target = _extract_target_from_input(TestApiPathProseNotATarget.TASK)
+        assert new_target == "/storage"
+        assert _is_api_path_prose(new_target) is True

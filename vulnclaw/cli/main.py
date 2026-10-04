@@ -972,7 +972,12 @@ def _run_repl() -> None:
                 # Reset auto mode on target switch
                 auto_mode_active = False
                 last_auto_input = ""
-            elif new_target and not current_target:
+            elif new_target and not current_target and not _is_api_path_prose(new_target):
+                # round13 F4: the first-adoption branch needs the same API-path
+                # gate as the switch guard — without it a first message citing
+                # bare API-path prose ("/storage/...") still locked the run to
+                # a literal path target + strict local constraints (the exact
+                # first-shot variant of the 2026-10-01 PrizeEscrow postmortem).
                 current_target = new_target
                 current_phase = "Ready"
 
@@ -4633,6 +4638,20 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
     return None
 
 
+def _is_api_path_prose(target: str) -> bool:
+    """A single-segment POSIX path ("/storage", "/logs", "/session") extracted
+    from a task description is API-path prose, not a target: acting on it once
+    replaced a live HTTP target with a literal path AND applied local path
+    constraints that locked every real request out of scope (2026-10-01
+    PrizeEscrow postmortem). Consumed by BOTH the target-switch guard and the
+    first-adoption branch (round13 F4: the first message was the remaining
+    variant that still locked the run).
+    """
+    import re
+
+    return bool(re.match(r"^/[A-Za-z0-9_.\-{}]+$", str(target or "")))
+
+
 def _should_switch_target(
     user_input: str, new_target: Optional[str], current_target: Optional[str]
 ) -> bool:
@@ -4650,12 +4669,7 @@ def _should_switch_target(
 
     if not new_target or not current_target or new_target == current_target:
         return False
-    # A single-segment POSIX path ("/storage", "/logs", "/session") extracted
-    # from a task description is API-path prose, not a retarget: switching on
-    # it once replaced a live HTTP target with a literal path AND applied local
-    # path constraints that locked every real request out of scope
-    # (2026-10-01 PrizeEscrow postmortem).
-    if re.match(r"^/[A-Za-z0-9_.\-{}]+$", new_target):
+    if _is_api_path_prose(new_target):
         return False
     if not _looks_like_quiz(user_input):
         return True
