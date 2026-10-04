@@ -171,3 +171,88 @@ class TestRecordAnswer:
         )
         assert "already recorded" in full, full
         assert len(findings) == 1
+
+    async def test_same_number_with_drifted_wording_is_idempotent(self):
+        """round13 F5: the idempotency matcher was text-only, so a same-number
+        re-record with drifting wording ("Q1:攻击者IP" vs "Q1:攻击者的IP")
+        opened a second card within one session. Identity must use the same
+        double key as merge_session_state: question NUMBER first."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+        from vulnclaw.config.domain_models import (
+            ANSWER_CARD_VULN_TYPE,
+            VulnerabilityFinding,
+        )
+
+        existing = VulnerabilityFinding(
+            title="Q1: 攻击者IP",
+            description="203.0.113.77",
+            evidence="first evidence",
+            vuln_type=ANSWER_CARD_VULN_TYPE,
+        )
+        findings = [existing]
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+
+        result = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                # Same number, drifted wording — must dedup onto the first card.
+                "question": "Q1: 攻击者的IP是啥",
+                "answer": "203.0.113.77",
+                "evidence": "second evidence",
+            },
+        )
+        assert "answer already recorded" in result, result
+        assert len(findings) == 1
+        assert "second evidence" in existing.evidence
+
+    async def test_different_question_with_same_number_still_dedups_by_design(self):
+        """Documented trade-off from round-12 F1: a competition sheet has
+        exactly one Q1, so same-number is always the same question re-recorded.
+        The number leg must win over the wording difference here too."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+        from vulnclaw.config.domain_models import (
+            ANSWER_CARD_VULN_TYPE,
+            VulnerabilityFinding,
+        )
+
+        existing = VulnerabilityFinding(
+            title="Q1: 攻击者IP",
+            description="203.0.113.77",
+            evidence="",
+            vuln_type=ANSWER_CARD_VULN_TYPE,
+        )
+        findings = [existing]
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+
+        result = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "Q1: webshell 密码是什么",  # same number, different question
+                "answer": "cmd2026",
+                "evidence": "",
+            },
+        )
+        assert "answer already recorded" in result, result
+        assert len(findings) == 1

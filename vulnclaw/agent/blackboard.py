@@ -770,17 +770,32 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
             # Idempotency: the self-check discipline may re-record a question
             # that is already on the sheet (mock exam 6 produced 20 cards for
             # 10 questions). Same-question re-records update nothing and just
-            # confirm — the card already counts. Compared on a whitespace- and
-            # case-normalised form: the model writes the same question with or
-            # without spaces ("Q1: 攻击者 IP" vs "Q1:攻击者IP"), and an exact
-            # string match let that through as a duplicate card.
+            # confirm — the card already counts. Identity is the same DOUBLE
+            # KEY as merge_session_state (round13 F5: this matcher was still
+            # text-only, so same-number re-records with drifting wording —
+            # "Q1:攻击者IP" vs "Q1:攻击者的IP" — opened a second card within
+            # one session): question NUMBER when both cards carry one (a
+            # competition sheet has exactly one Q1), falling back to the
+            # normalized question TEXT for non-numbered cards.
+            from vulnclaw.config.domain_models import answer_card_number
+
             wanted = _normalize_question(question)
+            wanted_num = answer_card_number(question)
             existing = next(
                 (
                     f
                     for f in getattr(state, "findings", []) or []
                     if str(getattr(f, "vuln_type", "")) == ANSWER_CARD_VULN_TYPE
-                    and _normalize_question(getattr(f, "title", "")) == wanted
+                    and (
+                        (
+                            wanted_num
+                            and answer_card_number(str(getattr(f, "title", ""))) == wanted_num
+                        )
+                        or (
+                            not wanted_num
+                            and _normalize_question(str(getattr(f, "title", ""))) == wanted
+                        )
+                    )
                 ),
                 None,
             )
