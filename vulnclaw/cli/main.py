@@ -4646,10 +4646,15 @@ def _is_api_path_prose(target: str) -> bool:
     PrizeEscrow postmortem). Consumed by BOTH the target-switch guard and the
     first-adoption branch (round13 F4: the first message was the remaining
     variant that still locked the run).
+
+    Matching runs on the whitespace-stripped input with ``re.fullmatch``:
+    ``$`` alone also matches just before a string-final newline, which let
+    artifacts like ``"/logs\\n\\n"`` slip past as adoptable targets
+    (round13 low note).
     """
     import re
 
-    return bool(re.match(r"^/[A-Za-z0-9_.\-{}]+$", str(target or "")))
+    return bool(re.fullmatch(r"/[A-Za-z0-9_.\-{}]+", str(target or "").strip()))
 
 
 def _should_switch_target(

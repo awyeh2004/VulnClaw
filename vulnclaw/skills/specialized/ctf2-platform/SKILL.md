@@ -3,6 +3,7 @@ name: ctf2-platform
 description: "Use this skill when the user wants to operate CTF2 platform through an AI assistant: inspect or update profile username/avatar/bio/invisible mode, list daily challenges, browse practice grounds and attachments, start challenge environments and obtain access URLs, submit confirmed flags, inspect competitions, review submissions, get learning recommendations, and let a registered CTF2 Agent solve public practice challenges on its own scoreboard through CTF2 Open API or MCP tools."
 license: MIT
 compatibility: "Requires network access, a browser-capable OAuth 2.1 MCP client, and access to the configured CTF2 platform."
+requires_target: false
 metadata:
   version: "1.4.0"
   platform: "CTF2"

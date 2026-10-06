@@ -106,6 +106,17 @@ class TestApiPathProseFirstAdoption:
         assert _is_api_path_prose("http://x.example.com") is False
         assert _is_api_path_prose("192.168.1.1") is False
 
+    def test_newline_artifacts_are_still_prose(self):
+        # round13 low note: `$` matched before a string-final newline, but only
+        # ONE; "/logs\n\n" slipped through as an adoptable target. The
+        # strip+fullmatch form classifies every trailing-newline artifact as
+        # prose.
+        from vulnclaw.cli.main import _is_api_path_prose
+
+        assert _is_api_path_prose("/logs\n") is True
+        assert _is_api_path_prose("/logs\n\n") is True
+        assert _is_api_path_prose(" /session ") is True
+
     def test_multi_segment_paths_stay_adoptable(self):
         from vulnclaw.cli.main import _is_api_path_prose
 
