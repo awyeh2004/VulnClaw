@@ -152,6 +152,18 @@ class TestRebindingAndDynamicLookupAreSeen:
             # (c) star import: every public name of the module is bound.
             ("from subprocess import *\nrun(['id'])\n", "subprocess.run"),
             ("from os import *\nsystem('id')\n", "os.system"),
+            # (d) a NESTED def is invisible at module scope: it must not
+            # suppress the star binding (round9 low-confidence ④ — the old
+            # whole-tree walk let a helper-inner `def run` hide the call).
+            (
+                "from subprocess import *\n"
+                "def helper(argv):\n"
+                "    def run(inner):\n"
+                "        return inner\n"
+                "    return run\n"
+                "run(['id'])\n",
+                "subprocess.run",
+            ),
         ],
     )
     def test_the_spawn_is_reported(self, source, expected):

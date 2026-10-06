@@ -535,3 +535,27 @@ class TestTheIndexSurvivesTheKbDirectoryMoving:
         assert reopened.get_stats().get("unresolved_files") == 1, (
             "an unresolvable row is skipped by every reader; it must be visible in stats"
         )
+
+    def test_legacy_tail_is_anchored_to_the_row_category(self, tmp_path):
+        """Round9 low-confidence ③: the moved-row tail match used to accept any
+        ≥2-part tail, so an absolute row whose tail directory merely shared a
+        name with a DIFFERENT category's directory resolved onto that foreign
+        file. The tail must start at the row's own category."""
+        from vulnclaw.kb.store import KnowledgeStore
+
+        store = KnowledgeStore(store_dir=tmp_path)
+        real = tmp_path / "crypto" / "entry.json"
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text("{}", encoding="utf-8")
+        decoy = tmp_path / "weird" / "entry.json"
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_text("{}", encoding="utf-8")
+
+        # tail "weird/entry.json" hits the decoy; the row's category is crypto.
+        foreign_shaped = r"C:\old-kb\crypto\weird\entry.json"
+        assert store._resolve_entry_path(foreign_shaped, "crypto") is None, (
+            "an unanchored tail must not resolve into another category"
+        )
+        # the anchored tail still resolves a genuine moved row
+        moved = r"C:\elsewhere\crypto\entry.json"
+        assert store._resolve_entry_path(moved, "crypto") == real

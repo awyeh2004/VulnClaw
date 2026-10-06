@@ -434,16 +434,25 @@ def _resolve_aliases(name: str, aliases: dict[str, str]) -> str:
 
 
 def _defined_names(tree: ast.AST) -> set[str]:
-    """Names this module binds with ``def``/``class``.
+    """Names this module binds at MODULE level with ``def``/``class``.
 
     Used to keep a ``from X import *`` binding from shadowing the module's own function
-    of the same name (see :func:`_star_import_bindings`).
+    of the same name (see :func:`_star_import_bindings`). Round9 low-confidence ④: this
+    used to ``ast.walk`` the whole tree, so a NESTED def sharing a spawn-callable's
+    name (e.g. a helper-inner ``def run``) suppressed the star-binding detection and
+    hid a real module-level ``run(argv)`` call from the audit. Only names visible at
+    module scope count: top-level statements are descended for control flow
+    (``if``/``try``/``with``), never into function or class bodies.
     """
-    return {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
+    names: set[str] = set()
+    stack: list[ast.AST] = list(getattr(tree, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue  # a def nested in another body is invisible at module scope
+        stack.extend(ast.iter_child_nodes(node))
+    return names
 
 
 def _star_import_bindings(tree: ast.AST, defined: set[str]) -> dict[str, str]:

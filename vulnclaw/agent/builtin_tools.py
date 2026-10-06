@@ -4081,11 +4081,18 @@ _BG_BLOCKED_PATTERNS = (
 )
 
 
-def _bg_new_id() -> str:
+def _bg_new_id() -> tuple[str, int]:
+    """Allocate the next task id together with its launch-order seq.
+
+    Both come back from ONE `_bg_lock` hold: the row insert used to re-read
+    the global `_bg_seq` after a second lock acquisition, so a concurrent
+    launch in between handed two rows the same seq and degraded eviction
+    ordering (round9 low-confidence ①, closed round14).
+    """
     global _bg_seq
     with _bg_lock:
         _bg_seq += 1
-        return f"bg{_bg_seq}"
+        return f"bg{_bg_seq}", _bg_seq
 
 
 def _evict_finished_bg_tasks() -> None:
@@ -4332,14 +4339,14 @@ async def execute_bg_launch(agent: AgentContext, args: dict[str, Any]) -> str:
         import shlex
 
         cmd = shlex.split(cmd_raw)
-    task_id = _bg_new_id()
+    task_id, launch_seq = _bg_new_id()
     with _bg_lock:
         _bg_tasks[task_id] = {
             "status": "running",
             "cmd": cmd_raw,
             "started": time.time(),
             # Launch order, used for eviction ordering (see _evict_finished_bg_tasks).
-            "seq": _bg_seq,
+            "seq": launch_seq,
         }
         _evict_finished_bg_tasks()
     t = _threading.Thread(target=_bg_run, args=(task_id, cmd, timeout), daemon=True)

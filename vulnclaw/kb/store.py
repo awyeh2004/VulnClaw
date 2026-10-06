@@ -199,7 +199,7 @@ class KnowledgeStore:
             meta["status"] = status
         return meta
 
-    def _resolve_entry_path(self, stored: Any) -> Optional[Path]:
+    def _resolve_entry_path(self, stored: Any, category: str = "") -> Optional[Path]:
         """The file a row points at, relative-to-the-store first, absolute second.
 
         Both orders appear in real indexes: rows written before this fix are absolute
@@ -219,10 +219,17 @@ class KnowledgeStore:
         # A legacy absolute row whose machine path is gone: the file may still be sitting
         # under the CURRENT store (a moved/copied KB), so try the tail as well -- including
         # the category directory, which is what makes the tail unambiguous.
+        # Round9 low-confidence ③: the tail is only accepted when it starts at the
+        # row's OWN category directory. Unanchored tails could land a moved row on a
+        # same-named file of a DIFFERENT category (...\weird\entry.md resolving onto a
+        # store category "weird") -- the claim that the category made the tail
+        # unambiguous was not actually enforced before.
         parts = Path(raw).parts
         for start in range(len(parts)):
             tail = Path(*parts[start:])
             if len(tail.parts) < 2:
+                continue
+            if category and tail.parts[0] != category:
                 continue
             candidate = self.store_dir / tail
             if candidate.exists():
@@ -369,7 +376,7 @@ class KnowledgeStore:
                     or (entry_status and query_lower in entry_status)
                 ):
                     # Load full entry
-                    resolved = self._resolve_entry_path(entry_meta.get("file"))
+                    resolved = self._resolve_entry_path(entry_meta.get("file"), cat)
                     if resolved is not None:
                         with open(resolved, "r", encoding="utf-8") as f:
                             data = json.load(f)
@@ -390,7 +397,7 @@ class KnowledgeStore:
         entries: list[dict[str, Any]] = []
         for cat, metas in self._index.items():
             for entry_meta in metas:
-                resolved = self._resolve_entry_path(entry_meta.get("file"))
+                resolved = self._resolve_entry_path(entry_meta.get("file"), cat)
                 if resolved is None:
                     continue
                 try:
@@ -422,9 +429,9 @@ class KnowledgeStore:
         stats = {cat: len(entries) for cat, entries in self._index.items()}
         unresolved = sum(
             1
-            for entries in self._index.values()
+            for cat, entries in self._index.items()
             for entry in entries
-            if self._resolve_entry_path(entry.get("file")) is None
+            if self._resolve_entry_path(entry.get("file"), cat) is None
         )
         if unresolved:
             stats["unresolved_files"] = unresolved
