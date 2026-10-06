@@ -712,16 +712,6 @@ def _evidence_content_for(agent: "AgentContext", ref: str) -> str:
     return ""
 
 
-def _normalize_question(text: str) -> str:
-    """Delegate to the shared canonical answer-card identity (round-12 F1:
-    record_answer idempotency and merge_session_state must key on the SAME
-    normalization — two mechanisms produced same-number card drops and
-    width-drift duplicate channels at the same time)."""
-    from vulnclaw.config.domain_models import normalize_answer_question
-
-    return normalize_answer_question(text)
-
-
 def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> str:
     """Record one graded answer: a blackboard fact AND a finding (double write).
 
@@ -770,32 +760,22 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
             # Idempotency: the self-check discipline may re-record a question
             # that is already on the sheet (mock exam 6 produced 20 cards for
             # 10 questions). Same-question re-records update nothing and just
-            # confirm — the card already counts. Identity is the same DOUBLE
-            # KEY as merge_session_state (round13 F5: this matcher was still
-            # text-only, so same-number re-records with drifting wording —
-            # "Q1:攻击者IP" vs "Q1:攻击者的IP" — opened a second card within
-            # one session): question NUMBER when both cards carry one (a
-            # competition sheet has exactly one Q1), falling back to the
-            # normalized question TEXT for non-numbered cards.
-            from vulnclaw.config.domain_models import answer_card_number
+            # confirm — the card already counts. Identity is ONE pairwise
+            # predicate shared with merge_session_state (round12 F1 number-
+            # vs-text, round13 F5 double key, round14 F-C mixed marker pair):
+            # both-numbered compares numbers (a sheet has exactly one Q1, so
+            # different numbers are different rows even with identical
+            # wording); any unnumbered side compares number-stripped text,
+            # which is what folds "Q1: X" onto "X" — the marker used to ride
+            # inside the title text and match neither leg.
+            from vulnclaw.config.domain_models import answer_cards_same_identity
 
-            wanted = _normalize_question(question)
-            wanted_num = answer_card_number(question)
             existing = next(
                 (
                     f
                     for f in getattr(state, "findings", []) or []
                     if str(getattr(f, "vuln_type", "")) == ANSWER_CARD_VULN_TYPE
-                    and (
-                        (
-                            wanted_num
-                            and answer_card_number(str(getattr(f, "title", ""))) == wanted_num
-                        )
-                        or (
-                            not wanted_num
-                            and _normalize_question(str(getattr(f, "title", ""))) == wanted
-                        )
-                    )
+                    and answer_cards_same_identity(question, str(getattr(f, "title", "")))
                 ),
                 None,
             )

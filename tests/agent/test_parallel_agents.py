@@ -391,3 +391,49 @@ def test_merge_non_q_prefixed_card_does_not_duplicate():
 
     cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
     assert len(cards) == 1, f"non-Q card duplicated on re-merge: {len(cards)}"
+
+
+def test_merge_numbered_unnumbered_pair_folds():
+    """Round-14 F-C: the Q<n> marker is part of the stored title, so a mixed
+    numbered/unnumbered pair ("Q1: 攻击者IP" vs "攻击者IP") matched neither
+    the number leg nor the exact-text leg and merge kept both cards. The
+    number-stripped fallback leg (mirroring record_answer) must fold them."""
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.parallel_agents import merge_session_state
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    parent_findings: list = [
+        VulnerabilityFinding(title="攻击者IP", vuln_type="ir-answer",
+                             description="203.0.113.77", evidence="ev-parent"),
+    ]
+    seen_ids: set = set()
+
+    def fake_add_finding(finding, skip_dedup=False):
+        if not skip_dedup and finding.finding_id in seen_ids:
+            return False
+        seen_ids.add(finding.finding_id)
+        parent_findings.append(finding)
+        return True
+
+    parent = SimpleNamespace(
+        findings=parent_findings, recon_data={}, notes={}, executed_steps=[],
+        add_finding=fake_add_finding,
+        _notify_checkpoint=lambda *a, **k: None,
+    )
+    child = SimpleNamespace(
+        findings=[
+            VulnerabilityFinding(title="Q1: 攻击者IP", vuln_type="ir-answer",
+                                 description="203.0.113.77 + port 8080",
+                                 evidence="ev-child"),
+        ],
+        recon_data={}, notes={}, executed_steps=[], step_records=[],
+    )
+    merge_session_state(parent, child)
+
+    cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
+    assert len(cards) == 1, f"mixed pair duplicated: {[f.title for f in cards]}"
+    assert cards[0].title == "攻击者IP", cards[0].title
+    assert "ev-parent" in cards[0].evidence and "ev-child" in cards[0].evidence, (
+        f"child evidence lost on merge: {cards[0].evidence!r}"
+    )

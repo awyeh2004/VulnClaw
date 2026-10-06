@@ -189,6 +189,52 @@ def normalize_answer_question(text: str) -> str:
     return re.sub(r"\s+", "", normalized).lower()
 
 
+def answer_card_text_without_number(text: str) -> str:
+    """Relaxed fallback identity: canonical key with a leading ``Q<n>`` marker
+    stripped.
+
+    The marker is part of the stored title, so a numbered re-record of an
+    unnumbered card ("Q1: 攻击者IP" vs "攻击者IP") matched neither the number
+    leg (the old card carries no number) nor the text leg (the marker rides
+    inside the text) — record_answer opened a second card and merge kept both
+    (round14 F-C). This key removes a leading Q-number (NFKC-folded first, so
+    full-width "Ｑ１：" collapses to "q1:") and delegates to
+    :func:`normalize_answer_question`, keeping ONE identity mechanism that is
+    merely marker-insensitive at the front. Consumers must always try the
+    number leg first; this only runs when that leg misses.
+    """
+    import re
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    stripped = re.sub(r"(?i)^\s*q\d+\s*[:.、,-]?\s*", "", normalized)
+    return normalize_answer_question(stripped)
+
+
+def answer_cards_same_identity(question_a: str, question_b: str) -> bool:
+    """Whether two answer-card titles denote the same answer-sheet entry.
+
+    ONE pairwise predicate shared by record_answer idempotency and
+    merge_session_state (round-12 F1 number-vs-text, round-13 F5 double key,
+    round-14 F-C mixed marker pair):
+
+    - both numbered: the number IS the identity — a competition sheet has
+      exactly one Q1, so the same number folds even when the wording drifted
+      or differs, and DIFFERENT numbers are different rows even when the
+      wording is identical ("Q1: 问题" / "Q2: 问题" are adjacent sheet rows);
+    - mixed or both unnumbered: the marker is part of the stored title, so
+      compare on the number-stripped text ("Q1: X" vs "X" is a re-record of
+      one question, not a second card).
+    """
+    num_a = answer_card_number(question_a)
+    num_b = answer_card_number(question_b)
+    if num_a and num_b:
+        return num_a == num_b
+    return answer_card_text_without_number(question_a) == answer_card_text_without_number(
+        question_b
+    )
+
+
 def answer_card_evidence_merge(existing_evidence: str, new_evidence: str) -> str:
     """Merge new evidence into an existing card's evidence, dropping duplicates.
 

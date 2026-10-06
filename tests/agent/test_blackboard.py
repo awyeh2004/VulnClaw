@@ -256,3 +256,131 @@ class TestRecordAnswer:
         )
         assert "answer already recorded" in result, result
         assert len(findings) == 1
+
+    async def test_numbered_rerecord_folds_unnumbered_card(self):
+        """round14 F-C: the marker is part of the stored title, so a numbered
+        re-record of an unnumbered card ("Q1: 攻击者IP" onto "攻击者IP")
+        matched neither the number leg (old card has no number) nor the text
+        leg (the marker rides inside the text) and opened a second card. The
+        number-stripped fallback leg must fold it back with the evidence."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+        from vulnclaw.config.domain_models import (
+            ANSWER_CARD_VULN_TYPE,
+            VulnerabilityFinding,
+        )
+
+        existing = VulnerabilityFinding(
+            title="攻击者IP",
+            description="203.0.113.77",
+            evidence="first evidence",
+            vuln_type=ANSWER_CARD_VULN_TYPE,
+        )
+        findings = [existing]
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+
+        result = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "Q1: 攻击者IP",  # numbered re-record of an unnumbered card
+                "answer": "203.0.113.77",
+                "evidence": "second evidence",
+            },
+        )
+        assert "answer already recorded" in result, result
+        assert len(findings) == 1
+        assert "second evidence" in existing.evidence
+
+    async def test_unnumbered_rerecord_folds_numbered_card(self):
+        """round14 F-C, reverse direction: an unnumbered re-record of a
+        numbered card must fold onto the numbered card via the stripped key."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+        from vulnclaw.config.domain_models import (
+            ANSWER_CARD_VULN_TYPE,
+            VulnerabilityFinding,
+        )
+
+        existing = VulnerabilityFinding(
+            title="Q1: 攻击者IP",
+            description="203.0.113.77",
+            evidence="first evidence",
+            vuln_type=ANSWER_CARD_VULN_TYPE,
+        )
+        findings = [existing]
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+
+        result = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "攻击者IP",  # same question, marker dropped
+                "answer": "203.0.113.77",
+                "evidence": "second evidence",
+            },
+        )
+        assert "answer already recorded" in result, result
+        assert len(findings) == 1
+        assert "second evidence" in existing.evidence
+
+    async def test_same_text_under_different_numbers_are_distinct(self):
+        """round14 F-C sibling axiom: on a competition sheet the NUMBER is the
+        row identity, so identical wording under different numbers ("Q1: 问题"
+        then "Q2: 问题") is two rows, not a re-record — the number leg wins
+        and no fallback may fold them. Mirrors the merge-side pin
+        test_merge_session_state_keeps_adjacent_answer_cards."""
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+        from vulnclaw.config.domain_models import (
+            ANSWER_CARD_VULN_TYPE,
+            VulnerabilityFinding,
+        )
+
+        existing = VulnerabilityFinding(
+            title="Q1: 问题",
+            description="answer-1",
+            evidence="first evidence",
+            vuln_type=ANSWER_CARD_VULN_TYPE,
+        )
+        findings = [existing]
+        state = SimpleNamespace(
+            add_finding=lambda f, skip_dedup=False: findings.append(f) or True,
+            findings=findings,
+        )
+        agent = SimpleNamespace(
+            runtime=SimpleNamespace(blackboard=Blackboard()),
+            context=SimpleNamespace(state=state),
+            session_state=SimpleNamespace(target="127.0.0.1:2224"),
+        )
+
+        result = await dispatch_blackboard_tool(
+            agent,
+            "blackboard_record_answer",
+            {
+                "question": "Q2: 问题",  # same wording, different row
+                "answer": "answer-2",
+                "evidence": "second evidence",
+            },
+        )
+        assert "finding recorded" in result, result
+        assert len(findings) == 2
