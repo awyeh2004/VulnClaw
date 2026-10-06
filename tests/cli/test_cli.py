@@ -1831,6 +1831,15 @@ class TestClassicReplSlashPalette:
         saved = {}
         monkeypatch.setattr(main_mod, "save_config", lambda cfg: saved.setdefault("cfg", cfg))
         # Keep the switch pure: no real locale reload / global rebuild.
+        # `_()` lazily self-heals by calling init_i18n when the global
+        # `_translator` is None (i18n/__init__.py:192); a bare no-op patch
+        # makes that heal branch dereference None — the failure only fired
+        # when earlier tests in the same process left `_translator` unset,
+        # which is why single/full runs passed while class/file runs failed.
+        # Pre-seed a stub so `_()` never enters the heal branch.
+        monkeypatch.setattr(
+            i18n_mod, "_translator", type("_StubTranslator", (), {"t": staticmethod(lambda key, **kw: key)})()
+        )
         monkeypatch.setattr(i18n_mod, "init_i18n", lambda *a, **k: None)
         monkeypatch.setattr(tui_mod, "rebuild_translations", lambda: None)
 
