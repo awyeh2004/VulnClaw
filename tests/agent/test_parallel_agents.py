@@ -430,6 +430,10 @@ def test_merge_numbered_unnumbered_pair_folds():
         recon_data={}, notes={}, executed_steps=[], step_records=[],
     )
     merge_session_state(parent, child)
+    # Round11 observation ⑤ closure: the same (parent, child) pair merged
+    # twice must stay ONE card — the predicate re-matches and only merges
+    # evidence, whatever the marker shapes on either side.
+    merge_session_state(parent, child)
 
     cards = [f for f in parent_findings if f.vuln_type == "ir-answer"]
     assert len(cards) == 1, f"mixed pair duplicated: {[f.title for f in cards]}"
