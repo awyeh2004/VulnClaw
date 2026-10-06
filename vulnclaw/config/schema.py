@@ -657,6 +657,24 @@ class SessionConfig(BaseModel):
             "still shows the result."
         ),
     )
+    llm_first_token_timeout_s: int = Field(
+        default=120,
+        description=(
+            "Streaming watchdog: abort the stream when no first chunk (reasoning "
+            "or content) arrives within this many seconds. The stall is retried "
+            "per the streaming fallback path (auto mode finishes the turn "
+            "non-streaming). 0 or negative falls back to the 120s default."
+        ),
+    )
+    llm_inter_chunk_timeout_s: int = Field(
+        default=60,
+        description=(
+            "Streaming watchdog: abort the stream when no new chunk arrives for "
+            "this many seconds after generation has started. Catches mid-"
+            "generation stalls in seconds instead of the 10-40 minute silent "
+            "hangs a non-streamed request cannot distinguish from slow output."
+        ),
+    )
     show_thinking: bool = Field(
         default=False, description="Show LLM thinking/reasoning output (default: off)"
     )

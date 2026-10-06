@@ -405,6 +405,8 @@ async def _stream_chat_completion_message(
     stream = _ensure_async_iter(response)
     if stream is None:
         raise ValueError("LLM response is not a valid stream object")
+    wd_first_s, wd_inter_s = _stream_timeouts(agent)
+    stream = _ChunkWatchdog(stream, wd_first_s, wd_inter_s)
 
     async for chunk in stream:
         if not chunk.choices:
@@ -764,6 +766,58 @@ def _streaming_disabled(agent: AgentContext) -> bool:
     )
 
 
+class _StreamStalled(RuntimeError):
+    """No chunk arrived within the watchdog budget (first-token or inter-chunk).
+
+    The message deliberately contains the word "streaming" so the existing
+    streaming-fallback matchers (``"streaming" in error_text``) route it to the
+    non-streaming recovery path.
+    """
+
+
+def _stream_timeouts(agent: AgentContext) -> tuple[float, float]:
+    """(first_token_s, inter_chunk_s) watchdog budgets from the runtime config."""
+    session = getattr(getattr(agent, "config", None), "session", None)
+    first = float(getattr(session, "llm_first_token_timeout_s", None) or 120)
+    inter = float(getattr(session, "llm_inter_chunk_timeout_s", None) or 60)
+    return max(10.0, first), max(10.0, inter)
+
+
+class _ChunkWatchdog:
+    """Wrap an async chunk stream with bounded waits.
+
+    Streaming is what makes a gateway stall DISTINGUISHABLE from slow
+    generation: a stalled stream produces no bytes, so waiting on the next
+    chunk with a timeout detects it in seconds — a non-streamed request
+    cannot, and that is how a hung turn used to idle for 10-40 minutes.
+    The first chunk gets ``first_timeout_s`` (queuing + model latency);
+    every later chunk gets ``inter_chunk_s`` (generation cadence).
+    """
+
+    def __init__(self, stream: Any, first_timeout_s: float, inter_chunk_s: float) -> None:
+        self._stream = stream
+        self._first = first_timeout_s
+        self._inter = inter_chunk_s
+        self._seen_chunk = False
+
+    def __aiter__(self) -> "_ChunkWatchdog":
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            item = await asyncio.wait_for(
+                self._stream.__anext__(), timeout=self._first if not self._seen_chunk else self._inter
+            )
+        except asyncio.TimeoutError as exc:
+            phase = "first token" if not self._seen_chunk else "inter-chunk"
+            budget = self._first if not self._seen_chunk else self._inter
+            raise _StreamStalled(
+                f"streaming stalled: no {phase} within {budget:.0f}s"
+            ) from exc
+        self._seen_chunk = True
+        return item
+
+
 async def _replay_to_sink(stream_sink: Optional["StreamSink"], text: str) -> None:
     """Emit a complete non-streamed answer through a display sink in one chunk.
 
@@ -816,6 +870,8 @@ async def call_llm(
 
     choice = response.choices[0]
     if choice.message.tool_calls:
+        for tc in choice.message.tool_calls:
+            _sink_emit(original_sink, "on_tool_call", tc.function.name, (tc.function.arguments or "")[:200])
         result = _prepend_retry_notice(
             await handle_tool_calls(agent, choice.message), retry_attempts
         )
@@ -827,6 +883,20 @@ async def call_llm(
     )
     await _replay_to_sink(original_sink, text)
     return text
+
+
+def _sink_emit(stream_sink: Optional["StreamSink"], method: str, *args) -> None:
+    """Best-effort single event emission: a broken display sink must never
+    destroy an answer we already hold (mirrors _replay_to_sink's tolerance)."""
+    if stream_sink is None:
+        return
+    fn = getattr(stream_sink, method, None)
+    if fn is None:
+        return
+    try:
+        fn(*args)
+    except Exception:
+        pass
 
 
 async def call_llm_auto(
@@ -850,18 +920,30 @@ async def call_llm_auto(
     # non-streaming body and replay the final text to the sink once, so the
     # TUI (which prints only through the sink) still shows every answer.
     if stream_sink is not None and not _streaming_disabled(agent):
-        return await call_llm_auto_stream(
-            agent,
-            system_prompt,
-            round_context,
-            stream_sink,
-            include_history=include_history,
-            max_tool_rounds=max_tool_rounds,
-        )
+        try:
+            return await call_llm_auto_stream(
+                agent,
+                system_prompt,
+                round_context,
+                stream_sink,
+                include_history=include_history,
+                max_tool_rounds=max_tool_rounds,
+            )
+        except _StreamStalled as exc:
+            # One streaming attempt; a watchdog stall falls back to the
+            # non-streaming body for THIS turn (which streams tool events to
+            # the sink too). auto_stream must re-raise _StreamStalled instead
+            # of recursing into call_llm_auto, or a deterministic stall would
+            # ping-pong between the two paths forever.
+            logger.warning(
+                "auto-mode streaming stalled (%s); finishing this turn non-streaming",
+                exc,
+            )
     result = await _call_llm_auto_nonstream(
         agent,
         system_prompt,
         round_context,
+        stream_sink=stream_sink,
         include_history=include_history,
         max_tool_rounds=max_tool_rounds,
     )
@@ -874,10 +956,19 @@ async def _call_llm_auto_nonstream(
     system_prompt: str,
     round_context: str,
     *,
+    stream_sink: Optional["StreamSink"] = None,
     include_history: bool = True,
     max_tool_rounds: int | None = None,
 ) -> str:
-    """The non-streaming auto-mode body (tool loop, no display sink)."""
+    """The non-streaming auto-mode body (tool loop).
+
+    ``stream_sink`` (optional) receives LIVE per-round tool events —
+    on_tool_call before each round executes and on_tool_result after — plus
+    each round's assistant text. Streaming emits these natively; without this
+    passthrough a disable_streaming run showed NOTHING until the whole turn
+    finished (a plain terminal's only display channel is the sink, so the
+    operator watched a silent terminal while the flag was already submitted —
+    measured 2026-10-06, ~60s behind the platform)."""
     messages, round_message = _build_tool_loop_messages(
         agent,
         system_prompt,
@@ -927,7 +1018,18 @@ async def _call_llm_auto_nonstream(
                 retry_attempts_total,
             )
 
+        # Live display parity with the streaming path: assistant text, then the
+        # tool calls about to execute, then each result as it lands.
+        round_text = extract_response(choice.message)
+        if round_text:
+            _sink_emit(stream_sink, "on_content_token", round_text)
+        for tc in tool_calls:
+            _sink_emit(stream_sink, "on_tool_call", tc.function.name, (tc.function.arguments or "")[:200])
+
         tool_results, skipped_info = await handle_tool_calls_with_results(agent, choice.message)
+        for item in tool_results:
+            if isinstance(item, dict) and "content" in item:
+                _sink_emit(stream_sink, "on_tool_result", item["content"])
         last_tool_results = tool_results
         last_skipped_info = skipped_info
         last_assistant_text = choice.message.content or ""
@@ -1155,6 +1257,8 @@ async def call_llm_stream(
         _stream = _ensure_async_iter(response)
         if _stream is None:
             raise ValueError("LLM response is not a valid stream object")
+        wd_first_s, wd_inter_s = _stream_timeouts(agent)
+        _stream = _ChunkWatchdog(_stream, wd_first_s, wd_inter_s)
         async for chunk in _stream:
             if chunk.choices and len(chunk.choices) > 0:
                 delta = chunk.choices[0].delta
@@ -1316,6 +1420,12 @@ async def call_llm_auto_stream(
                     _append_context_message(agent, tool_message)
 
         return "[tool loop paused] Internal tool follow-up cap reached; continue from the recorded tool evidence."
+    except _StreamStalled:
+        # Re-raised for the dispatcher (call_llm_auto) to own: it falls back to
+        # the non-streaming body. Letting this hit the generic handler below
+        # would recurse into call_llm_auto and ping-pong on a deterministic
+        # stall — the exact loop the watchdog was built to break.
+        raise
     except (NotImplementedError, ValueError, Exception) as e:
         error_text = str(e).lower()
         if last_tool_results is not None:
