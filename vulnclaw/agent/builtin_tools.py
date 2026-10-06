@@ -1717,24 +1717,52 @@ def enforce_port_constraints(agent: AgentContext, ports: list[int], *, target: s
 
 
 def _normalize_url_path(path: str) -> str:
-    """Resolve dot segments in a URL path before scope matching (round13 F3).
+    """Resolve dot segments and every percent-encoding layer before scope
+    matching (round13 F3, round14 F-A).
 
     ``urlparse().path`` does NOT normalize ``..``/``.`` segments, and servers
     resolve them (and percent-encoded dots) before routing — so a raw-path
     prefix check let ``/storage/../admin`` pass an allowed ``/storage`` prefix
-    while the request landed on ``/admin``. Returns a dot-segment-free path
-    with collapsed duplicate leading slashes (``posixpath.normpath`` keeps
-    ``//x`` intact); relative inputs pass through unchanged.
+    while the request landed on ``/admin``. Decoding runs until stable
+    (bounded), so ``/storage/%252e%252e/admin`` — which a double-decoding
+    server would route to ``/admin`` — resolves out too (round14 F-A).
+    Returns a dot-segment-free path with collapsed duplicate leading slashes
+    (``posixpath.normpath`` keeps ``//x`` intact); relative inputs pass
+    through unchanged.
     """
     from urllib.parse import unquote
 
-    text = unquote(str(path or ""))
+    text = str(path or "")
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
     if not text:
         return ""
     text = re.sub(r"^/+", "/", text)
     if not text.startswith("/"):
         return text
     return posixpath.normpath(text)
+
+
+def _raw_path_in_scope(raw_path: str, entry: str) -> bool:
+    """Whether the RAW urlparse path stays inside an allowed entry under its
+    literal reading (round14 F-B). The normalized leg resolves encodings, so
+    alone it is fail-open for servers that keep ``%2F`` literal: decoding
+    turned ``/storage%2Fdocs`` into an in-scope prefix while such a server
+    routes it to a resource outside ``/storage/*``. Requiring BOTH readings
+    closes that flip; innocent encodings (``%20``, UTF-8 percent octets) pass
+    both legs unchanged. Dot segments need no raw leg — a raw prefix can
+    legitimately contain ``..`` — the normalized leg owns those.
+    """
+    base = entry.rstrip("/")
+    return (
+        raw_path == entry
+        or (bool(base) and raw_path == base)
+        or (bool(base) and raw_path.startswith(base + "/"))
+        or (not base and raw_path.startswith("/"))
+    )
 
 
 def enforce_host_path_constraints(
@@ -1756,6 +1784,11 @@ def enforce_host_path_constraints(
     # Both checks below match on the DOT-SEGMENT-RESOLVED path (round13 F3) so
     # a request cannot walk out of (or into) a scope edge behind ``..`` — the
     # raw path from urlparse is only kept as an additional exact-match input.
+    # round14 F-A: the normalizer now decodes EVERY percent-encoding layer, so
+    # double-encoded dot segments resolve out as well. round14 F-B: the
+    # allowed check requires BOTH the normalized and the raw reading to be in
+    # scope — the normalized leg alone was fail-open for servers that keep
+    # ``%2F`` literal (decoding made ``/storage%2Fdocs`` look in-scope).
     normalized_path = _normalize_url_path(path)
     normalized_blocked = {_normalize_url_path(b) for b in constraints.blocked_paths}
 
@@ -1765,8 +1798,11 @@ def enforce_host_path_constraints(
         # task description that mentioned the API path lock the whole run to
         # a single unusable literal path (round-12 UX postmortem).
         in_scope = any(
-            normalized_path == _normalize_url_path(a)
-            or normalized_path.startswith(_normalize_url_path(a).rstrip("/") + "/")
+            (
+                normalized_path == _normalize_url_path(a)
+                or normalized_path.startswith(_normalize_url_path(a).rstrip("/") + "/")
+            )
+            and _raw_path_in_scope(str(path), a)
             for a in constraints.allowed_paths
         )
         if not in_scope:

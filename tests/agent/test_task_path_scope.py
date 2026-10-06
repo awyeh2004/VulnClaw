@@ -74,3 +74,48 @@ class TestBlockedPathsNormalization:
     def test_unrelated_path_not_blocked(self):
         agent = _agent(allowed_paths=["/"], blocked_paths=["/admin"])
         assert enforce_host_path_constraints(agent, path="/storage/x") is None
+
+
+class TestDoubleEncodingAndRawLeg:
+    """round14 F-A/F-B: percent-decoding must cover EVERY encoding layer, and
+    the allowed check must pass under BOTH the decoded and the raw reading —
+    the decoded leg alone is fail-open for servers that keep ``%2F`` literal."""
+
+    def test_double_encoded_dots_resolved(self):
+        assert _normalize_url_path("/storage/%252e%252e/admin") == "/admin"
+
+    def test_triple_encoded_dots_resolved(self):
+        assert _normalize_url_path("/storage/%25252e%25252e/admin") == "/admin"
+
+    def test_double_encoded_traversal_rejected(self):
+        agent = _agent(allowed_paths=["/storage"])
+        assert enforce_host_path_constraints(agent, path="/storage/%252e%252e/admin") is not None
+
+    def test_encoded_slash_literal_rejected(self):
+        # Decoding makes this look like /storage/docs, but a server that keeps
+        # %2F literal routes it outside /storage/* — the raw leg must reject.
+        agent = _agent(allowed_paths=["/storage"])
+        assert enforce_host_path_constraints(agent, path="/storage%2Fdocs") is not None
+
+    def test_double_encoded_blocked_hit(self):
+        agent = _agent(allowed_paths=["/"], blocked_paths=["/admin"])
+        assert enforce_host_path_constraints(agent, path="/adm%2569n") is not None
+
+    def test_encoded_space_still_allowed(self):
+        agent = _agent(allowed_paths=["/storage"])
+        assert enforce_host_path_constraints(agent, path="/storage/my%20docs") is None
+
+    def test_utf8_encoded_still_allowed(self):
+        agent = _agent(allowed_paths=["/storage"])
+        assert enforce_host_path_constraints(agent, path="/storage/%E6%96%87%E6%A1%A3") is None
+
+    def test_exact_prefix_with_trailing_slash_entry_still_allowed(self):
+        # The raw leg must not break the round-12 equivalence: entry "/storage/"
+        # covers the bare "/storage" request.
+        agent = _agent(allowed_paths=["/storage/"])
+        assert enforce_host_path_constraints(agent, path="/storage") is None
+
+    def test_request_with_trailing_slash_still_allowed(self):
+        agent = _agent(allowed_paths=["/storage"])
+        assert enforce_host_path_constraints(agent, path="/storage/") is None
+
