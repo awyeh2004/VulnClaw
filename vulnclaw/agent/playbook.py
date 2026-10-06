@@ -832,7 +832,22 @@ def save_playbook(
             # challenge family, updated in place" rule silently became "write yet another
             # note", and the duplicate then competes with the original in every lookup.
             # The digest only has to disambiguate, not be cryptographic.
-            slug = f"{slug}-{sha256(fingerprint.encode('utf-8')).hexdigest()[:4]}"
+            # Round14 F-D: the 4-hex suffix is only 16 bits, and the suffixed name was
+            # written with no further check — a second note whose fingerprint hashed to
+            # the same prefix silently OVERWROTE the first (measured with three
+            # same-shaped Chinese targets collapsing onto slug "autonotes"). Widen the
+            # same digest until the name is free instead of writing over it; a full
+            # 256-bit digest match means an identical fingerprint, where the timestamp
+            # tail below merely trades the old silent loss for a visible extra note.
+            digest = sha256(fingerprint.encode("utf-8")).hexdigest()
+            candidate = f"{slug}-{digest[:4]}"
+            width = 4
+            while (PLAYBOOKS_DIR / f"{candidate}.md").exists() and width < len(digest):
+                width += 2
+                candidate = f"{slug}-{digest[:width]}"
+            if (PLAYBOOKS_DIR / f"{candidate}.md").exists():
+                candidate = f"{candidate}-{datetime.now(timezone.utc).strftime('%H%M%S')}"
+            slug = candidate
 
     updated_at = datetime.now(timezone.utc).isoformat()
     lines = [

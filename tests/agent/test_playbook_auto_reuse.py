@@ -530,6 +530,57 @@ print(ack["slug"])
         assert Path(store / f"{ack['slug']}.md").is_file()
 
 
+class TestASuffixCollisionWidensInsteadOfOverwriting:
+    """Round14 F-D: the 4-hex suffix is 16 bits, and the suffixed name was
+    written with no further existence check — a second note whose fingerprint
+    hashed to the same prefix silently overwrote the first (measured with
+    three same-shaped Chinese targets collapsing onto slug "autonotes").
+    """
+
+    def test_colliding_fingerprint_lands_on_a_wider_suffix(self, tmp_path, monkeypatch):
+        from hashlib import sha256
+        from pathlib import Path
+
+        store = tmp_path / "playbooks"
+        store.mkdir(parents=True)
+        monkeypatch.setattr(pb, "PLAYBOOKS_DIR", store)
+        # An earlier ASCII-named note owns the un-suffixed slug, so every
+        # Chinese-named note falls into the suffix branch.
+        (store / "autonotes.md").write_text(
+            "---\nname: AutoNotes\nfingerprint: other\nstatus: draft\nsource: curated\n"
+            "---\n\nLOCK: other\n",
+            encoding="utf-8",
+        )
+
+        first = pb.save_playbook(
+            name="AutoNotes 靶机一", fingerprint="fp-alpha", steps="LOCK: x\n" + "y" * 80
+        )
+        suffix = first["slug"].rsplit("-", 1)[-1]
+        assert len(suffix) == 4 and first["slug"] != "autonotes", first
+        original = (store / f"{first['slug']}.md").read_bytes()
+
+        # A different fingerprint hashing to the SAME 4-hex prefix: before
+        # round14 F-D this note's save overwrote the first one byte-for-byte.
+        candidate = "fp-beta-0"
+        while sha256(candidate.encode("utf-8")).hexdigest()[:4] != suffix:
+            candidate = f"fp-beta-{int(candidate.rsplit('-', 1)[1]) + 1}"
+        assert candidate != "fp-alpha"
+
+        second = pb.save_playbook(
+            name="AutoNotes 靶机二", fingerprint=candidate, steps="LOCK: y\n" + "z" * 80
+        )
+
+        assert second["slug"] != first["slug"], "collision silently overwrote the first note"
+        assert (store / f"{first['slug']}.md").read_bytes() == original, (
+            "the pre-existing colliding note was overwritten"
+        )
+        assert Path(store / f"{second['slug']}.md").is_file(), second
+        # The widened suffix is still a stable prefix of the same digest, not
+        # a random or time-varying tail.
+        assert second["slug"].startswith("autonotes-"), second
+        assert second["slug"].rsplit("-", 1)[-1].startswith(suffix), second
+
+
 class TestARefusalSaysWhyItRefused:
     """Round7 L8: three different refusals all returned a bare `None`.
 
