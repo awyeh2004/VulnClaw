@@ -144,6 +144,9 @@ class SubagentContext:
     service_owner: bool = False
     usage_budget: Any = None
     tool_calls_used: int = 0
+    #: Round-22 (2026-10-06): execution requests already escalated to the main
+    #: agent on this sub-agent's behalf. See subagent/exec_escalation.py.
+    exec_escalations_used: int = 0
     llm_requests_used: int = 0
     input_tokens_used: int = 0
     output_tokens_used: int = 0

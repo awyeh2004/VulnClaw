@@ -904,10 +904,15 @@ def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict],
     from vulnclaw.agent.playbook import lookup_playbook_multi
 
     gated: list[dict] = []
-    if _accepts_out_blocked(lookup_playbook_multi):
-        matches = lookup_playbook_multi(queries, limit=2, out_blocked=gated)
-    else:  # a caller-side stub without the diagnostics parameter
-        matches = lookup_playbook_multi(queries, limit=2)
+    import inspect
+
+    parameters = inspect.signature(lookup_playbook_multi).parameters
+    kwargs: dict[str, Any] = {"limit": 2}
+    if "out_blocked" in parameters:
+        kwargs["out_blocked"] = gated
+    if "validated_only" in parameters:
+        kwargs["validated_only"] = True
+    matches = lookup_playbook_multi(queries, **kwargs)
     return matches, gated
 
 

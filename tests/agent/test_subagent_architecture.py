@@ -226,10 +226,10 @@ async def test_task_kind_is_checked_against_hard_coded_role_registry() -> None:
         )
     )
 
-    with pytest.raises(
-        DelegationDenied,
-        match="role researcher cannot handle task_kind execute",
-    ):
+    # Round-22 (2026-10-06): the denial must name the role that CAN take the
+    # job ("executor"), not just the role that cannot. The old text named the
+    # caller's own role and left the model guessing which agent_type to use.
+    with pytest.raises(DelegationDenied) as refused:
         await service.run_foreground(
             AgentSpec(
                 "nmap",
@@ -239,6 +239,11 @@ async def test_task_kind_is_checked_against_hard_coded_role_registry() -> None:
             ),
             service.main_context(),
         )
+
+    message = str(refused.value)
+    assert "task_kind 'execute'" in message
+    assert "executor" in message
+    assert "researcher" in message
 
     result = await service.run_foreground(
         AgentSpec(

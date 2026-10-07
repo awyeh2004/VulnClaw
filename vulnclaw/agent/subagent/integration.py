@@ -690,14 +690,41 @@ async def shutdown_task_service(agent: Any) -> None:
         await service.shutdown()
 
 
+def resolve_agent_type(requested_type: Any, requested_kind: Any) -> str:
+    """Pick the agent_type for a spawn request, deriving it from the task_kind.
+
+    Round-22 (2026-10-06) postmortem: ``agent_run`` used to default a missing
+    ``agent_type`` to ``"general"``. A group leader that passed only
+    ``task_kind="execute"`` therefore landed on the "general" role, whose sole
+    task_kind is "coordinate", and the spawn was denied. The group could never
+    build the executor that does the actual work: in the nginx-ui run
+    (CVE-2026-27944) it retried twice, then burned 771,589 input tokens
+    discovering this by trial and error. Deriving the role from the requested
+    task_kind makes the obvious call work; an explicit agent_type still wins, so
+    a deliberate mismatch is still refused by TaskService._register.
+    """
+    explicit = str(requested_type or "").strip()
+    if explicit:
+        return explicit
+    kind = str(requested_kind or "").strip().lower()
+    if not kind:
+        return "general"
+    return next(iter(roles_for_task_kind(kind)), "general")
+
+
 async def execute_agent_run(agent: Any, args: dict[str, Any]) -> str:
     runtime = get_task_runtime(agent)
     service = runtime.service
     parent = _parent_context(agent, service)
-    agent_type = str(args.get("agent_type") or "general").strip()
+    # Round-22 (2026-10-06) postmortem: a group leader that passes
+    # task_kind="execute" without an agent_type used to land on the default
+    # "general" role, whose only task_kind is "coordinate" -- so the spawn was
+    # denied and the group could never build the executor that does the actual
+    # work. Deriving the role from the task_kind is resolve_agent_type's job.
+    agent_type = resolve_agent_type(args.get("agent_type"), args.get("task_kind"))
     role = get_role(agent_type)
     task_kind = str(
-        args.get("task_kind")
+        str(args.get("task_kind") or "").strip().lower()
         or (role.task_kinds[0] if role and role.task_kinds else "")
     ).strip().lower()
     if parent.session_kind == "main" and agent_type == "group-leader":

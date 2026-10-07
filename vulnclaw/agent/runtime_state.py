@@ -89,6 +89,11 @@ class RuntimeState:
     # Cross-round tool-call suppression: keyed by (tool_name, target fingerprint).
     tool_target_calls: dict[str, int] = field(default_factory=dict)
     tool_target_last_result: dict[str, str] = field(default_factory=dict)
+    # Round-22 (2026-10-06): coarse signature of the last result per fingerprint.
+    # The repeat guard counts *consecutive identical* results, not calls, so a
+    # run that keeps producing new output never trips it. See
+    # tool_call_manager._result_signature.
+    tool_target_result_sig: dict[str, str] = field(default_factory=dict)
 
     # Seen web response bodies (hash → short summary), so repeated HTML/PHP
     # bodies returned by fetch / http_probe_batch are not resent to the LLM.

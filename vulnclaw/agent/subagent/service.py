@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from vulnclaw.agent.roles import subagent_roles
+from vulnclaw.agent.roles import roles_for_task_kind, subagent_roles
 from vulnclaw.agent.subagent.budget import UsageBudget
 from vulnclaw.agent.subagent.models import (
     AgentDefinition,
@@ -175,8 +175,15 @@ class TaskService:
             or (definition.task_kinds[0] if definition.task_kinds else "")
         ).strip().lower()
         if spec.task_kind not in definition.task_kinds:
+            # Round-22 (2026-10-06): name the role that CAN take this job. The
+            # old text ("role general cannot handle task_kind execute") named a
+            # role the caller never chose and left the model guessing which
+            # agent_type to pass; the run retried and lost waves to it.
+            owners = ", ".join(sorted(roles_for_task_kind(spec.task_kind))) or "none"
             raise DelegationDenied(
-                f"role {definition.name} cannot handle task_kind {spec.task_kind}"
+                f"task_kind {spec.task_kind!r} requires agent_type in [{owners}]; "
+                f"agent_type {definition.name!r} only handles "
+                f"[{', '.join(definition.task_kinds) or 'nothing'}]"
             )
         parent_record = self.records.get(parent.task_id)
         if parent.session_kind != "main" and (
