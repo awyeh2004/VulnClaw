@@ -306,6 +306,25 @@ class SubagentConfig(BaseModel):
     max_waves_per_group: int = Field(default=3, gt=0, le=12)
     max_steps_per_leaf: int = Field(default=12, gt=0, le=100)
     leaf_max_tool_rounds: int = Field(default=4, gt=0, le=20)
+    escalate_execution_to_main: bool = Field(
+        default=True,
+        description=(
+            "Round-22 (2026-10-06): a sub-agent may not execute host code, so its "
+            "python_execute/shell_command request is re-issued through the main agent "
+            "(still gated by the ExecutionGate, and forced onto the operator path). "
+            "When false, or when no trusted approval channel is installed, sub-agents "
+            "get the plain refusal."
+        ),
+    )
+    max_exec_escalations_per_leaf: int = Field(
+        default=6,
+        ge=0,
+        le=50,
+        description=(
+            "Per-sub-agent cap on escalated execution requests; 0 disables the "
+            "channel (same effect as escalate_execution_to_main=false)."
+        ),
+    )
     leaf_timeout_seconds: float = Field(default=900.0, gt=0, le=86_400)
     group_timeout_seconds: float = Field(default=1200.0, gt=0, le=86_400)
     finalization_timeout_seconds: float = Field(default=120.0, gt=0, le=3600)
@@ -673,6 +692,17 @@ class SessionConfig(BaseModel):
             "this many seconds after generation has started. Catches mid-"
             "generation stalls in seconds instead of the 10-40 minute silent "
             "hangs a non-streamed request cannot distinguish from slow output."
+        ),
+    )
+    llm_turn_budget_s: int = Field(
+        default=0,
+        description=(
+            "Wall-clock budget (seconds) for ONE turn's LLM retry loop. When "
+            "exceeded the call raises instead of retrying again, so a hung turn "
+            "hands control back to the stall guard rather than idling for hours "
+            "(measured 2026-10-06: 40 min of CPU-silent waiting; the old 20x600s "
+            "worst case was worse). 0 disables the budget; any positive value is "
+            "clamped to a 60s floor."
         ),
     )
     show_thinking: bool = Field(

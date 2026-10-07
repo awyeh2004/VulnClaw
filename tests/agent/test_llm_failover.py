@@ -1,5 +1,6 @@
 """Tests for multi-key failover rotation in the LLM call retry loop."""
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -7,7 +8,10 @@ import pytest
 
 from vulnclaw.agent.llm_client import (
     _call_with_persistent_retries,
+    _call_with_persistent_retries_unbudgeted,
+    _hard_compact_messages,
     _is_key_exhausted_error,
+    _is_timeout_error,
 )
 from vulnclaw.agent.subagent.budget import UsageBudget
 from vulnclaw.agent.subagent.models import SubagentContext
@@ -366,3 +370,164 @@ class TestAgentCoreRotation:
         assert agent.rotate_api_key() is True
         assert agent._client is None
         assert agent._current_api_key() == "k2"
+
+
+class TestTurnBudgetAndTimeoutLoadShedding:
+    """Both features were silently inert before 2026-10-06: the wall-clock budget
+    was read with a plain ``getattr`` off a schema that never defined the key, and
+    ``rebuild_fn`` had no caller at all -- so neither could ever fire."""
+
+    def test_schema_exposes_the_turn_budget_key(self):
+        from vulnclaw.config.schema import SessionConfig
+
+        assert SessionConfig().llm_turn_budget_s == 0, "0 disables the budget"
+
+    def test_timeout_classification(self):
+        assert _is_timeout_error("read timed out.") is True
+        assert _is_timeout_error("apitimeouterror: request timed out") is True
+        assert _is_timeout_error("stream stalled: no first token within 120s") is True
+        assert _is_timeout_error("error code: 402 insufficient balance") is False
+
+    def test_hard_compact_keeps_system_and_newest_messages(self):
+        messages = [{"role": "system", "content": "sys"}] + [
+            {"role": "user", "content": "x" * 4000} for _ in range(10)
+        ]
+        compacted = _hard_compact_messages(messages)
+        assert compacted[0] is messages[0], "the system message is never dropped"
+        assert compacted[-1] is messages[-1], "the newest messages survive"
+        assert len(compacted) < len(messages)
+
+    def test_hard_compact_never_splits_a_tool_exchange(self):
+        """Round15b (2026-10-07) postmortem: hard compaction deleted one message
+        at a time from the head, so an ``assistant(tool_calls=...)`` message
+        could be dropped while the ``tool`` result answering it survived (or
+        the reverse). A strict gateway rejects that payload with 400 — which is
+        not a timeout — so the load-shedding ladder never retried it and the
+        turn died. Deletion has to stay atomic per exchange.
+
+        The first exchange carries a deliberately oversized assistant message so
+        a 50% cut lands *between* the assistant and its tool result: against
+        the old per-message loop this fixture yields an orphan ``c0``.
+        """
+        messages: list[dict] = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q0"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c0",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "z" * 3000},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c0", "content": "r0"},
+        ]
+        for i in (1, 2, 3):
+            messages += [
+                {"role": "user", "content": f"q{i}"},
+                {
+                    "role": "assistant",
+                    "content": "a",
+                    "tool_calls": [
+                        {
+                            "id": f"c{i}",
+                            "type": "function",
+                            "function": {"name": "run", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": f"c{i}", "content": f"r{i}"},
+            ]
+
+        compacted = _hard_compact_messages(messages)
+        assert compacted[0] is messages[0], "the system message is never dropped"
+        assert len(compacted) < len(messages), "the middle must actually shrink"
+
+        declared = {
+            tc["id"] for msg in compacted for tc in (msg.get("tool_calls") or [])
+        }
+        orphans = [
+            msg.get("tool_call_id")
+            for msg in compacted
+            if msg.get("role") == "tool" and msg.get("tool_call_id") not in declared
+        ]
+        assert orphans == [], "a tool result must not outlive the assistant that declared it"
+        answered = {
+            msg.get("tool_call_id") for msg in compacted if msg.get("role") == "tool"
+        }
+        assert declared <= answered, "a declared tool_call must be followed by its results"
+
+    @pytest.mark.asyncio
+    async def test_budget_exhaustion_raises_before_any_request(self):
+        calls = {"n": 0}
+
+        def request_fn():
+            calls["n"] += 1
+            return _full_ok_response()
+
+        with pytest.raises(RuntimeError, match="turn budget"):
+            await _call_with_persistent_retries_unbudgeted(
+                FakeAgent([]), request_fn, "stage", budget_s=-1.0
+            )
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_first_timeout_retries_the_same_request(self, monkeypatch):
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        calls = {"n": 0}
+        rebuilt = {"n": 0}
+
+        def request_fn():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("Read timed out.")
+            return _full_ok_response()
+
+        def rebuild_fn(level):
+            rebuilt["n"] += 1
+            return _full_ok_response
+
+        response, _ = await _call_with_persistent_retries_unbudgeted(
+            FakeAgent([]), request_fn, "stage", rebuild_fn=rebuild_fn
+        )
+        assert response.choices
+        assert calls["n"] == 2, "one timeout, then the same request retried"
+        assert rebuilt["n"] == 0, "the ladder must not fire on the first timeout"
+
+    @pytest.mark.asyncio
+    async def test_second_timeout_escalates_to_the_rebuilt_request(self, monkeypatch):
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+        good = _full_ok_response()
+        levels: list[int] = []
+
+        def timing_out():
+            raise TimeoutError("Read timed out.")
+
+        def rebuild_fn(level):
+            levels.append(level)
+            return lambda: good
+
+        response, _ = await _call_with_persistent_retries_unbudgeted(
+            FakeAgent([]), timing_out, "stage", rebuild_fn=rebuild_fn
+        )
+        assert response is good
+        assert levels == [1], "the ladder fires exactly once, on the second timeout"
+
+    def test_every_retry_call_site_wires_the_ladder(self):
+        """Guards the exact gap: ``rebuild_fn`` is inert unless a caller passes it,
+        and a feature that is silently inert is worse than one that is absent."""
+        import inspect
+
+        from vulnclaw.agent import llm_client
+
+        for fn in (llm_client.call_llm, llm_client._call_llm_auto_nonstream):
+            assert "rebuild_fn=" in inspect.getsource(fn), fn.__name__

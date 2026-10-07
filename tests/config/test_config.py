@@ -114,6 +114,9 @@ class TestSubagentConfig:
             "max_waves_per_group",
             "max_steps_per_leaf",
             "leaf_max_tool_rounds",
+            # Round-22 (2026-10-06): sub-agent execution escalation channel.
+            "escalate_execution_to_main",
+            "max_exec_escalations_per_leaf",
             "leaf_timeout_seconds",
             "group_timeout_seconds",
             "finalization_timeout_seconds",
@@ -128,6 +131,8 @@ class TestSubagentConfig:
         assert config.leaf_max_tool_rounds == 4
         assert config.max_model_tokens_per_solve == 8_000_000
         assert config.max_model_tokens_per_group == 1_000_000
+        assert config.escalate_execution_to_main is True
+        assert config.max_exec_escalations_per_leaf == 6
 
     @pytest.mark.parametrize(
         "field",

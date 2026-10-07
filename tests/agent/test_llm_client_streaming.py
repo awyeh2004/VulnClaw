@@ -1121,7 +1121,7 @@ class TestDisableStreaming:
             mod, "_apply_repetition_guard", lambda agent, t, detected_count=0: t
         )
 
-        async def fake_retries(agent, factory, label):
+        async def fake_retries(agent, factory, label, **kwargs):
             return self._response(text), 0
 
         monkeypatch.setattr(mod, "_call_with_persistent_retries", fake_retries)

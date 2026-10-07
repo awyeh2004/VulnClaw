@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
@@ -574,28 +575,138 @@ def build_chat_completion_kwargs(
     )
 
 
+def _is_timeout_error(error_text: str) -> bool:
+    """Whether the failure looks like a transport-level TIMEOUT.
+
+    Timeouts get the load-shedding ladder: the first one retries as-is, from
+    the second one the request is rebuilt over a hard-compacted context —
+    a gateway that chokes on a large payload keeps choking on the same
+    payload, so re-sending it unchanged (the old behaviour, up to 20 times)
+    is pure budget burn. Switching LLMs does not help either for the same
+    reason (measured 2026-10-06: a fresh-run first turn hung 40 min).
+    """
+    return any(
+        marker in error_text
+        for marker in ("timed out", "timeout", "apitimeouterror", "read timeout", "stream stalled")
+    )
+
+
+def _hard_compact_messages(
+    messages: list[dict[str, Any]],
+    *,
+    shrink: float = 0.5,
+    keep_last: int = 6,
+) -> list[dict[str, Any]]:
+    """Aggressive second-pass shrink for timeout escalations.
+
+    prepare_context only compacts when the configured trigger ratio fires; a
+    request that TIMES OUT may be under that bar yet still be the payload the
+    gateway stalls on. Drop the oldest middle messages (never the system
+    message, never the newest ``keep_last``) until the rough token estimate is
+    at most ``shrink`` of the original — a degraded-context retry beats a dead
+    turn, and it only ever happens after repeated timeouts.
+
+    Round15b (2026-10-07) postmortem: deletion used to be per-message and could
+    split an ``assistant(tool_calls=...)`` message from the ``tool`` results
+    answering it. A strict gateway rejects that payload with 400, which is not
+    a timeout, so the load-shedding ladder never retried it and the turn died.
+    Deletion is now atomic per tool exchange, with ``sanitize_tool_pairs`` as
+    the final guard.
+    """
+    from vulnclaw.agent.context_budget import estimate_tokens
+    from vulnclaw.agent.token_counter import group_tool_exchanges, sanitize_tool_pairs
+
+    original = estimate_tokens(messages)
+    if original <= 0 or len(messages) <= keep_last + 1:
+        return list(messages)
+    floor = max(1, int(original * shrink))
+
+    system = list(messages[:1])  # index 0 = system, never dropped
+    body = list(messages[1:])
+    droppable = body[: max(0, len(body) - max(0, keep_last))]
+    recent = body[len(droppable):]
+
+    kept_body: list[dict[str, Any]] = []
+    running = estimate_tokens(system) + estimate_tokens(recent)
+    for group in reversed(group_tool_exchanges(droppable)):
+        cost = estimate_tokens(group)
+        if running + cost > floor:
+            continue  # still over the floor — this whole exchange goes
+        kept_body = group + kept_body
+        running += cost
+
+    return sanitize_tool_pairs(system + kept_body + recent)
+
+
+def _timeout_rebuild_fn(agent: AgentContext, messages: list[dict[str, Any]], tools, purpose: str):
+    """Build the ``rebuild_fn`` for the retry loop's timeout load-shedding ladder.
+
+    ``rebuild_fn(level)`` returns a NEW ``request_fn`` whose payload is built over
+    a hard-compacted copy of ``messages``. The loop swaps ``request_fn`` for it on
+    the SECOND timeout of a call and keeps using it for every later retry, so a
+    gateway that stalls on the original payload stops being re-fed that exact
+    payload (which was the old behaviour: the identical request up to 20 times).
+
+    ``level`` is a monotonic escalation counter; only level 1 is produced today,
+    and levels above it compact harder so a future caller can escalate further
+    without changing the loop.
+    """
+
+    def rebuild(level: int = 1):
+        shrink = 0.5 if level <= 1 else 0.3
+        compacted = _hard_compact_messages(messages, shrink=shrink)
+        compacted = _fit_context_window(agent, compacted, tools, purpose=purpose)
+        kwargs = build_chat_completion_kwargs(agent, compacted, tools)
+        return lambda: agent._get_client().chat.completions.create(**kwargs)
+
+    return rebuild
+
+
 async def _call_with_persistent_retries_unbudgeted(
-    agent: AgentContext, request_fn, stage_label: str, max_retries: int = 20
+    agent: AgentContext,
+    request_fn,
+    stage_label: str,
+    max_retries: int = 20,
+    *,
+    rebuild_fn=None,
+    budget_s: float | None = None,
 ) -> tuple[Any, int]:
     """Keep retrying retriable LLM calls until success, max retries, or manual interruption.
 
     Args:
         max_retries: Maximum number of retry attempts before raising RuntimeError.
                      Default is 20 (at 5s intervals = ~100s total wait).
+        rebuild_fn:  Optional load-shedding ladder: ``rebuild_fn(compact_level)``
+                     returns a NEW request_fn built over a hard-compacted
+                     context. Invoked once, when the second TIMEOUT-classified
+                     failure lands (see :func:`_is_timeout_error`).
+        budget_s:    Wall-clock budget for the whole retry loop. When exceeded
+                     the call raises instead of retrying again — a hung turn
+                     must hand control back to the stall guard, not idle for
+                     hours (measured: 40 min of CPU-silent waiting, and the
+                     old 20x600s worst case was far worse).
 
     Returns:
         (response, retry_attempts)
 
     Raises:
-        RuntimeError: If max_retries is exceeded.
+        RuntimeError: If max_retries is exceeded or the wall-clock budget runs out.
     """
     loop = asyncio.get_running_loop()
     retry_attempts = 0
     pool_size = len(getattr(agent, "_key_pool", None) or [])
     can_rotate = pool_size > 1 and callable(getattr(agent, "rotate_api_key", None))
     keys_tried: set[int] = set()
+    started = time.monotonic()
+    timeouts = 0
+    compact_level = 0
 
     while retry_attempts < max_retries:
+        if budget_s is not None and time.monotonic() - started > budget_s:
+            raise RuntimeError(
+                _("agent.llm.max_retries", stage=stage_label, retries=retry_attempts)
+                + f" [turn budget {budget_s:.0f}s exhausted]"
+            )
         try:
             maybe_response = loop.run_in_executor(None, request_fn)
             response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
@@ -616,6 +727,22 @@ async def _call_with_persistent_retries_unbudgeted(
             error_text = str(exc).lower()
             is_exhausted = _is_key_exhausted_error(error_text)
             is_auth = _is_non_retriable_llm_error(error_text)
+
+            # Load-shedding ladder: a TIMEOUT that repeats means this exact
+            # request keeps stalling the gateway. From the second timeout,
+            # rebuild the request over a hard-compacted context instead of
+            # re-sending the identical payload until the retry budget dies.
+            if rebuild_fn is not None and _is_timeout_error(error_text):
+                timeouts += 1
+                if timeouts >= 2 and compact_level == 0:
+                    compact_level = 1
+                    request_fn = rebuild_fn(compact_level)
+                    logger.warning(
+                        "%s 第 %d 次超时——切换到硬压缩上下文后重试（降载）",
+                        stage_label, timeouts,
+                    )
+                    retry_attempts += 1
+                    continue
 
             # 限流/配额(429/1302/余额)用指数退避等待, 避免固定 5s 在持续限流
             # 窗口内反复撞墙. 其他错误保持 5s.
@@ -663,12 +790,23 @@ async def _call_with_persistent_retries_unbudgeted(
 
 
 async def _call_with_persistent_retries(
-    agent: AgentContext, request_fn, stage_label: str, max_retries: int = 20
+    agent: AgentContext, request_fn, stage_label: str, max_retries: int = 20,
+    *, rebuild_fn=None, budget_s: float | None = None,
 ) -> tuple[Any, int]:
+    if budget_s is None:
+        raw = getattr(
+            getattr(getattr(agent, "config", None), "session", None),
+            "llm_turn_budget_s", None,
+        )
+        try:
+            budget_s = max(60.0, float(raw)) if raw else None
+        except (TypeError, ValueError):
+            budget_s = None
     admission = _reserve_subagent_llm_request(agent)
     try:
         response, retries = await _call_with_persistent_retries_unbudgeted(
-            agent, request_fn, stage_label, max_retries
+            agent, request_fn, stage_label, max_retries,
+            rebuild_fn=rebuild_fn, budget_s=budget_s,
         )
         actual_tokens = _record_subagent_llm_usage(agent, response)
         _settle_subagent_llm_admission(agent, admission, actual_tokens)
@@ -783,6 +921,40 @@ def _stream_timeouts(agent: AgentContext) -> tuple[float, float]:
     return max(10.0, first), max(10.0, inter)
 
 
+async def _aclose_stream_response(stream: Any) -> None:
+    """Best-effort close of a stream and the transport underneath it.
+
+    Round15b (2026-10-07) postmortem: see :meth:`_ChunkWatchdog.aclose`.
+    Unwraps our own sync→async adapter (``_AsyncIterWrapper._iter``) and the
+    SDK's ``Stream.response`` so the httpx connection is actually released.
+    Best-effort by design — a protocol mismatch here must never replace the
+    original stall with a new error.
+    """
+    if stream is None:
+        return
+    targets: list[Any] = [stream]
+    for attr in ("_iter", "response"):
+        candidate = getattr(stream, attr, None)
+        if candidate is not None:
+            targets.append(candidate)
+    for target in targets:
+        for name in ("aclose", "close"):
+            closer = getattr(target, name, None)
+            if not callable(closer):
+                continue
+            try:
+                result = closer()
+            except Exception:
+                logger.debug("stream %s() failed", name, exc_info=True)
+                continue
+            if inspect.isawaitable(result):
+                try:
+                    await result
+                except Exception:
+                    logger.debug("await stream %s() failed", name, exc_info=True)
+            break
+
+
 class _ChunkWatchdog:
     """Wrap an async chunk stream with bounded waits.
 
@@ -803,6 +975,18 @@ class _ChunkWatchdog:
     def __aiter__(self) -> "_ChunkWatchdog":
         return self
 
+    async def aclose(self) -> None:
+        """Close the wrapped stream so an abandoned request frees its socket.
+
+        Round15b (2026-10-07) postmortem: ``__anext__`` raises
+        ``_StreamStalled`` from inside the caller's ``async for``, and neither
+        streaming caller closes the response afterwards (one falls back to a
+        non-streaming request, the other re-raises for its dispatcher). The
+        wrapped transport therefore stayed alive — a stalled turn retained its
+        threads/sockets for roughly ten minutes.
+        """
+        await _aclose_stream_response(self._stream)
+
     async def __anext__(self) -> Any:
         try:
             item = await asyncio.wait_for(
@@ -811,6 +995,8 @@ class _ChunkWatchdog:
         except asyncio.TimeoutError as exc:
             phase = "first token" if not self._seen_chunk else "inter-chunk"
             budget = self._first if not self._seen_chunk else self._inter
+            # Release the stalled stream before unwinding (round15b F-B).
+            await self.aclose()
             raise _StreamStalled(
                 f"streaming stalled: no {phase} within {budget:.0f}s"
             ) from exc
@@ -866,6 +1052,9 @@ async def call_llm(
         agent,
         lambda: agent._get_client().chat.completions.create(**kwargs),
         "single turn",
+        # A repeated timeout rebuilds this request over a hard-compacted context
+        # instead of re-sending the identical payload until the retry budget dies.
+        rebuild_fn=_timeout_rebuild_fn(agent, messages, tools, "single_turn"),
     )
 
     choice = response.choices[0]
@@ -919,6 +1108,7 @@ async def call_llm_auto(
     # its SSE stalls are what motivated the switch. When disabled, run the
     # non-streaming body and replay the final text to the sink once, so the
     # TUI (which prints only through the sink) still shows every answer.
+    _stream_stall_local = None
     if stream_sink is not None and not _streaming_disabled(agent):
         try:
             return await call_llm_auto_stream(
@@ -931,10 +1121,12 @@ async def call_llm_auto(
             )
         except _StreamStalled as exc:
             # One streaming attempt; a watchdog stall falls back to the
-            # non-streaming body for THIS turn (which streams tool events to
-            # the sink too). auto_stream must re-raise _StreamStalled instead
-            # of recursing into call_llm_auto, or a deterministic stall would
-            # ping-pong between the two paths forever.
+            # non-streaming body for THIS turn — over a HARD-compacted context,
+            # because a payload big enough to stall the stream may also be what
+            # the non-streaming call would stall on. auto_stream must re-raise
+            # _StreamStalled instead of recursing into call_llm_auto, or a
+            # deterministic stall would ping-pong between the two paths forever.
+            _stream_stall_local = exc
             logger.warning(
                 "auto-mode streaming stalled (%s); finishing this turn non-streaming",
                 exc,
@@ -946,6 +1138,7 @@ async def call_llm_auto(
         stream_sink=stream_sink,
         include_history=include_history,
         max_tool_rounds=max_tool_rounds,
+        hard=isinstance(_stream_stall_local, _StreamStalled),
     )
     await _replay_to_sink(stream_sink, result)
     return result
@@ -959,6 +1152,7 @@ async def _call_llm_auto_nonstream(
     stream_sink: Optional["StreamSink"] = None,
     include_history: bool = True,
     max_tool_rounds: int | None = None,
+    hard: bool = False,
 ) -> str:
     """The non-streaming auto-mode body (tool loop).
 
@@ -968,7 +1162,13 @@ async def _call_llm_auto_nonstream(
     passthrough a disable_streaming run showed NOTHING until the whole turn
     finished (a plain terminal's only display channel is the sink, so the
     operator watched a silent terminal while the flag was already submitted —
-    measured 2026-10-06, ~60s behind the platform)."""
+    measured 2026-10-06, ~60s behind the platform).
+
+    ``hard=True`` (streaming watchdog stall fallback) additionally routes every
+    request through :func:`_hard_compact_messages` — a stream that stalled on
+    this context may stall again as a non-streamed request over the same
+    payload. Repeated non-stream timeouts escalate via ``rebuild_fn`` inside
+    the retry loop (second timeout rebuilds hard-compacted)."""
     messages, round_message = _build_tool_loop_messages(
         agent,
         system_prompt,
@@ -977,6 +1177,8 @@ async def _call_llm_auto_nonstream(
     )
     tools = agent._build_openai_tools()
     messages = _fit_context_window(agent, messages, tools, purpose="autonomous_turn")
+    if hard:
+        messages = _hard_compact_messages(messages)
 
     retry_attempts_total = 0
     last_tool_results: list[dict[str, Any]] | None = None
@@ -995,6 +1197,12 @@ async def _call_llm_auto_nonstream(
                 agent,
                 lambda: agent._get_client().chat.completions.create(**kwargs),
                 "autonomous loop",
+                # Load-shedding ladder: from the second timeout this call
+                # escalates to a hard-compacted context (the flag run that went
+                # ~60s behind the platform stalled here).
+                rebuild_fn=_timeout_rebuild_fn(
+                    agent, messages, tools, "autonomous_tool_follow_up"
+                ),
             )
         except Exception as exc:
             if last_tool_results is not None:

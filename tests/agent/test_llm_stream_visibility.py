@@ -72,7 +72,7 @@ class TestNonstreamToolEventPassthrough:
         monkeypatch.setattr(mod, "_apply_repetition_guard", lambda agent, t, detected_count=0: t)
         monkeypatch.setattr(mod, "_resolve_auto_tool_rounds", lambda agent, cap: 0)
 
-        async def fake_retries(agent, factory, label):
+        async def fake_retries(agent, factory, label, **kwargs):
             return response, 0
 
         monkeypatch.setattr(mod, "_call_with_persistent_retries", fake_retries)
@@ -160,6 +160,31 @@ class TestStreamWatchdog:
         assert got == ["a", "b", "c"]
 
     @pytest.mark.asyncio
+    async def test_stall_closes_the_underlying_stream(self):
+        """Round15b (2026-10-07) postmortem: a stall raised ``_StreamStalled``
+        from inside the caller's ``async for`` and neither streaming caller
+        closed the response afterwards (one falls back to non-streaming, the
+        other re-raises for its dispatcher), so the abandoned transport stayed
+        alive for ~10 minutes. The watchdog now closes it on the way out.
+        """
+        closed = {"n": 0}
+
+        class _Closable:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(3600)
+
+            async def aclose(self):
+                closed["n"] += 1
+
+        wd = _ChunkWatchdog(_Closable(), first_timeout_s=0.05, inter_chunk_s=0.05)
+        with pytest.raises(_StreamStalled, match="first token"):
+            await wd.__anext__()
+        assert closed["n"] == 1, "the stalled stream must be closed before unwinding"
+
+    @pytest.mark.asyncio
     async def test_auto_stream_stall_falls_back_to_nonstream_without_pingpong(self, monkeypatch):
         """A deterministic stall must finish the turn non-streaming ONCE —
         auto_stream re-raises _StreamStalled instead of recursing into
@@ -170,9 +195,12 @@ class TestStreamWatchdog:
             calls["stream"] += 1
             raise _StreamStalled("streaming stalled: no first token within 120s")
 
-        async def fake_nonstream(agent, sp, rc, *, stream_sink=None, include_history=True, max_tool_rounds=None):
+        async def fake_nonstream(
+            agent, sp, rc, *, stream_sink=None, include_history=True, max_tool_rounds=None, hard=False
+        ):
             calls["nonstream"] += 1
             assert stream_sink is sink
+            assert hard is True, "a stream-stall fallback must hard-compact the payload"
             return "nonstream answer"
 
         monkeypatch.setattr(mod, "call_llm_auto_stream", stalled_stream)
