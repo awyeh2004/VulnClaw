@@ -65,7 +65,12 @@ def test_ctf2_forwards_plain_values(captured_solve, monkeypatch):
     main.ctf2("challenge-id", "practice-id")
 
     _assert_no_sentinels(captured_solve)
-    assert captured_solve["target"] == "practice-id"
+    # The REF, not the bare practice id: `solve()`'s target becomes the run's
+    # origin, and the origin is the identity its captured notes are filed under.
+    # A bare id here split the reuse chain from the REPL/platform entry paths,
+    # which both name this challenge `ctf2:practice:<practice>:<challenge>`
+    # (2026-10-06).
+    assert captured_solve["target"] == "ctf2:practice:practice-id:challenge-id"
     assert captured_solve["resume"] is False
     assert captured_solve["stream"] is False
     assert captured_solve["model"] == "auto"

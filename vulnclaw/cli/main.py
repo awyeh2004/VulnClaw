@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -46,7 +47,12 @@ from rich.text import Text
 
 from vulnclaw import __version__, headless
 from vulnclaw.agent.constraint_policy import validate_action_constraints
-from vulnclaw.agent.input_analysis import extract_task_constraints
+from vulnclaw.agent.input_analysis import (
+    _citation_url_spans,
+    _is_cited_candidate,
+    detect_target,
+    extract_task_constraints,
+)
 from vulnclaw.agent.solver import _looks_like_quiz
 from vulnclaw.cli import experience_ops
 
@@ -972,12 +978,20 @@ def _run_repl() -> None:
                 # Reset auto mode on target switch
                 auto_mode_active = False
                 last_auto_input = ""
-            elif new_target and not current_target and not _is_api_path_prose(new_target):
+            elif (
+                new_target
+                and not current_target
+                and not _is_api_path_prose(new_target)
+                and not _is_cited_target(user_input, new_target)
+            ):
                 # round13 F4: the first-adoption branch needs the same API-path
                 # gate as the switch guard — without it a first message citing
                 # bare API-path prose ("/storage/...") still locked the run to
                 # a literal path target + strict local constraints (the exact
                 # first-shot variant of the 2026-10-01 PrizeEscrow postmortem).
+                # The citation gate is the same story one round later: a FIRST
+                # message that is nothing but a pasted challenge description must
+                # not adopt its documentation URL as the session target either.
                 current_target = new_target
                 current_phase = "Ready"
 
@@ -2058,7 +2072,12 @@ def ctf2(
     # sentinels too when `ctf2()` is called from Python.
     solve(
         **_solve_defaults(
-            target=practice_id,
+            # The REF, not the bare practice id: the origin of a run is what its
+            # captured notes are filed under, and the platform's own launches pass
+            # the ref here too. With a bare id this entry path wrote its notes under
+            # a different identity than the REPL/platform paths, so the same
+            # challenge's reuse chain split in two (2026-10-06).
+            target=ref_token,
             goal=goal,
             max_steps=_cli_value(max_steps, 240),
             resume=False,
@@ -4436,6 +4455,13 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
 
     input_lower = user_input.lower()
 
+    # A CTF2 practice task is autonomous by nature: it names a practice ground and
+    # a challenge and expects the solve loop (ctf2 MCP tools + platform_submit).
+    # Its ids are UUIDs, so the target-gated keyword branch below would reject it
+    # and drop the turn into single-turn chat.
+    if _ctf2_task_ref(user_input):
+        return True
+
     # Explicit auto-mode triggers
     auto_keywords = [
         "渗透测试",
@@ -4509,8 +4535,10 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
 
     # If it has auto-mode keywords, trigger auto loop
     if any(kw in input_lower for kw in auto_keywords):
-        # Must have a target (either in input or already set)
-        has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
+        # Must have a target (either in input or already set). The input side goes
+        # through _has_actionable_target so a cited documentation URL is not counted
+        # as one (see that function).
+        has_target = bool(current_target) or _has_actionable_target(user_input)
         return has_target
 
     # Local file/path targets are multi-step analysis jobs by nature: a path,
@@ -4520,7 +4548,7 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
         return True
 
     # Fallback: has target + multi-step task -> auto
-    has_target = bool(current_target) or bool(_extract_target_from_input(user_input))
+    has_target = bool(current_target) or _has_actionable_target(user_input)
     if has_target:
         multi_step_indicators = [
             "并",
@@ -4584,6 +4612,49 @@ def _apply_local_path_constraints(agent: Any, target: str) -> None:
         pass
 
 
+#: The CTF2 practice-ground task sentence the platform hands the operator, e.g.
+#: ``用 ctf2 工具解练习场 <practice_id> 的题目 <challenge_id>：<name>…``. Both ids
+#: are bare UUIDs, so every generic target pattern below (URL / local path /
+#: file-with-extension / IP / domain) misses the sentence -- and a sentence with
+#: no extractable target fails ``_should_auto_pentest``'s target gate and drops
+#: the turn into single-turn chat, never reaching the solve loop where the ctf2
+#: MCP tools and ``platform_submit`` live (2026-10-06: an afternoon of solves
+#: went through the ref-token/``solve`` path, while the same task pasted into the
+#: REPL only chatted).
+_CTF2_UUID = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_CTF2_PRACTICE_RE = re.compile(rf"练习场[:：\s]*({_CTF2_UUID})")
+_CTF2_CHALLENGE_RE = re.compile(rf"题目[:：\s]*({_CTF2_UUID})")
+
+
+def _ctf2_task_ref(user_input: str) -> Optional[str]:
+    """Ref token for a CTF2 practice task sentence, else None.
+
+    Returns ``ctf2:practice:<practice_id>:<challenge_id>`` -- the SAME identity the
+    dedicated ``vulnclaw ctf2`` hand-off and the platform's own ``solve --target``
+    use (see the ctf2 command's ``ref_token``). Identity has to match or the reuse
+    chain splits: a note captured through the REPL is looked up by a
+    platform-launched run of the same challenge, and vice versa. Falls back to the
+    bare practice id when the sentence names no challenge.
+
+    Deliberately preferred over the generic patterns below: a pasted task sentence
+    often carries a URL from the challenge DESCRIPTION (``环境来源与官方说明:
+    https://github.com/vulhub/...``), which used to be mined as the target --
+    filing the run's notes under ``github.com`` and authorising scope on a
+    documentation link.
+    """
+    text = str(user_input or "")
+    practice = _CTF2_PRACTICE_RE.search(text)
+    if not practice:
+        return None
+    challenge = _CTF2_CHALLENGE_RE.search(text)
+    if challenge:
+        return f"ctf2:practice:{practice.group(1)}:{challenge.group(1)}"
+    return practice.group(1)
+
+
 def _extract_target_from_input(user_input: str) -> Optional[str]:
     """Extract target from user input string.
 
@@ -4596,6 +4667,13 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
     stripped = user_input.strip()
     if not stripped:
         return None
+
+    # 0) CTF2 practice task: recognised first -- no pattern below can see a bare
+    #    UUID, and the challenge description such a sentence usually carries holds
+    #    a documentation URL that must not become the target.
+    ctf2_ref = _ctf2_task_ref(stripped)
+    if ctf2_ref:
+        return ctf2_ref
 
     # 1) URL (with optional port) — must be checked before the POSIX-path branch
     #    so "https://example.com" is never clipped to "/example.com".
@@ -4638,6 +4716,51 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
     return None
 
 
+def _has_actionable_target(user_input: str) -> bool:
+    """Whether the message names a target the run may actually act on.
+
+    One authority for a question three layers ask. The citation gate refuses to
+    *retarget* onto a pasted documentation URL and the scope miner skips it, but the
+    auto-mode gate read "has a target" straight off ``_extract_target_from_input`` --
+    which returns the FIRST candidate, i.e. the doc link in a pasted description. The
+    same URL was therefore "not a target" for the switch guard and "a target" for auto
+    mode: a description carrying nothing BUT its source citation went auto with no
+    endpoint named anywhere (2026-10-06 merge).
+
+    ``detect_target`` is the agent layer's answer to this exact question and skips
+    cited references, so both layers now share one verdict instead of two rule chains.
+    Local artefacts remain targets -- it never looks at paths -- and a non-cited first
+    candidate is accepted as-is, so only the "cited URL is the only candidate" case
+    changes verdict.
+    """
+    first = _extract_target_from_input(user_input)
+    if first and (_is_local_path_target(first) or not _is_cited_target(user_input, first)):
+        return True
+    return detect_target(user_input) is not None
+
+
+def _is_cited_target(user_input: str, target: Optional[str]) -> bool:
+    """Whether ``target`` is a cited documentation/source URL rather than a target.
+
+    Pasted task descriptions carry their source material as prose ("环境来源与官方说明:
+    https://github.com/vulhub/...") and the URL that follows is a citation. Acting on it
+    once replaced a live session target with the doc host, reset the context, dropped auto
+    mode — and, because the same URL was mined as the run's scope, the real endpoint named
+    later in the very same description was then refused with "[constraint_violation] Host
+    ... is outside allowed scope [github.com]" (2026-10-06 GeoServer CVE-2024-36401
+    postmortem). Consumed by BOTH the target-switch guard and the first-adoption branch,
+    the same way ``_is_api_path_prose`` is.
+    """
+    if not user_input or not target:
+        return False
+    return _is_cited_candidate(
+        user_input,
+        target,
+        user_input.find(target),
+        _citation_url_spans(user_input),
+    )
+
+
 def _is_api_path_prose(target: str) -> bool:
     """A single-segment POSIX path ("/storage", "/logs", "/session") extracted
     from a task description is API-path prose, not a target: acting on it once
@@ -4669,12 +4792,21 @@ def _should_switch_target(
     retarget phrasing ("改打 http://x" / "切换到 http://x") IS a real switch.
     Genuine mid-quiz retargeting to a bare IP can still use the ``target``
     command.
+
+    A *cited* documentation URL (``环境来源与官方说明: https://github.com/vulhub/...``)
+    is likewise never a retarget: pasting a challenge description used to switch the
+    session off the live endpoint onto the doc host, reset the context and drop auto
+    mode, and the doc host was mined as the run's whole scope on top of that
+    (2026-10-06 GeoServer CVE-2024-36401 postmortem). An explicit operator retarget can
+    still use the ``target`` command.
     """
     import re
 
     if not new_target or not current_target or new_target == current_target:
         return False
     if _is_api_path_prose(new_target):
+        return False
+    if _is_cited_target(user_input, new_target):
         return False
     if not _looks_like_quiz(user_input):
         return True

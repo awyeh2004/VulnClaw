@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from vulnclaw.agent.context import PentestPhase, TaskConstraints
 from vulnclaw.i18n import _
@@ -159,6 +159,110 @@ def _is_plausible_host(candidate: str) -> bool:
     return False
 
 
+#: A task/challenge description cites its source material as prose -- "环境来源与官方说明:
+#: https://github.com/vulhub/..." -- and the URL that follows is a REFERENCE, not the
+#: engagement target. (2026-10-06 GeoServer CVE-2024-36401 postmortem; see
+#: ``detect_target``.) Markers are deliberately citation-specific: generic words like
+#: "地址"/"说明" also introduce a real target ("目标地址: ...") and must not skip it.
+_CITATION_MARKERS = (
+    "环境来源",
+    "官方说明",
+    "官方文档",
+    "官方通告",
+    "参考链接",
+    "参考资料",
+    "漏洞详情",
+    "详见",
+)
+
+#: Markers that keep excluding their URL even in ``detect_target``'s second pass.
+#: ``漏洞详情`` is deliberately NOT here: in a challenge statement it introduces the
+#: engagement itself ("漏洞详情: http://target"), so when no other candidate exists
+#: the URL after it has to be readable as the target — otherwise the run gets no
+#: target at all (round15b, 2026-10-07). The purely citational markers below name an
+#: external source, so their URL stays excluded in both passes.
+_CITATION_MARKERS_ALWAYS = tuple(m for m in _CITATION_MARKERS if m != "漏洞详情")
+
+#: Hosts that serve source code, advisories or documentation. They are never what an
+#: engagement is aimed at; auto-authorising one silently redirects the whole run.
+_REFERENCE_HOSTS = (
+    "github.com",
+    "raw.githubusercontent.com",
+    "githubusercontent.com",
+    "gitee.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "sourceforge.net",
+    "vulhub.org",
+    "nvd.nist.gov",
+    "cve.mitre.org",
+    "cve.org",
+    "cvedetails.com",
+    "exploit-db.com",
+    "packetstormsecurity.com",
+    "readthedocs.io",
+    "wikipedia.org",
+)
+
+#: How far to the left of a URL a citation marker still counts. Raised from 16 to 32
+#: (2026-10-06 merge): 16 fits ``环境来源与官方说明: `` exactly, but a parenthetical
+#: attribution (``环境来源与官方说明（vulhub 官方仓库）: ``, 23 chars) overran it and the
+#: citation was mined as the target again. Still bounded -- a marker a whole sentence
+#: away is NOT an attribution to this URL.
+_CITATION_WINDOW = 32
+
+
+def _host_of(candidate: str) -> str:
+    """Return the lower-case host of ``candidate`` (a URL or a bare host)."""
+    match = re.match(r"^https?://([^/:?#]+)", candidate or "")
+    return (match.group(1) if match else (candidate or "")).lower().rstrip(".")
+
+
+def _is_reference_host(host: str) -> bool:
+    """Return True for source-code / advisory / documentation hosts."""
+    host = (host or "").lower().rstrip(".")
+    return any(host == ref or host.endswith("." + ref) for ref in _REFERENCE_HOSTS)
+
+
+def _citation_url_spans(
+    text: str,
+    markers: Tuple[str, ...] = _CITATION_MARKERS,
+) -> List[Tuple[int, int]]:
+    """Spans of the URLs in ``text`` that are cited references, not targets."""
+    spans: List[Tuple[int, int]] = []
+    text = text or ""
+    for match in re.finditer(r"https?://[a-zA-Z0-9][-a-zA-Z0-9.:]*", text):
+        url = match.group(0)
+        before = text[max(0, match.start() - _CITATION_WINDOW) : match.start()]
+        if _is_reference_host(_host_of(url)) or any(m in before for m in markers):
+            spans.append((match.start(), match.end()))
+    return spans
+
+
+def _is_cited_candidate(
+    text: str,
+    candidate: str,
+    start: int,
+    spans: Optional[List[Tuple[int, int]]] = None,
+) -> bool:
+    """Return True when ``candidate`` is (part of) a cited reference URL.
+
+    Both halves matter: the URL itself (``https://github.com``) AND the bare host
+    the domain pattern digs out of it (``github.com``), which sits inside the same
+    span and would otherwise re-introduce the citation as a "target".
+    """
+    if not text or not candidate:
+        return False
+    if candidate.lower().startswith(("http://", "https://")) and _is_reference_host(
+        _host_of(candidate)
+    ):
+        return True
+    for low, high in _citation_url_spans(text) if spans is None else spans:
+        if low <= start < high:
+            return True
+    return False
+
+
 def detect_target(user_input: str) -> Optional[str]:
     """Extract target from user input.
 
@@ -171,18 +275,61 @@ def detect_target(user_input: str) -> Optional[str]:
     is the tail of a bigger word/glob (``*``, a word character or a dot before it), which
     is what makes ``foo.dasctf.com`` behave the same whether it was written whole or
     inside ``pre*`` noise.
+
+    Round-21 (2026-10-06 GeoServer CVE-2024-36401 postmortem): a cited documentation URL is
+    not a target either. A pasted challenge description read "环境来源与官方说明:
+    https://github.com/vulhub/... Flag ... nc direct-ctf2.dasctf.com 25390"; the URL won
+    the first-match race, so this function returned the doc host, the mined
+    ``allowed_hosts`` became ``['github.com']`` with ``strict_mode`` on, and the real
+    endpoint -- named later in the same text -- was refused with
+    ``[constraint_violation] Host ... is outside allowed scope [github.com]``. Cited
+    reference candidates are now skipped, which lets the endpoint win.
     """
+    cited_spans = _citation_url_spans(user_input)
+    found = _first_plausible_target(user_input, cited_spans)
+    if found:
+        return found
+    # Round15b (2026-10-07): pass 2 runs ONLY when pass 1 found nothing. A
+    # challenge statement that puts the target right after a citation marker
+    # ("漏洞详情： http://real-target") has every candidate inside a citation
+    # span, so pass 1 returned None and the run had no target at all. Clearing
+    # the spans gives those URLs a second look. Reference hosts stay refused, and
+    # in pass 2 they are refused in BARE form too: with the spans gone nothing
+    # else rejects the ``github.com`` the URL pattern mines, which would
+    # re-create the very ``allowed_hosts=['github.com']`` scope hazard round-21
+    # fixed. Pass 2 can only turn a None into a candidate -- never change a
+    # non-empty pass-1 result.
+    # Only ``漏洞详情`` is retired here; a purely citational marker ("参考链接:",
+    # "官方文档:", "详见 ...") still excludes its URL, so a statement that cites
+    # only an external source stays target-less exactly as before.
+    return _first_plausible_target(
+        user_input,
+        _citation_url_spans(user_input, markers=_CITATION_MARKERS_ALWAYS),
+        reject_reference_hosts=True,
+    )
+
+
+def _first_plausible_target(
+    user_input: str,
+    cited_spans: List[Tuple[int, int]],
+    *,
+    reject_reference_hosts: bool = False,
+) -> Optional[str]:
+    """First plausible target in ``user_input`` that is not a cited reference."""
     for pattern in (
         r"(https?://[a-zA-Z0-9][-a-zA-Z0-9.:]*)",
         r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})",
-        r"(?<![\w*.])"
-        r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)",
+        r"(?<![\w*.])([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)",
     ):
         for match in re.finditer(pattern, user_input):
             candidate = (
                 match.group(1).rstrip("/.") if match.groups() else match.group(0)
             )
             if not candidate:
+                continue
+            if reject_reference_hosts and _is_reference_host(_host_of(candidate)):
+                continue
+            if _is_cited_candidate(user_input, candidate, match.start(), cited_spans):
                 continue
             if not _is_plausible_host(candidate):
                 continue

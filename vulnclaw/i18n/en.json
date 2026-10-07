@@ -352,6 +352,7 @@
   "skill.pentest-tools.description": "Pentest tool cheatsheet — codecs, reverse shells, red-team tooling, exploitation, password attacks, intranet tools, credential theft, privesc, tunneling, system commands, recon, domain attacks, web & Windows tools",
   "skill.rapid-checklist.description": "Rapid pentest checklist & payloads — payload families, bypass reminders, verification order, and quick test cards for when the direction is already known",
   "skill.secknowledge-skill.description": "Web + AI security testing knowledge base — WooYun 88,636 cases + Xianzhi L1–L4 methodology + GAARM 150 risks + OWASP",
+  "skill.urh-radio-analysis.description": "Radio / SDR signal analysis & protocol reversing with URH (Universal Radio Hacker) — modulation detection, demodulation, decoding-chain recovery, protocol field/checksum reversing, signal replay and simulation; HackRF/RTL-SDR/LimeSDR/PlutoSDR/AirSpy/USRP devices, .complex/.wav captures, and Sub-GHz (433/315/868 MHz) remote & sensor protocols",
   "skill.web-pentest.description": "Web application pentest — full workflow covering tech-stack fingerprinting, directory enumeration, auth testing, input validation, and logic flaws",
   "skill.web-security-advanced.description": "Advanced web security testing — injection families, protocol security, auth & logic flaws, file & deployment security, and the modern web attack surface, with full playbooks",
   "agent.common.not_set": "Not set",
