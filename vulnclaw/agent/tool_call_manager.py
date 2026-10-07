@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -40,9 +41,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_MAX_CONCURRENT = 5
 
 # Cross-round repetition suppression: when the same tool is called against the
-# same target endpoint more than this many times (with nothing new produced),
-# later calls are short-circuited with the most recent result instead of being
-# re-executed, so the model stops spinning on a dead path.
+# same target endpoint more than this many times *in a row with an identical
+# result*, later calls are short-circuited with the most recent result instead
+# of being re-executed, so the model stops spinning on a dead path. The counter
+# is reset as soon as the result changes (see _remember_target_result): a run
+# that keeps learning something new is never throttled, which is what the
+# "without producing a new result" wording has always claimed (round-22).
 _REPEAT_TOOL_LIMITS = {
     "brute_force_login": 2,
     "http_probe_batch": 2,
@@ -180,24 +184,81 @@ def _repeat_guard_violation(
             "Change strategy (different endpoint, different vuln class, or "
             "record this as a dead end with blackboard_reject_intent)."
         )
+    signature = runtime.tool_target_result_sig.get(fp, "")
     return (
-        f"[repetition guard] {tool_name} has already been called {count} times against "
-        f"the same endpoint without producing a new result. Re-executing would just repeat "
-        f"the same probe. {action_hint}\n"
+        f"[repetition guard] {tool_name} has now returned the SAME result {count} times "
+        f"in a row against the same endpoint (result signature {signature or 'n/a'}). "
+        f"Re-executing would just repeat the same probe. {action_hint}\n"
         f"Most recent result:\n{preview}"
     )
+
+
+#: Result fields whose values churn between two runs of the same probe no matter
+#: what the probe learned (byte counts, timings, request ids, hashes).
+_VOLATILE_RESULT_FIELD = re.compile(
+    r"(?:len|length|bytes|size|count|cost|elapsed|duration|took|hash|id|"
+    r"request[-_]?id|req|pid|port)\s*[=:]\s*\S+",
+    re.IGNORECASE,
+)
+_VOLATILE_RESULT_HEX = re.compile(r"\b[0-9a-f]{8,}\b")
+_VOLATILE_RESULT_TIME = re.compile(r"\d+(?:\.\d+)?\s*(?:ms|us|µs|s)\b")
+_VOLATILE_RESULT_LONG_INT = re.compile(r"\d{4,}")
+
+
+def _result_signature(content: str) -> str:
+    """Coarse fingerprint of a tool result, with volatile fields folded out.
+
+    The guard's wording promises it only counts calls that produced *no new
+    result*, so the count has to be tied to the result and not to the endpoint
+    alone. Round-22 (2026-10-06): in the nginx-ui run every probe was
+    ``python_execute`` against the single host in scope, so the URL-only
+    fingerprint was constant while the 30 responses were all different -- the
+    run lost its only execution tool and never recovered.
+
+    Only volatile material is folded: labelled fields (``len=``, ``id:``,
+    hashes), long integer runs and time literals. Short bare numbers are kept
+    on purpose, because status codes carry meaning -- 200 vs 403 vs 500 is
+    progress and must reset the counter. The bias is deliberate: a false
+    positive costs the run its tool, while a false negative merely leaves one
+    repeated probe unthrottled.
+
+    Round15b (2026-10-07): the folded text used to be truncated to its first 800
+    characters before hashing. Two genuinely different results that share a long
+    identical preamble (a route table, an HTML head) then folded to the SAME
+    signature, which is exactly the false positive the docstring above says must
+    not happen. The whole folded text is hashed now.
+    """
+    coarse = str(content or "")
+    coarse = _VOLATILE_RESULT_FIELD.sub("#", coarse)
+    coarse = _VOLATILE_RESULT_HEX.sub("#", coarse)
+    coarse = _VOLATILE_RESULT_TIME.sub("#", coarse)
+    coarse = _VOLATILE_RESULT_LONG_INT.sub("#", coarse)
+    return hashlib.sha1(coarse.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def _remember_target_result(
     agent: AgentContext, tool_name: str, func_args: dict[str, Any], content: str
 ) -> None:
-    """Store the most recent result for a tool+endpoint fingerprint."""
+    """Store the most recent result; reset the repeat counter when it changes.
+
+    Round-22 (2026-10-06) postmortem: the counter used to be incremented
+    forever and never cleared, so once a fingerprint hit its limit the tool +
+    endpoint pair was dead for the whole run -- even though the endpoint was
+    the only one in scope and the calls were genuinely different probes. A
+    changed result means the "no new result" premise no longer holds, so the
+    count starts over.
+    """
     runtime = getattr(agent, "runtime", None)
     if runtime is None:
         return
     fp = _target_fingerprint(tool_name, func_args)
     if not fp:
         return
+    signature = _result_signature(content)
+    previous = runtime.tool_target_result_sig.get(fp)
+    if previous is not None and previous != signature:
+        runtime.tool_target_calls[fp] = 0
+    runtime.tool_target_result_sig[fp] = signature
     runtime.tool_target_last_result[fp] = str(content or "")
 
 
@@ -556,6 +617,8 @@ async def _execute_single(agent: AgentContext, item: dict[str, Any]) -> dict[str
             "correction": signal.model_hint(),
             "correction_signal": signal,
         }
+
+
 def _restore_after_local_cancellation() -> None:
     """Un-arm the current task after swallowing a tool-local cancel scope.
 
@@ -571,7 +634,15 @@ def _restore_after_local_cancellation() -> None:
     the cancellation was the tool's own scope, never a user interrupt.
     """
     task = asyncio.current_task()
-    if task is not None and task.cancelling() > 0 and hasattr(task, "uncancel"):
+    if task is None or not hasattr(task, "uncancel"):
+        return
+    # Round15b (2026-10-07): a single ``uncancel()`` retires only ONE level.
+    # Cancel scopes stack (the tool's own scope plus an enclosing ``wait_for`` or
+    # parent scope), and any remainder stays armed, so an await after the
+    # swallowed branch re-raised CancelledError out of a path that had already
+    # moved on. Retire exactly the depth observed on entry -- bounded on purpose,
+    # so a cancellation arriving while we run is not absorbed.
+    for _ in range(task.cancelling()):
         task.uncancel()
 
 

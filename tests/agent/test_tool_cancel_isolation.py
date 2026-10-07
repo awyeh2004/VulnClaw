@@ -61,3 +61,27 @@ class TestLocalCancellationRetirement:
             return "completed"
 
         assert await user_interrupted() == "completed"
+
+    @pytest.mark.asyncio
+    async def test_stacked_cancellations_are_all_retired(self):
+        """Round15b (2026-10-07): ``uncancel()`` retires exactly ONE level.
+        Cancel scopes stack — the tool's own scope plus an enclosing
+        ``wait_for``/parent scope — and the remainder stayed armed, so a single
+        ``uncancel()`` left ``cancelling() == 1``: the same poisoning, one scope
+        deeper. ``_restore_after_local_cancellation`` must retire the depth it
+        found.
+        """
+
+        async def poisoned_twice():
+            task = asyncio.current_task()
+            task.cancel(msg="Cancelled via cancel scope a")
+            task.cancel(msg="Cancelled via cancel scope b")
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.sleep(10)
+            assert task.cancelling() == 2, "two stacked scopes"
+            tcm._restore_after_local_cancellation()
+            assert task.cancelling() == 0, "every level must be retired"
+            await asyncio.sleep(0)
+            return "survived"
+
+        assert await poisoned_twice() == "survived"
