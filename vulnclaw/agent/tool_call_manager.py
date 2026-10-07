@@ -233,6 +233,7 @@ async def handle_tool_calls(agent: AgentContext, message: Any) -> str:
         except asyncio.CancelledError as exc:
             if not _looks_like_tool_local_cancellation(exc):
                 raise
+            _restore_after_local_cancellation()
             duration_ms = _elapsed_ms(started)
             content, record, raw = _record_tool_failure_with_record(
                 agent, func_name, func_args, exc, duration_ms=duration_ms
@@ -505,6 +506,7 @@ async def _execute_single(agent: AgentContext, item: dict[str, Any]) -> dict[str
     except asyncio.CancelledError as exc:
         if not _looks_like_tool_local_cancellation(exc):
             raise
+        _restore_after_local_cancellation()
         logger.warning("工具执行被本地取消 %s: %s", func_name, exc)
         duration_ms = _elapsed_ms(started)
         content, record, raw = _record_tool_failure_with_record(
@@ -554,6 +556,25 @@ async def _execute_single(agent: AgentContext, item: dict[str, Any]) -> dict[str
             "correction": signal.model_hint(),
             "correction_signal": signal,
         }
+def _restore_after_local_cancellation() -> None:
+    """Un-arm the current task after swallowing a tool-local cancel scope.
+
+    Python 3.11+: catching CancelledError does NOT retire the task's
+    cancellation — ``task.cancelling()`` stays > 0 and the NEXT await on this
+    task re-raises CancelledError immediately. Measured 2026-10-06: an MCP
+    tool's 40s request scope expired, the tool-local branch recorded the
+    failure and returned a result, and the very next LLM await in the SAME
+    task was killed by the still-armed scope — the CancelledError escaped the
+    retry loop and took the whole REPL down. ``task.uncancel()`` is the
+    documented way to retire a swallowed cancellation; only correct here
+    because ``_looks_like_tool_local_cancellation`` has already established
+    the cancellation was the tool's own scope, never a user interrupt.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0 and hasattr(task, "uncancel"):
+        task.uncancel()
+
+
 def _looks_like_tool_local_cancellation(exc: asyncio.CancelledError) -> bool:
     """Differentiate MCP/AnyIO local cancel scopes from user task cancellation."""
 
