@@ -562,12 +562,18 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     from vulnclaw.platforms.refs import ChallengeRef
     from vulnclaw.platforms.tools import adapter_for_platform, submit_flag_via
 
-    # This handler is the only path through the shared submit policy, so it must
-    # speak BOTH vocabularies for the practice-ground id: the builtin face's
-    # `practice_id` and the platform MCP server's `practice_ground_id` (its
-    # schema for the same tool name). Measured 2026-10-07: a solved run called
-    # this with the MCP vocabulary, died on a bare KeyError('practice_id'), and
-    # the loop churned instead of submitting — no completion, no playbook
+    # This handler is the BUILTIN path through the shared submit policy: it runs
+    # when no connected MCP server owns this tool name (CLI / programmatic /
+    # saved-playbook callers), or when the legacy face is exposed. When the CTF2
+    # MCP server owns the name, execute_mcp_tool yields the call to that face
+    # past the operator gate instead (operator decision 2026-10-07: the MCP face
+    # is the authoritative submit executor).
+    #
+    # It must speak BOTH vocabularies for the practice-ground id: the builtin
+    # face's `practice_id` and the platform MCP server's `practice_ground_id`
+    # (its schema for the same tool name). Measured 2026-10-07: a solved run
+    # called this with the MCP vocabulary, died on a bare KeyError('practice_id'),
+    # and the loop churned instead of submitting — no completion, no playbook
     # capture. `confirmation` (MCP-schema required) and `sub_flag_id` (suite
     # challenges) are accepted and ignored: the gate + attempt guard below are
     # this codebase's confirmation step, and practice grounds have one flag.

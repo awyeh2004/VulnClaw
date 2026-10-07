@@ -81,6 +81,8 @@ from vulnclaw.ctf_platform import (
 from vulnclaw.platforms.tools import (
     CORE_TOOL_NAMES as _PLATFORM_CORE_TOOL_NAMES,
     PLATFORM_TOOL_NAMES as _PLATFORM_TOOL_NAMES,
+    _flag_submission_enabled,
+    _submission_disabled_message,
     dispatch_platform_tool,
     platform_tool_schemas,
 )
@@ -1428,16 +1430,19 @@ async def execute_runtime_diff_probe(agent: AgentContext, args: dict[str, Any]) 
     return "[!] runtime_diff_probe mode must be regex or php_serialize"
 
 
-_SUBMIT_POLICY_TOOL_NAMES = frozenset({"ctf2_submit_flag", "gcs_submit_flag"})
-"""The one irreversible verb never yields to a shadowing MCP face.
+_GATED_SUBMIT_TOOL_NAMES = frozenset({"ctf2_submit_flag", "gcs_submit_flag"})
+"""Submit verbs yield to a shadowing MCP face, but only past the operator gate.
 
-The shared submit policy — the ``allow_flag_submission`` operator gate (fail
-closed), the per-ref attempt guard, the dedup/accounting — lives only in
-``vulnclaw.platforms.tools.submit_flag_via`` on the builtin path. An MCP
-server's submit tool crosses none of it, so yielding these two names would let
-a call submit a flag while the operator's gate is OFF. They keep the builtin
-route always, and the CTF2 handler absorbs both argument vocabularies instead
-(``practice_id`` / ``practice_ground_id``).
+Operator decision (2026-10-07): the CTF2 platform's own MCP face is the
+authoritative executor for ``ctf2_submit_flag`` — the schema the model sees is
+the schema that runs, and the platform's own confirmation sentinel plus its
+server-side attempt limits are the enforcement. What is NOT delegated is the
+master switch: with ``competition.allow_flag_submission`` OFF the call returns
+the disabled message without reaching MCP (fail closed, same text the shared
+policy returns). The client attempt guard / dedup stay on the builtin path only
+(no MCP owner, or the face exposed): the platform accounts attempts
+server-side, so re-keeping them from an MCP result would mean parsing rendered
+JSON to duplicate enforcement the platform already applies.
 """
 
 
@@ -1470,15 +1475,12 @@ def _mcp_registry_owns(agent: Any, tool_name: str) -> bool:
 def _builtin_face_claims(agent: Any, tool_name: str, face_exposed: bool) -> bool:
     """Whether the builtin legacy face should handle this call (else yield to MCP).
 
-    Yield happens only when ALL of: the face is hidden from the model, an MCP
-    server owns the same name, and the verb is not the policy-gated submit
-    (``_SUBMIT_POLICY_TOOL_NAMES``).
+    Yield happens when the face is hidden from the model AND an MCP server owns
+    the same name — the face the caller could only have been talking to. The
+    caller (``execute_mcp_tool``) still gates submit verbs before yielding (see
+    ``_GATED_SUBMIT_TOOL_NAMES``).
     """
-    if face_exposed:
-        return True
-    if tool_name in _SUBMIT_POLICY_TOOL_NAMES:
-        return True
-    return not _mcp_registry_owns(agent, tool_name)
+    return face_exposed or not _mcp_registry_owns(agent, tool_name)
 
 
 async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, Any]) -> str:
@@ -1495,7 +1497,15 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     # dangerous tool cannot reach execution from a leaf agent.
     dangerous_refusal = dangerous_tool_refusal(tool_name, agent)
     if dangerous_refusal is not None:
-        return dangerous_refusal
+        # Round-22 (2026-10-06): the refusal stands as the failure mode, but a
+        # sub-agent's request now has one escalation path -- it is re-issued
+        # through the main agent, where the normal operator approval flow
+        # applies. Returns None (i.e. keeps the refusal) when there is no trust
+        # channel, no delegation runtime, or the per-leaf cap is spent.
+        from vulnclaw.agent.subagent.exec_escalation import escalate_dangerous_call
+
+        escalated = await escalate_dangerous_call(agent, tool_name, args)
+        return escalated if escalated is not None else dangerous_refusal
 
     session = getattr(agent, "session_state", None)
     constraints = getattr(session, "task_constraints", None)
@@ -1548,20 +1558,28 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     #
     # The rule below mirrors the schema build: when the builtin face is hidden
     # AND the MCP registry owns the name, the call yields to the MCP manager —
-    # the face the model could only have been talking to. Programmatic callers
+    # the face the model could only have been talking to, and (operator decision,
+    # 2026-10-07) for the submit verb the EXECUTOR too. Programmatic callers
     # (CLI, saved playbooks, tests) keep the builtin route: with no such MCP
     # tool registered, nothing changes for them. When the face IS exposed, both
     # schemas are in the model's view and the builtin face keeps precedence —
     # the pre-existing, operator-opted-in ambiguity.
-    if tool_name in CTF_TOOL_NAMES and _builtin_face_claims(
-        agent, tool_name, ctf2_tools_enabled(_runtime_config(agent))
-    ):
-        return await dispatch_ctf2_tool(tool_name, args)
+    if tool_name in CTF_TOOL_NAMES:
+        if _builtin_face_claims(
+            agent, tool_name, ctf2_tools_enabled(_runtime_config(agent))
+        ):
+            return await dispatch_ctf2_tool(tool_name, args)
+        if tool_name in _GATED_SUBMIT_TOOL_NAMES and not _flag_submission_enabled():
+            return _submission_disabled_message()
+        # else: yield to the MCP manager at the bottom of this function.
 
-    if tool_name in GCS_TOOL_NAMES and _builtin_face_claims(
-        agent, tool_name, gcs_tools_enabled(_runtime_config(agent))
-    ):
-        return await dispatch_gcs_tool(tool_name, args)
+    if tool_name in GCS_TOOL_NAMES:
+        if _builtin_face_claims(
+            agent, tool_name, gcs_tools_enabled(_runtime_config(agent))
+        ):
+            return await dispatch_gcs_tool(tool_name, args)
+        if tool_name in _GATED_SUBMIT_TOOL_NAMES and not _flag_submission_enabled():
+            return _submission_disabled_message()
 
     if tool_name in TRAFFIC_TOOL_NAMES:
         store = resolve_traffic_store(agent)

@@ -13,14 +13,16 @@ Three properties are pinned here:
 
 1. **Hidden face yields to a shadowing MCP server.** When the builtin face is
    hidden AND the MCP registry owns the name, the call goes to
-   ``mcp_manager.call_tool`` — the face the model could only have been talking to.
+   ``mcp_manager.call_tool`` — the face the model could only have been talking
+   to. For the submit verb this is the EXECUTOR too (operator decision
+   2026-10-07): the schema the model sees is the schema that runs.
 2. **The code's capability does not shrink.** With no MCP owner (or no manager
    at all) the builtin route still executes a hidden-face name — the property
    ``CTF_TOOL_NAMES_BY_SCHEMA``'s docstring pins for CLI/programmatic callers.
-3. **The submit verb never yields.** The shared submit policy (operator gate,
-   attempt guard, accounting) exists only on the builtin path; an MCP submit
-   would cross none of it. The CTF2 handler absorbs both vocabularies instead,
-   so an MCP-shaped submit reaches the policy and the platform.
+3. **The submit master switch is not delegated.** Yielding a submit past the
+   gate requires ``allow_flag_submission`` ON (fail closed); with no MCP owner
+   the builtin path still crosses the full shared policy, absorbing both
+   argument vocabularies.
 """
 
 from __future__ import annotations
@@ -158,18 +160,66 @@ class TestProgrammaticCallersKeepTheBuiltinRoute:
         assert mcp_calls == []
 
 
-class TestSubmitNeverYields:
-    @pytest.mark.asyncio
-    async def test_mcp_vocabulary_submit_crosses_the_shared_policy(
-        self, monkeypatch, no_platform_submit_gate
-    ):
-        """The exact 2026-10-07 payload: practice_ground_id + confirmation.
+class TestSubmitYieldsPastTheGate:
+    @pytest.fixture()
+    def gate_on(self, monkeypatch):
+        monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
 
-        Before the fix this died on KeyError('practice_id'); it must reach the
-        shared submit policy with the ids intact, and never the MCP manager.
+    @pytest.fixture()
+    def gate_off(self, monkeypatch):
+        monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: False)
+
+    @pytest.mark.asyncio
+    async def test_mcp_vocabulary_submit_executes_on_the_mcp_face(
+        self, monkeypatch, gate_on
+    ):
+        """Operator decision 2026-10-07: the MCP face is the submit executor.
+
+        The model speaks the only schema it was shown (practice_ground_id +
+        confirmation) and that schema is the one that runs.
         """
         monkeypatch.setattr(bt, "ctf2_tools_enabled", _hidden)
         agent, mcp_calls = _agent(owns={"ctf2_submit_flag"})
+
+        args = {
+            "practice_ground_id": PRACTICE_ID,
+            "challenge_id": CHALLENGE_ID,
+            "flag": FLAG,
+            "confirmation": True,
+        }
+        out = await bt.execute_mcp_tool(agent, "ctf2_submit_flag", args)
+
+        assert out == "MCP-SENTINEL"
+        assert mcp_calls == [("ctf2_submit_flag", args)]
+
+    @pytest.mark.asyncio
+    async def test_gate_off_stops_the_submit_before_mcp(self, monkeypatch, gate_off):
+        """The master switch is NOT delegated: fail closed, same text as the policy."""
+        monkeypatch.setattr(bt, "ctf2_tools_enabled", _hidden)
+        agent, mcp_calls = _agent(owns={"ctf2_submit_flag"})
+
+        out = await bt.execute_mcp_tool(
+            agent,
+            "ctf2_submit_flag",
+            {
+                "practice_ground_id": PRACTICE_ID,
+                "challenge_id": CHALLENGE_ID,
+                "flag": FLAG,
+                "confirmation": True,
+            },
+        )
+
+        assert "[platform_submit_disabled]" in out
+        assert mcp_calls == []
+
+    @pytest.mark.asyncio
+    async def test_no_mcp_owner_submit_crosses_the_shared_policy(
+        self, monkeypatch, no_platform_submit_gate
+    ):
+        """The builtin path survives for programmatic callers: dual vocabulary,
+        real policy, adapter called with the ids intact."""
+        monkeypatch.setattr(bt, "ctf2_tools_enabled", _hidden)
+        agent, mcp_calls = _agent(owns=set())
 
         seen: dict = {}
 
@@ -206,7 +256,7 @@ class TestSubmitNeverYields:
         self, monkeypatch, no_platform_submit_gate
     ):
         monkeypatch.setattr(bt, "ctf2_tools_enabled", _hidden)
-        agent, mcp_calls = _agent(owns={"ctf2_submit_flag"})
+        agent, mcp_calls = _agent(owns=set())
         monkeypatch.setattr(
             "vulnclaw.platforms.tools.adapter_for_platform",
             lambda name: pytest.fail("adapter must not be built without ids"),
