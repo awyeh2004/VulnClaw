@@ -75,6 +75,7 @@ from vulnclaw.traffic.tools import (
 from vulnclaw.ctf_platform import (
     CTF_TOOL_NAMES,
     ctf2_tool_schemas,
+    ctf2_tools_enabled,
     dispatch_ctf2_tool,
 )
 from vulnclaw.platforms.tools import (
@@ -87,6 +88,7 @@ from vulnclaw.gcs_platform import (
     GCS_TOOL_NAMES,
     dispatch_gcs_tool,
     gcs_tool_schemas,
+    gcs_tools_enabled,
 )
 
 # 本地化工具名（新增）
@@ -1426,6 +1428,59 @@ async def execute_runtime_diff_probe(agent: AgentContext, args: dict[str, Any]) 
     return "[!] runtime_diff_probe mode must be regex or php_serialize"
 
 
+_SUBMIT_POLICY_TOOL_NAMES = frozenset({"ctf2_submit_flag", "gcs_submit_flag"})
+"""The one irreversible verb never yields to a shadowing MCP face.
+
+The shared submit policy — the ``allow_flag_submission`` operator gate (fail
+closed), the per-ref attempt guard, the dedup/accounting — lives only in
+``vulnclaw.platforms.tools.submit_flag_via`` on the builtin path. An MCP
+server's submit tool crosses none of it, so yielding these two names would let
+a call submit a flag while the operator's gate is OFF. They keep the builtin
+route always, and the CTF2 handler absorbs both argument vocabularies instead
+(``practice_id`` / ``practice_ground_id``).
+"""
+
+
+def _runtime_config(agent: Any) -> Any:
+    """The runtime config the schema build used, so dispatch agrees with the view.
+
+    ``build_openai_tools`` answers the exposure switches from this same object
+    (round8 L4): dispatch must not re-read the config file per tool call.
+    """
+    return getattr(agent, "config", None)
+
+
+def _mcp_registry_owns(agent: Any, tool_name: str) -> bool:
+    """Whether a connected MCP server currently provides this tool name.
+
+    Defensive on purpose: a bare agent without a manager/registry (tests,
+    programmatic callers) simply means "no MCP owner", which restores the
+    builtin route — the property CTF_TOOL_NAMES_BY_SCHEMA's docstring pins.
+    """
+    registry = getattr(getattr(agent, "mcp_manager", None), "registry", None)
+    lookup = getattr(registry, "get_server_for_tool", None)
+    if lookup is None:
+        return False
+    try:
+        return bool(lookup(tool_name))
+    except Exception:
+        return False
+
+
+def _builtin_face_claims(agent: Any, tool_name: str, face_exposed: bool) -> bool:
+    """Whether the builtin legacy face should handle this call (else yield to MCP).
+
+    Yield happens only when ALL of: the face is hidden from the model, an MCP
+    server owns the same name, and the verb is not the policy-gated submit
+    (``_SUBMIT_POLICY_TOOL_NAMES``).
+    """
+    if face_exposed:
+        return True
+    if tool_name in _SUBMIT_POLICY_TOOL_NAMES:
+        return True
+    return not _mcp_registry_owns(agent, tool_name)
+
+
 async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, Any]) -> str:
     """Execute a tool call via MCP manager or built-in tools."""
     violation = role_tool_violation(
@@ -1480,10 +1535,32 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     if tool_name in _PLATFORM_TOOL_NAMES:
         return await dispatch_platform_tool(tool_name, args, agent=agent)
 
-    if tool_name in CTF_TOOL_NAMES:
+    # ── Legacy per-platform faces: dispatch must follow the face the caller read ──
+    #
+    # A legacy name can belong to TWO faces at once. Measured on 2026-10-07: the
+    # CTF2 platform's own MCP endpoint ships `ctf2_submit_flag` whose schema takes
+    # `practice_ground_id`, while the builtin legacy face takes `practice_id`.
+    # With the legacy face hidden (`expose_legacy_tool_names: false`) the model's
+    # schema contains ONLY the MCP version — so an MCP-vocabulary call arrives
+    # here, the name matched the builtin table, and the handler died on a bare
+    # KeyError('practice_id') after the flag was already solved. The run then
+    # churned instead of submitting: no completion, no playbook capture.
+    #
+    # The rule below mirrors the schema build: when the builtin face is hidden
+    # AND the MCP registry owns the name, the call yields to the MCP manager —
+    # the face the model could only have been talking to. Programmatic callers
+    # (CLI, saved playbooks, tests) keep the builtin route: with no such MCP
+    # tool registered, nothing changes for them. When the face IS exposed, both
+    # schemas are in the model's view and the builtin face keeps precedence —
+    # the pre-existing, operator-opted-in ambiguity.
+    if tool_name in CTF_TOOL_NAMES and _builtin_face_claims(
+        agent, tool_name, ctf2_tools_enabled(_runtime_config(agent))
+    ):
         return await dispatch_ctf2_tool(tool_name, args)
 
-    if tool_name in GCS_TOOL_NAMES:
+    if tool_name in GCS_TOOL_NAMES and _builtin_face_claims(
+        agent, tool_name, gcs_tools_enabled(_runtime_config(agent))
+    ):
         return await dispatch_gcs_tool(tool_name, args)
 
     if tool_name in TRAFFIC_TOOL_NAMES:

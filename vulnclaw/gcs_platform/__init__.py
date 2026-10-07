@@ -15,6 +15,7 @@ from vulnclaw.gcs_platform.tools import (
     dispatch_gcs_tool,
     exercise_ready_poll,
     gcs_tool_schemas,
+    gcs_tools_enabled,
 )
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "dispatch_gcs_tool",
     "exercise_ready_poll",
     "gcs_tool_schemas",
+    "gcs_tools_enabled",
     "is_configured",
 ]

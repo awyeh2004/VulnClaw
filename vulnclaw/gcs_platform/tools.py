@@ -272,6 +272,11 @@ def gcs_tool_schemas(config: Any = None) -> list[dict[str, Any]]:
 #   * this decides what the CODE can execute.
 # Conflating them means disabling the face would also break the `vulnclaw gcs`
 # command and any programmatic caller.
+#
+# One carve-out one level up: `agent.builtin_tools.execute_mcp_tool` yields a
+# hidden-face name to the MCP manager when a connected MCP server owns the same
+# name (`_builtin_face_claims` there). Direct callers of `dispatch_gcs_tool`
+# are unaffected.
 GCS_TOOL_NAMES_BY_SCHEMA: list[str] = list(GCS_TOOL_NAMES)
 
 

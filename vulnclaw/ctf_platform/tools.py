@@ -334,6 +334,12 @@ call with "unknown CTF2 tool" -- coupling two things that must stay separate:
 * this decides what the CODE can execute.
 
 The same trap is documented in ``gcs_platform/tools.py``, where it was hit first.
+
+One carve-out one level up: ``agent.builtin_tools.execute_mcp_tool`` now yields a
+hidden-face name to the MCP manager when a connected MCP server owns the same name
+(the CTF2 platform's own MCP endpoint ships ``ctf2_submit_flag`` with a
+``practice_ground_id`` schema) — ``_builtin_face_claims`` there. Direct callers of
+``dispatch_ctf2_tool`` are unaffected.
 """
 
 
@@ -556,9 +562,25 @@ async def _handle_submit_flag(args: dict[str, Any]) -> str:
     from vulnclaw.platforms.refs import ChallengeRef
     from vulnclaw.platforms.tools import adapter_for_platform, submit_flag_via
 
-    ref = ChallengeRef(
-        "ctf2", "practice", str(args["practice_id"]), str(args["challenge_id"])
-    )
+    # This handler is the only path through the shared submit policy, so it must
+    # speak BOTH vocabularies for the practice-ground id: the builtin face's
+    # `practice_id` and the platform MCP server's `practice_ground_id` (its
+    # schema for the same tool name). Measured 2026-10-07: a solved run called
+    # this with the MCP vocabulary, died on a bare KeyError('practice_id'), and
+    # the loop churned instead of submitting — no completion, no playbook
+    # capture. `confirmation` (MCP-schema required) and `sub_flag_id` (suite
+    # challenges) are accepted and ignored: the gate + attempt guard below are
+    # this codebase's confirmation step, and practice grounds have one flag.
+    practice_id = str(
+        args.get("practice_id") or args.get("practice_ground_id") or ""
+    ).strip()
+    challenge_id = str(args.get("challenge_id") or "").strip()
+    if not practice_id or not challenge_id:
+        return (
+            "[ctf2_error] submit flag failed: need practice_id (or "
+            f"practice_ground_id) and challenge_id, got keys: {sorted(args)}"
+        )
+    ref = ChallengeRef("ctf2", "practice", practice_id, challenge_id)
     try:
         adapter = adapter_for_platform("ctf2")
     except Exception as exc:  # noqa: BLE001

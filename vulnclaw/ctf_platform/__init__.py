@@ -14,6 +14,7 @@ from vulnclaw.ctf_platform.tools import (
     CTF_TOOL_NAMES_BY_SCHEMA,
     CTF_READ_TOOLS,
     ctf2_tool_schemas,
+    ctf2_tools_enabled,
     dispatch_ctf2_tool,
 )
 
@@ -24,6 +25,7 @@ __all__ = [
     "SubmitGuard",
     "api_token",
     "ctf2_tool_schemas",
+    "ctf2_tools_enabled",
     "dispatch_ctf2_tool",
     "get_guard",
     "is_configured",
