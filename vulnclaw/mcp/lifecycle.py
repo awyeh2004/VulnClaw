@@ -24,6 +24,7 @@ from vulnclaw.config.source_render import render_highlighted_source_block
 from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url
 from vulnclaw.mcp._probe_mixin import ProbeMixin
 from vulnclaw.mcp.registry import HealthStatus, MCPRegistry
+from vulnclaw.mcp.session_owner import OwnedMcpSession, _describe_exception
 
 logger = logging.getLogger(__name__)
 
@@ -537,7 +538,15 @@ class MCPLifecycleManager(ProbeMixin):
             return await self._create_persistent_stdio_session(server_name)
 
     async def _create_persistent_stdio_session(self, server_name: str) -> Any:
-        """Create and cache a persistent stdio-backed MCP session for the current loop."""
+        """Create and cache a persistent stdio-backed MCP session for the current loop.
+
+        The session lives inside an OwnedMcpSession: a dedicated owner task
+        enters the transport and ClientSession contexts, so the session's
+        internal anyio cancel scope is hosted there instead of in the caller's
+        task (previously the main solve task for single-tool turns), and a
+        dying transport can no longer deliver CancelledError into the solve
+        (round15b F-G).
+        """
         # stdio_client is an anyio TaskGroup-based async generator. When the
         # per-request event loop tears down (asyncio.run -> shutdown_asyncgens),
         # the still-open generator is finalized from a different task than the one
@@ -550,7 +559,11 @@ class MCPLifecycleManager(ProbeMixin):
         current_loop = asyncio.get_running_loop()
 
         if isinstance(client_meta, dict) and client_meta.get("kind") == "persistent-stdio":
-            if client_meta.get("loop") is current_loop and client_meta.get("session") is not None:
+            if (
+                client_meta.get("loop") is current_loop
+                and client_meta.get("session") is not None
+                and self._owned_session_alive(client_meta)
+            ):
                 return client_meta["session"]
 
         config = None
@@ -569,21 +582,28 @@ class MCPLifecycleManager(ProbeMixin):
         )
         startup_s = self._startup_timeout_seconds(config)
 
-        cm = stdio_client(server)
-        read_stream, write_stream = await cm.__aenter__()
-        # read_timeout_seconds is deliberately unset; per-call timeouts are applied
-        # locally via asyncio.wait_for (see _call_attached_server).
-        session = ClientSession(read_stream, write_stream)
-        # 进入 ClientSession 上下文以启动 _receive_loop；否则后续调用读不到响应而卡死。
+        async def _factory() -> tuple[Any, Any, Any]:
+            cm = stdio_client(server)
+            read_stream, write_stream = await cm.__aenter__()
+            return cm, read_stream, write_stream
+
+        # Recreate path: stop the previous owner first so its session/transport
+        # are closed in their own task (replaces the cross-task old_cm.__aexit__).
+        await self._stop_owned_session(server_name)
+        owned = OwnedMcpSession(
+            server_name,
+            _factory,
+            # Reference the module global lazily so tests patching
+            # lifecycle.ClientSession stay effective through the owner.
+            session_factory=lambda read, write: ClientSession(read, write),
+            on_death=self._on_owned_session_death,
+        )
         try:
-            await session.__aenter__()
-            await asyncio.wait_for(session.initialize(), timeout=startup_s)
-        except BaseException:
-            with _suppress_cleanup_errors():
-                await session.__aexit__(None, None, None)
-            with _suppress_cleanup_errors():
-                await cm.__aexit__(None, None, None)
-            raise
+            session = await owned.start(startup_s)
+        except BaseException as exc:
+            raise RuntimeError(
+                f"persistent stdio session for {server_name} failed: {_describe_exception(exc)}"
+            ) from None
 
         # 发现并注册真实工具名，替换 KNOWN_TOOLS 硬编码的假名
         try:
@@ -594,18 +614,13 @@ class MCPLifecycleManager(ProbeMixin):
         except BaseException:
             pass
 
-        # 关闭旧 context_manager，避免 GC 回收时 cancel scope 跨 task 冲突
-        old_cm = client_meta.get("context_manager") if isinstance(client_meta, dict) else None
-        if old_cm is not None and old_cm is not cm:
-            with _suppress_cleanup_errors():
-                await old_cm.__aexit__(None, None, None)
-
         self._mcp_clients[server_name] = {
             "kind": "persistent-stdio",
             "config": config,
             "loop": current_loop,
             "session": session,
-            "context_manager": cm,
+            "context_manager": owned.cm,
+            "owner": owned,
         }
         return session
 
@@ -619,6 +634,10 @@ class MCPLifecycleManager(ProbeMixin):
         If the connect/initialize fails (e.g. "Already connected"), the error is
         raised to the caller so the tool_call_manager can handle it as a service
         error — it never crashes the entire solve loop.
+
+        Like the stdio path, the session lives inside an OwnedMcpSession so the
+        session's anyio cancel scope is hosted by a dedicated task instead of
+        the caller's (round15b F-G).
         """
         if streamablehttp_client is None or ClientSession is None:
             raise RuntimeError("MCP Python SDK is not installed")
@@ -631,7 +650,11 @@ class MCPLifecycleManager(ProbeMixin):
         current_loop = asyncio.get_running_loop()
 
         if isinstance(client_meta, dict) and client_meta.get("kind") == "persistent-http":
-            if client_meta.get("loop") is current_loop and client_meta.get("session") is not None:
+            if (
+                client_meta.get("loop") is current_loop
+                and client_meta.get("session") is not None
+                and self._owned_session_alive(client_meta)
+            ):
                 return client_meta["session"]
 
         config = None
@@ -649,34 +672,29 @@ class MCPLifecycleManager(ProbeMixin):
         connect_s = self._startup_timeout_seconds(config)
         read_s = self._tool_timeout_seconds(config)
 
-        cm = None
-        session = None
-        try:
+        async def _factory() -> tuple[Any, Any, Any]:
             cm = streamablehttp_client(
                 url, headers=headers, timeout=connect_s, sse_read_timeout=read_s
             )
             read_stream, write_stream, _get_session_id = await cm.__aenter__()
-            # read_timeout_seconds is deliberately unset; per-call timeouts are applied
-            # locally via asyncio.wait_for (see _call_attached_server).
-            session = ClientSession(read_stream, write_stream)
-            await session.__aenter__()
-            await asyncio.wait_for(session.initialize(), timeout=connect_s)
+            return cm, read_stream, write_stream
+
+        # Recreate path: stop the previous owner first (the old code leaked the
+        # previous cm/session here by simply overwriting the cache entry).
+        await self._stop_owned_session(server_name)
+        owned = OwnedMcpSession(
+            server_name,
+            _factory,
+            # Reference the module global lazily so tests patching
+            # lifecycle.ClientSession stay effective through the owner.
+            session_factory=lambda read, write: ClientSession(read, write),
+            on_death=self._on_owned_session_death,
+        )
+        try:
+            session = await owned.start(connect_s)
         except BaseException as exc:
-            # Clean up partial state
-            if session is not None:
-                with _suppress_cleanup_errors():
-                    await session.__aexit__(None, None, None)
-            if cm is not None:
-                with _suppress_cleanup_errors():
-                    await cm.__aexit__(None, None, None)
-            # Extract root cause from ExceptionGroup
-            detail = str(exc)
-            if hasattr(exc, "exceptions"):
-                subs = list(getattr(exc, "exceptions", []))
-                if subs:
-                    detail = "; ".join(str(s) for s in subs)
             raise RuntimeError(
-                f"streamable-http session for {server_name} failed: {detail}"
+                f"streamable-http session for {server_name} failed: {_describe_exception(exc)}"
             ) from None
 
         # 首次连接时发现真实工具并替换启动时注册的静态占位工具
@@ -693,7 +711,8 @@ class MCPLifecycleManager(ProbeMixin):
             "config": config,
             "loop": current_loop,
             "session": session,
-            "context_manager": cm,
+            "context_manager": owned.cm,
+            "owner": owned,
         }
         self.registry.set_server_running(server_name, running=True)
         self.registry.set_server_health(server_name, HealthStatus.HEALTHY.value)
@@ -709,7 +728,11 @@ class MCPLifecycleManager(ProbeMixin):
         current_loop = asyncio.get_running_loop()
 
         if isinstance(client_meta, dict) and client_meta.get("kind") == "persistent-sse":
-            if client_meta.get("loop") is current_loop and client_meta.get("session") is not None:
+            if (
+                client_meta.get("loop") is current_loop
+                and client_meta.get("session") is not None
+                and self._owned_session_alive(client_meta)
+            ):
                 return client_meta["session"]
 
         config = None
@@ -726,29 +749,26 @@ class MCPLifecycleManager(ProbeMixin):
         read_s = self._tool_timeout_seconds(config)
         connect_s = self._startup_timeout_seconds(config)
 
-        cm = None
-        session = None
-        try:
+        async def _factory() -> tuple[Any, Any, Any]:
             cm = sse_client(url)
             read_stream, write_stream = await cm.__aenter__()
-            # read_timeout_seconds is deliberately unset; per-call timeouts are applied
-            # locally via asyncio.wait_for (see _call_attached_server).
-            session = ClientSession(read_stream, write_stream)
-            await session.__aenter__()
-            await asyncio.wait_for(session.initialize(), timeout=connect_s)
+            return cm, read_stream, write_stream
+
+        await self._stop_owned_session(server_name)
+        owned = OwnedMcpSession(
+            server_name,
+            _factory,
+            # Reference the module global lazily so tests patching
+            # lifecycle.ClientSession stay effective through the owner.
+            session_factory=lambda read, write: ClientSession(read, write),
+            on_death=self._on_owned_session_death,
+        )
+        try:
+            session = await owned.start(connect_s)
         except BaseException as exc:
-            if session is not None:
-                with _suppress_cleanup_errors():
-                    await session.__aexit__(None, None, None)
-            if cm is not None:
-                with _suppress_cleanup_errors():
-                    await cm.__aexit__(None, None, None)
-            detail = str(exc)
-            if hasattr(exc, "exceptions"):
-                subs = list(getattr(exc, "exceptions", []))
-                if subs:
-                    detail = "; ".join(str(s) for s in subs)
-            raise RuntimeError(f"sse session for {server_name} failed: {detail}") from None
+            raise RuntimeError(
+                f"sse session for {server_name} failed: {_describe_exception(exc)}"
+            ) from None
 
         try:
             tools = await asyncio.wait_for(session.list_tools(), timeout=read_s)
@@ -763,7 +783,8 @@ class MCPLifecycleManager(ProbeMixin):
             "config": config,
             "loop": current_loop,
             "session": session,
-            "context_manager": cm,
+            "context_manager": owned.cm,
+            "owner": owned,
         }
         self.registry.set_server_running(server_name, running=True)
         self.registry.set_server_health(server_name, HealthStatus.HEALTHY.value)
@@ -876,9 +897,62 @@ class MCPLifecycleManager(ProbeMixin):
             "persistent-sse",
         )
 
+    @staticmethod
+    def _owned_session_alive(client_meta: Any) -> bool:
+        """Whether a cached persistent session's owner task is still alive.
+
+        Round15b (2026-10-07) postmortem — creation-time death race: an owner
+        that dies in the window between ``owned.start()`` returning and the
+        cache write fires ``_on_owned_session_death`` while the entry does not
+        exist yet (a no-op), so the dead session used to be written to the
+        cache and returned forever, burning the full per-call tool timeout on
+        every later request with no rebuild path. Checking ``dead`` here turns
+        that into a one-call blip followed by a normal rebuild.
+        """
+        if not isinstance(client_meta, dict):
+            return False
+        owner = client_meta.get("owner")
+        return owner is not None and not getattr(owner, "dead", False)
+
+    async def _stop_owned_session(self, server_name: str) -> None:
+        """Stop and forget the owned session for a server before recreating it."""
+        meta = self._mcp_clients.get(server_name)
+        owned = meta.get("owner") if isinstance(meta, dict) else None
+        if owned is None:
+            return
+        self._mcp_clients.pop(server_name, None)
+        await owned.aclose()
+
+    def _on_owned_session_death(self, owned: Any) -> None:
+        """Drop the cache entry of a session whose transport/receive loop died.
+
+        Runs in the owner task. Dropping the entry makes the next tool call
+        rebuild the session instead of talking into a dead transport; callers
+        with in-flight requests on the dead session fail via their per-call
+        wait_for timeout instead of crashing.
+        """
+        for name, meta in list(self._mcp_clients.items()):
+            if isinstance(meta, dict) and meta.get("owner") is owned:
+                self._mcp_clients.pop(name, None)
+                self.registry.set_server_running(name, running=False)
+                self.registry.set_server_health(name, HealthStatus.UNAVAILABLE.value)
+                logger.warning(
+                    "MCP server %s persistent session died; cache cleared, "
+                    "next call will rebuild the session",
+                    name,
+                )
+
     async def _aclose_session_meta(self, client_meta: Any) -> None:
         """Exit a persistent session then its transport context manager (order matters)."""
         if not self._is_persistent_session(client_meta):
+            return
+        owned = client_meta.get("owner")
+        if owned is not None:
+            # The owner task exits both contexts itself, in the task that
+            # entered them. A direct cross-task __aexit__ raises anyio's
+            # "exit cancel scope in a different task" RuntimeError and skips
+            # the real teardown.
+            await owned.aclose()
             return
         session = client_meta.get("session")
         if session is not None:
