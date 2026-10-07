@@ -156,9 +156,59 @@ class AgentCore:
         return self.context.state
 
     def reset_context(self) -> None:
-        """Reset agent context and runtime loop state."""
+        """Reset agent context and runtime loop state.
+
+        Run notes are flushed FIRST. ``_reset_runtime_state`` replaces
+        ``self.runtime``, and the blackboard lives on it
+        (``RuntimeState.blackboard``, built by ``default_factory``), so a reset
+        discards a board that nothing else on disk carries: the session file has
+        no blackboard nodes and the REPL solve path writes no target snapshot.
+        Without the flush, every caller -- ``target <t>``, ``clear``, the
+        natural-language target switch -- silently drops whatever conclusions the
+        solve loop's own capture (every 20 steps, and at termination) had not
+        reached yet.
+        """
+        self._flush_run_notes()
         self.context.reset()
         self._reset_runtime_state()
+
+    def _flush_run_notes(self) -> None:
+        """Persist the current run's conclusions before they are discarded.
+
+        The same call the solve loop makes at termination, so a context reset can
+        never be the last thing to see the board. Best-effort by design: an empty
+        board makes ``capture_run_notes`` decline (its normal no-op), and a
+        failure here must not break the reset itself. A refusal that is NOT the
+        empty-board case means real conclusions were about to be lost, so it is
+        surfaced instead of swallowed.
+        """
+        try:
+            state = self.context.state
+            agent_state = getattr(state, "agent_state", None)
+            blackboard = getattr(getattr(self, "runtime", None), "blackboard", None)
+            if blackboard is None:
+                return
+            from vulnclaw.agent.playbook import capture_run_notes
+
+            reasons: list[str] = []
+            ack = capture_run_notes(
+                target=str(getattr(agent_state, "origin", "") or "")
+                or str(getattr(state, "target", "") or ""),
+                goal=str(getattr(agent_state, "goal", "") or ""),
+                blackboard=blackboard,
+                outcome="captured on context reset (target switch / clear)",
+                status="validated"
+                if getattr(agent_state, "completed", False)
+                else "draft",
+                final_answer=str(getattr(agent_state, "final_answer", "") or ""),
+                out_reason=reasons,
+            )
+            if ack is None and reasons:
+                logger.info("run notes not captured on reset: %s", reasons[0])
+        except Exception:
+            # Best-effort, but not silent: the docstring promises a real
+            # capture failure is surfaced rather than swallowed (round15b).
+            logger.warning("run notes flush on context reset failed", exc_info=True)
 
     def apply_config(self, config: VulnClawConfig) -> None:
         """Adopt an updated config (e.g. after the in-REPL config editor).
@@ -688,15 +738,24 @@ class AgentCore:
 
         resolved_goal = goal or user_input
         origin = detected_target or self.context.state.target or user_input
-        return await run_solve(
-            self,
-            origin=origin,
-            goal=resolved_goal,
-            max_steps=max_steps,
-            max_tool_rounds=max_tool_rounds,
-            stream_sink=stream_sink,
-            on_event=on_event,
-        )
+        try:
+            return await run_solve(
+                self,
+                origin=origin,
+                goal=resolved_goal,
+                max_steps=max_steps,
+                max_tool_rounds=max_tool_rounds,
+                stream_sink=stream_sink,
+                on_event=on_event,
+            )
+        except BaseException:
+            # Ctrl+C (or any error escaping the loop) cancels this coroutine, and
+            # run_solve's own termination capture sits AFTER its loop as a plain
+            # try/except -- not a finally -- so an interrupted run skips it and the
+            # board dies with the process. Flush whatever the run did reach, then
+            # re-raise: the operator's interrupt must still propagate.
+            self._flush_run_notes()
+            raise
 
     def apply_task_constraints(self, constraints: TaskConstraints) -> None:
         """Install one authoritative constraint object across the runtime."""

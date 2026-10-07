@@ -7,6 +7,8 @@ any model initiative, and target_fingerprint must re-find it on the next run.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from vulnclaw.agent import playbook as pb
@@ -983,3 +985,138 @@ def test_capture_still_none_when_nothing_at_all(tmp_playbooks):
         )
         is None
     )
+
+
+# ── Post-hoc rebuild (board already gone) ────────────────────────────
+
+
+def _session_state_with_board_calls() -> dict:
+    """An agent_state as the blackboard tools actually leave it in a session file.
+
+    Shapes taken from real captures: ``key_args`` is a JSON string, the RESULT text
+    carries the node identity and status ("LOCK set (n1)", "angle n3 registered",
+    "fact n2 CONFIRMED") -- which is the only place a rebuilt board can get them.
+    """
+    return {
+        "origin": "ctf2:practice:aaaa:bbbb",
+        "goal": "capture the flag",
+        "complete_reason": "flag accepted by the platform",
+        "completed": True,
+        "final_answer": "",
+        "tool_calls": [
+            {"tool": "blackboard_summary", "key_args": "{}", "summary": "=== Blackboard ==="},
+            {
+                "tool": "blackboard_set_lock",
+                "key_args": json.dumps({"description": "LOCK: captcha bypass -> credential check reachable"}),
+                "summary": "[blackboard] LOCK set (n1): LOCK: captcha bypass -> credential check reachable",
+            },
+            {
+                "tool": "blackboard_add_fact",
+                "key_args": json.dumps({"description": "omitting yzm skips the captcha entirely"}),
+                "summary": "[blackboard] fact n2 CONFIRMED: omitting yzm skips the captcha entirely",
+            },
+            {
+                "tool": "blackboard_create_angle",
+                "key_args": json.dumps({"description": "type-juggling on the password comparison"}),
+                "summary": "[blackboard] angle n3 registered: type-juggling on the password comparison",
+            },
+            {
+                "tool": "blackboard_miss_angle",
+                "key_args": json.dumps({"node_id": "n3"}),
+                "summary": "[blackboard] angle n3 miss recorded",
+            },
+            {
+                "tool": "blackboard_create_angle",
+                "key_args": json.dumps({"description": "captcha id parameter is an LFI sink"}),
+                "summary": "[blackboard] angle n4 registered: captcha id parameter is an LFI sink",
+            },
+            {
+                "tool": "blackboard_hit_angle",
+                "key_args": json.dumps({"node_id": "n4"}),
+                "summary": "[blackboard] angle n4 hit",
+            },
+        ],
+    }
+
+
+def test_rebuild_run_notes_recovers_lock_confirmed_and_angle_marks():
+    steps = pb.rebuild_run_notes(_session_state_with_board_calls())
+    assert steps is not None
+    assert "LOCK: captcha bypass -> credential check reachable" in steps
+    assert "CONFIRMED: omitting yzm skips the captcha entirely" in steps
+    assert "[miss] type-juggling on the password comparison" in steps
+    assert "[hit] captcha id parameter is an LFI sink" in steps
+    assert "TARGET: ctf2:practice:aaaa:bbbb" in steps
+
+
+def test_rebuild_run_notes_declines_when_the_board_was_never_used():
+    reasons: list[str] = []
+    state = {
+        "origin": "cf", "goal": "g", "final_answer": "",
+        "tool_calls": [{"tool": "fetch", "key_args": "{}", "summary": "...body..."}],
+    }
+    assert pb.rebuild_run_notes(state, out_reason=reasons) is None
+    assert "recorded nothing" in reasons[0]
+
+
+def test_rebuild_run_notes_survives_add_fact_result_text_drift():
+    """Round15b (2026-10-07) postmortem: ``fact_status`` can hold a node id that
+    ``fact_desc`` never registered — an ``add_fact`` result whose text drifted
+    from ``_BB_FACT_RE`` — and a later verify then marks it CONFIRMED. The
+    final comprehension indexed ``fact_desc[fid]`` unguarded and raised
+    KeyError, taking the whole rebuild down. The drifted-but-CONFIRMED verdict
+    must also survive as an unkeyed confirmation instead of being dropped.
+    """
+    state = {
+        "origin": "ctf2:practice:aaaa:bbbb",
+        "goal": "capture the flag",
+        "final_answer": "",
+        "tool_calls": [
+            {
+                "tool": "blackboard_add_fact",
+                "key_args": json.dumps({"description": "omitting yzm skips the captcha entirely"}),
+                "summary": "[blackboard] new fact CONFIRMED (node n2)",
+            },
+            {
+                "tool": "blackboard_verify_fact",
+                "key_args": json.dumps({"node_id": "n9"}),
+                "summary": "[blackboard] fact n9 CONFIRMED via witnessed evidence",
+            },
+        ],
+    }
+    steps = pb.rebuild_run_notes(state)
+    assert steps is not None, "a CONFIRMED verdict on an unregistered node id must not crash"
+    assert "omitting yzm skips the captcha entirely" in steps
+
+
+def test_rebuild_run_notes_falls_back_to_the_final_answer():
+    state = {"origin": "http://x", "goal": "capture the flag", "final_answer": "flag{rebuilt}", "tool_calls": []}
+    steps = pb.rebuild_run_notes(state)
+    assert steps is not None
+    assert "LOCK: (from final answer) flag{rebuilt}" in steps
+
+
+def test_capture_run_notes_from_session_stores_a_note(tmp_playbooks, tmp_path):
+    session = tmp_path / "20261006_154352_ctf2_practice_aaaa.json"
+    session.write_text(
+        json.dumps({"agent_state": _session_state_with_board_calls()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    reasons: list[str] = []
+    ack = pb.capture_run_notes_from_session(session, out_reason=reasons)
+    assert ack is not None and "error" not in ack, reasons
+    stored = (tmp_playbooks / f"{ack['slug']}.md").read_text(encoding="utf-8")
+    assert "captcha bypass -> credential check reachable" in stored
+    assert ack["status"] == "validated", "a completed session rebuilds as validated"
+
+
+def test_capture_run_notes_from_session_declines_without_any_conclusion(tmp_path):
+    session = tmp_path / "empty.json"
+    session.write_text(
+        json.dumps({"agent_state": {"origin": "http://t/", "goal": "g", "tool_calls": []}}),
+        encoding="utf-8",
+    )
+    reasons: list[str] = []
+    assert pb.capture_run_notes_from_session(session, out_reason=reasons) is None
+    assert reasons, "a refusal must say why"

@@ -1328,6 +1328,92 @@ class TestAgentCore:
         assert agent.runtime.user_vuln_hint_rounds == 0
         assert agent.context.state.recon_dimension4_active is False
 
+    def test_reset_context_flushes_run_notes_before_discarding_the_board(
+        self, monkeypatch, tmp_path
+    ):
+        """A reset builds a fresh RuntimeState, i.e. a fresh empty Blackboard, and
+        no other copy of the board exists on disk. Conclusions the solve loop's own
+        capture had not reached yet must be written out BEFORE that happens --
+        otherwise the REPL's target switch / ``clear`` drops them silently
+        (2026-10-06).
+        """
+        from vulnclaw.agent import playbook as pb
+
+        store = tmp_path / "playbooks"
+        store.mkdir()
+        monkeypatch.setattr(pb, "PLAYBOOKS_DIR", store)
+
+        agent = self._make_agent()
+        board = agent.runtime.blackboard
+        board.set_lock("captcha bypass -> credential check reachable")
+        board.create_fact("omitting yzm skips the captcha entirely", evidence_ref="e001")
+        board.create_angle("type-juggling on the password comparison")
+        agent.context.state.agent_state.origin = "ctf2:practice:aaaa:bbbb"
+        agent.context.state.agent_state.goal = "capture the flag"
+
+        agent.reset_context()
+
+        notes = list(store.glob("*.md"))
+        assert notes, "the board's conclusions must reach the store before the reset"
+        assert "captcha bypass -> credential check reachable" in notes[0].read_text(
+            encoding="utf-8"
+        )
+        assert agent.runtime.blackboard.all_nodes() == []
+
+    def test_reset_context_on_an_empty_board_writes_nothing(self, monkeypatch, tmp_path):
+        from vulnclaw.agent import playbook as pb
+
+        store = tmp_path / "playbooks"
+        store.mkdir()
+        monkeypatch.setattr(pb, "PLAYBOOKS_DIR", store)
+
+        agent = self._make_agent()
+        agent.reset_context()
+
+        assert list(store.glob("*.md")) == [], "an empty board must not produce junk notes"
+
+    def test_interrupted_solve_flushes_run_notes(self, monkeypatch):
+        """``run_solve``'s termination capture sits AFTER its loop as a plain
+        try/except, so Ctrl+C (which cancels the coroutine) skips it. The caller
+        must flush before the interrupt propagates, or an interrupted run's board
+        dies with the process (2026-10-06).
+        """
+        import asyncio
+
+        from vulnclaw.agent import solver as solver_mod
+
+        async def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(solver_mod, "solve", interrupted)
+        agent = self._make_agent()
+        flushed: list[bool] = []
+        monkeypatch.setattr(agent, "_flush_run_notes", lambda: flushed.append(True))
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(agent.solve("solve the thing", target="https://t.example"))
+
+        assert flushed == [True], "an interrupted solve must flush the board"
+        assert agent.context.state.target == "https://t.example", "state is left as-is"
+
+    def test_successful_solve_does_not_flush_again(self, monkeypatch):
+        """Only the abnormal path flushes: a completed run was already captured by
+        the solve loop, so flushing again would just rewrite the same note."""
+        import asyncio
+
+        from vulnclaw.agent import solver as solver_mod
+
+        async def finished(*args, **kwargs):
+            return "result"
+
+        monkeypatch.setattr(solver_mod, "solve", finished)
+        agent = self._make_agent()
+        flushed: list[bool] = []
+        monkeypatch.setattr(agent, "_flush_run_notes", lambda: flushed.append(True))
+
+        assert asyncio.run(agent.solve("solve the thing", target="https://t.example")) == "result"
+        assert flushed == []
+
     def test_reset_runtime_state_for_recon_initializes_expected_fields(self):
         from vulnclaw.agent.context import PentestPhase
 

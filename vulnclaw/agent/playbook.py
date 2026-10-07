@@ -665,6 +665,7 @@ def lookup_playbook_multi(
     limit: int = 3,
     min_score: float = 0.15,
     out_blocked: Optional[list[dict[str, Any]]] = None,
+    validated_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Look each ``(kind, query)`` up and merge the hits, best row per slug.
 
@@ -715,6 +716,8 @@ def lookup_playbook_multi(
         if not str(query or "").strip():
             continue
         for row in lookup_playbook(query, limit=_LOOKUP_SCAN_LIMIT, min_score=min_score):
+            if validated_only and row.get("status") != "validated":
+                continue
             current = best.get(row["slug"])
             if current is None or _is_a_better_merge_candidate(row, current):
                 merged = dict(row)
@@ -1050,6 +1053,198 @@ def capture_run_notes(
         fingerprint=fingerprint,
         steps=steps,
         status=status,
+        source=SOURCE_AUTO,
+    )
+
+
+# ── Post-hoc rebuild: recover a run whose board died before capture ──────────
+#
+# The live Blackboard is memory-only (RuntimeState.blackboard); a context reset --
+# the REPL's ``target <t>`` / ``clear`` / natural-language target switch -- builds
+# a fresh empty one, and nothing on disk carries the nodes: the session file has
+# no blackboard field, and the REPL solve path never writes a target snapshot. So
+# a run killed before the solve loop's own capture (every 20 steps, and at
+# termination) used to lose its conclusions for good.
+#
+# What the session file DOES keep is every tool call with its arguments AND its
+# result text, and the blackboard tools report the node identity and status in
+# that result ("LOCK set (n1)", "angle n2 registered", "fact n3 CONFIRMED"). That
+# is enough to walk the board back and rebuild the exact line shape
+# ``capture_run_notes`` writes.
+
+#: Result-text shapes the blackboard tools emit (see blackboard.dispatch_*).
+_BB_FACT_RE = re.compile(r"fact (n\d+)\s+(CONFIRMED|candidate|recorded)")
+_BB_ANGLE_RE = re.compile(r"angle (n\d+)\s+registered")
+
+
+def _parse_key_args(raw: Any) -> dict[str, Any]:
+    """Best-effort decode of a saved tool call's ``key_args`` (a JSON string)."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def rebuild_run_notes(
+    agent_state: dict[str, Any],
+    *,
+    out_reason: Optional[list[str]] = None,
+) -> Optional[str]:
+    """Reconstruct a run's LOCK / CONFIRMED / ANGLES block from a saved session.
+
+    Counterpart to :func:`capture_run_notes` for the case where the live board is
+    already gone: walks the ``blackboard_*`` calls of ``agent_state["tool_calls"]``
+    back into the same note body, so a run that died before capture can still be
+    distilled after the fact.
+
+    Only conclusions the live board would have reported are emitted (LOCK, facts
+    the board CONFIRMED, every angle with its hit/miss/open mark); candidates and
+    intents are deliberately left out, matching what ``capture_run_notes`` reads
+    off a live board.
+
+    Returns the note body, or None with the reason appended to ``out_reason``.
+    """
+    target = str(agent_state.get("origin") or "")
+    goal = str(agent_state.get("goal") or "")
+
+    lock_text = ""
+    fact_desc: dict[str, str] = {}
+    fact_status: dict[str, str] = {}
+    confirmed_unkeyed: list[str] = []
+    angle_desc: dict[str, str] = {}
+    angle_status: dict[str, str] = {}
+
+    for call in agent_state.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "")
+        if not tool.startswith("blackboard"):
+            continue
+        args = _parse_key_args(call.get("key_args"))
+        result = str(call.get("summary") or "")
+        desc = str(args.get("description") or "").strip()
+        node_id = str(args.get("node_id") or "").strip()
+
+        if tool == "blackboard_set_lock" and desc:
+            lock_text = re.sub(r"^LOCK:\s*", "", desc).strip()
+        elif tool == "blackboard_add_fact" and desc:
+            match = _BB_FACT_RE.search(result)
+            if match:
+                fact_desc[match.group(1)] = desc
+                fact_status[match.group(1)] = match.group(2)
+            elif "CONFIRMED" in result:
+                # Round15b (2026-10-07) postmortem: the result text drifted from
+                # ``_BB_FACT_RE`` (older sessions used a different phrasing) so
+                # the node id is unknown while the verdict is not. Keep the
+                # description as an unkeyed confirmation instead of losing a
+                # proven fact. The old branch compared ``status``, which was
+                # hard-coded to "candidate" on this path, so it never fired.
+                confirmed_unkeyed.append(desc)
+        elif tool == "blackboard_verify_fact" and node_id:
+            # The call is the confirmation attempt; the RESULT says whether the
+            # description was actually witnessed, so trust the result text.
+            if "CONFIRMED" in result:
+                fact_status[node_id] = "CONFIRMED"
+        elif tool == "blackboard_challenge_fact" and node_id:
+            fact_status[node_id] = "challenged"
+        elif tool == "blackboard_create_angle" and desc:
+            match = _BB_ANGLE_RE.search(result)
+            aid = match.group(1) if match else f"angle{len(angle_desc) + 1}"
+            angle_desc[aid] = desc
+            angle_status.setdefault(aid, "open")
+        elif tool == "blackboard_hit_angle" and node_id:
+            angle_status[node_id] = "hit"
+        elif tool == "blackboard_miss_angle" and node_id:
+            angle_status[node_id] = "miss"
+
+    confirmed = [
+        fact_desc[fid]
+        for fid, status in fact_status.items()
+        if status == "CONFIRMED" and fid in fact_desc
+    ] + confirmed_unkeyed
+
+    lines: list[str] = []
+    if lock_text:
+        lines.append(f"LOCK: {lock_text}")
+    if confirmed:
+        lines.append("CONFIRMED: " + "; ".join(confirmed[:8]))
+    angle_bits = []
+    for aid, desc in angle_desc.items():
+        mark = angle_status.get(aid, "open")
+        angle_bits.append(f"[{mark if mark in ('hit', 'miss') else 'open'}] {desc}")
+    if angle_bits:
+        lines.append("ANGLES: " + "; ".join(angle_bits[:10]))
+
+    final_answer = str(agent_state.get("final_answer") or "")
+    if not lines and final_answer:
+        lines.append("LOCK: (from final answer) " + " ".join(final_answer.split())[:300])
+    if not lines:
+        _note_reason(
+            out_reason,
+            "the session recorded nothing (no LOCK, no confirmed fact, no angle, "
+            "no final answer)",
+        )
+        return None
+
+    lines.append(f"TARGET: {target}")
+    lines.append(f"GOAL: {goal}")
+    outcome = str(agent_state.get("complete_reason") or "").strip()
+    lines.append(f"OUTCOME: {outcome}" if outcome else "OUTCOME: rebuilt from the session file")
+    steps = "\n".join(lines).strip()
+    if len(steps) < MIN_PLAYBOOK_CHARS:
+        _note_reason(
+            out_reason,
+            f"the rebuilt conclusion is too short ({len(steps)} chars, "
+            f"min {MIN_PLAYBOOK_CHARS})",
+        )
+        return None
+    return steps
+
+
+def capture_run_notes_from_session(
+    session_path: "str | Path",
+    *,
+    out_reason: Optional[list[str]] = None,
+    status: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Rebuild a run's notes from a saved session file and store them.
+
+    Same gates as :func:`capture_run_notes` (a short or unrecallable note is
+    refused rather than stored), so a rebuild can never pollute the store with a
+    note no query could find. Returns the save ack, or None with the reason in
+    ``out_reason``.
+    """
+    path = Path(session_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    agent_state = data.get("agent_state") or data
+    if not isinstance(agent_state, dict):
+        _note_reason(out_reason, f"{path.name} carries no agent_state to rebuild from")
+        return None
+
+    steps = rebuild_run_notes(agent_state, out_reason=out_reason)
+    if steps is None:
+        return None
+
+    target = str(agent_state.get("origin") or "")
+    goal = str(agent_state.get("goal") or "")
+    fingerprint = _recallable_fingerprint(target, goal)
+    if fingerprint is None:
+        _note_reason(
+            out_reason,
+            "no query could ever find this note (neither the target nor the goal "
+            "tokenizes to anything), so it was not written",
+        )
+        return None
+    return save_playbook(
+        name=_auto_notes_name(target),
+        fingerprint=fingerprint,
+        steps=steps,
+        status=status or ("validated" if agent_state.get("completed") else "draft"),
         source=SOURCE_AUTO,
     )
 

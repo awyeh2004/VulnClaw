@@ -253,6 +253,36 @@ def test_the_framework_only_note_is_now_blocked_outright(store):
     assert blocked[0]["overlap_tokens"] == 1
 
 
+def test_automatic_lookup_excludes_drafts_but_manual_lookup_keeps_them(store):
+    _write("validated-note", "Weblogic CVE-2018-2628 Real Easy", source=pb.SOURCE_CURATED)
+    draft = "\n".join(
+        [
+            "---",
+            "name: draft-note",
+            "fingerprint: Weblogic CVE-2018-2628 Real Easy",
+            "status: draft",
+            "source: curated",
+            "---",
+            "",
+            LONG_STEPS,
+            "",
+        ]
+    )
+    (store / "draft-note.md").write_text(draft, encoding="utf-8")
+
+    manual = pb.lookup_playbook_multi(
+        [("class", "Weblogic CVE-2018-2628 Real Easy")], limit=5
+    )
+    automatic = pb.lookup_playbook_multi(
+        [("class", "Weblogic CVE-2018-2628 Real Easy")],
+        limit=5,
+        validated_only=True,
+    )
+    assert {row["slug"] for row in manual} == {"validated-note", "draft-note"}
+    assert [row["slug"] for row in automatic] == ["validated-note"]
+
+
+
 def test_a_silent_note_is_not_treated_as_disagreeing(store):
     _write("classless", "Weblogic CVE-2017-10271 note that names no vulnerability class")
     rows = pb.lookup_playbook_multi([("class", "Weblogic CVE-2017-10271")], limit=2)
