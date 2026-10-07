@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -800,3 +801,29 @@ def test_smoke_event_loop_isolation():
 
 async def _noop():
     return None
+
+
+class TestOwnedSessionLiveness:
+    """Round15b (2026-10-07) postmortem — the creation-time death race.
+
+    An owner that dies between ``owned.start()`` returning and the cache write
+    fires ``_on_owned_session_death`` while the cache entry does not exist yet
+    (a no-op). The dead session then used to be cached and handed back on every
+    later call, so each one burned the full per-tool timeout with no rebuild
+    path. The persistent-session cache hits now consult the owner's ``dead``
+    flag instead of only checking ``session is not None``.
+    """
+
+    def test_dead_owner_is_not_treated_as_alive(self):
+        assert MCPLifecycleManager._owned_session_alive(
+            {"owner": SimpleNamespace(dead=False)}
+        ) is True
+        assert MCPLifecycleManager._owned_session_alive(
+            {"owner": SimpleNamespace(dead=True)}
+        ) is False
+
+    def test_missing_owner_fails_closed(self):
+        """An entry without an owner must force a rebuild, not hand back a session."""
+        assert MCPLifecycleManager._owned_session_alive({}) is False
+        assert MCPLifecycleManager._owned_session_alive(None) is False
+        assert MCPLifecycleManager._owned_session_alive("not-a-dict") is False

@@ -58,5 +58,23 @@ async def test_non_cancellation_errors_propagate_unchanged():
         await run_repl_call(call=call, after_result=_noop)
 
 
+async def test_the_task_is_disarmed_after_the_conversion():
+    """Round15b (2026-10-07): converting to KeyboardInterrupt while the task is
+    still armed only moves the crash one await later — the REPL's next await
+    would re-raise CancelledError out of ``asyncio.run`` as the very raw
+    traceback this helper exists to prevent. So the boundary must retire the
+    cancellation before it converts.
+    """
+
+    async def call():
+        asyncio.current_task().cancel(msg="Cancelled via cancel scope 16f97f93950")
+        await asyncio.sleep(10)
+
+    task = asyncio.current_task()
+    with pytest.raises(KeyboardInterrupt):
+        await run_repl_call(call=call, after_result=_noop)
+    assert task.cancelling() == 0, "the REPL must be left un-poisoned"
+
+
 async def _noop(result):
     return None
