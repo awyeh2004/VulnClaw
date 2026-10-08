@@ -227,9 +227,40 @@ class SolveResult:
         return self.agent_state
 
 
+# ── "does this goal ask for a flag?" — WORD-BOUNDED, never a substring test ──
+#
+# Round-9 (2026-10-07) postmortem. The predicate used to be
+# ``any(keyword in lowered for keyword in ("flag", "ctf", "getshell", "shell"))``,
+# and a substring test on ``"shell"`` matches ``webSHELL``. A 应急响应答题制 drill
+# whose goal read "…攻击者IP、webshell文件路径、首次入侵时间…" therefore declared
+# itself flag-wanting, so ``_completion_gate`` demanded a `word{...}` token in FINAL
+# from a task whose answers are IPs, paths and timestamps and can never produce one:
+# 8 consecutive rejections ending ``completed=False,
+# "stalled with no untried path remaining"`` (session
+# 20260927_214554_127.0.0.1_2222.json). Measured across the 361 stored sessions:
+# 87 (24%) hit at least one completion rejection; 33 rejections carried this reason.
+# The same over-match let the platform's own boilerplate ("用 ctf2 工具解练习场 …")
+# mark every practice run as flag-wanting via ``ctf`` ⊂ ``ctf2``.
+#
+# The lookarounds are deliberately NOT ``\b``: ``\w`` is Unicode-aware, so CJK counts
+# as a word character and ``\bflag\b`` fails on "拿flag"/"获取flag" — verified in
+# CPython 3.12, and those goals must keep demanding a flag. Excluding only ASCII word
+# characters blocks the compounds (``webshell``/``shellcode`` via the letter touching
+# "shell"; ``ctf2`` via the "2") while matching every standalone form, including
+# "拿flag", "获取shell" and "flag{".
+_FLAG_DEMAND_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(flag|ctf|shell|getshell)(?![A-Za-z0-9_])", re.IGNORECASE
+)
+# The narrower variant for paths that must NOT treat a bare "ctf" as a flag demand
+# (see ``_implicit_flag_completion``, where "ctf" would let a quiz goal be completed
+# mid-paper). Same boundary fix, no ``ctf``.
+_EXPLICIT_FLAG_DEMAND_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(flag|shell|getshell)(?![A-Za-z0-9_])", re.IGNORECASE
+)
+
+
 def _goal_wants_flag(goal: str) -> bool:
-    lowered = (goal or "").lower()
-    return any(keyword in lowered for keyword in ("flag", "ctf", "getshell", "shell"))
+    return _FLAG_DEMAND_RE.search(goal or "") is not None
 
 
 # Knowledge-quiz (竞赛理论题) signals. Answers come from model knowledge rather
@@ -1052,6 +1083,153 @@ def _refresh_prior_playbooks_after_probe(
     return True
 
 
+#: A goal that already names a host / URL / local path does not need a platform lookup.
+_GOAL_TARGET_RE = re.compile(r"https?://|\b\d{1,3}(?:\.\d{1,3}){3}\b|[A-Za-z]:[\\/]")
+
+#: Identity hints resolved from the platform, keyed by ref. Process-wide on purpose:
+#: one run resolves a ref once, and a later turn must not pay for it again. Failures
+#: are memoised too, so a broken lookup is not retried on every turn.
+_PLATFORM_HINT_MEMO: dict[str, str] = {}
+_PLATFORM_HINT_TIMEOUT = 8.0
+
+
+def _goal_names_a_target(goal: str) -> bool:
+    """True when the goal text itself names something to look up (host / URL / path).
+
+    Used to decide whether a missing class signature is worth a platform round-trip:
+    a host-based goal (``attack http://10.0.172.250:80, capture the flag``) already
+    fills the fingerprint query with the one token that transfers across instances,
+    so there is nothing to rescue and no request to spend.
+    """
+    return bool(_GOAL_TARGET_RE.search(str(goal or "")))
+
+
+def _fetch_platform_identity(origin: str) -> str:
+    """Blocking read of the platform's challenge metadata for ``origin``.
+
+    Split out of :func:`_platform_identity_hint` so the solve path can run it in a
+    worker thread (:func:`_platform_identity_hint_async`). Raises only from the
+    adapter lookup; both callers turn that into ``""``.
+    """
+    from vulnclaw.platforms import registry
+    from vulnclaw.platforms.bootstrap import ensure_adapters
+    from vulnclaw.platforms.refs import split_token
+
+    ensure_adapters()
+    adapter = registry.adapter_for(origin)
+    ref = adapter.parse_ref(split_token(origin)[1])
+    challenge = asyncio.run(adapter.read_challenge(ref))
+    bits = [str(getattr(challenge, "name", "") or "").strip()]
+    category = str(getattr(challenge, "category", "") or "").strip()
+    difficulty = str(getattr(challenge, "difficulty", "") or "").strip()
+    if category:
+        bits.append(f"category {category}")
+    if difficulty:
+        bits.append(f"difficulty {difficulty}")
+    for attachment in getattr(challenge, "attachments", ()) or ():
+        name = str(getattr(attachment, "name", "") or "").strip()
+        if name:
+            bits.append(name)
+    return " ".join(bit for bit in bits if bit).strip()
+
+
+def _platform_identity_hint(origin: str) -> str:
+    """Best-effort challenge title/category/attachments for a ref, else ``""``.
+
+    Why this exists (measured 2026-10-07 over 349 stored sessions): 164 of them
+    (~47%) had a goal with no class signature, no host and no bracketed title --
+    e.g. the bare description ``capture the flag 解出附件 flag（misc forensics 取证
+    incident response）``. For those the only query was the origin+goal fingerprint,
+    so every note keyed on the challenge itself was unreachable: the note that
+    documented the needed technique scored 0.000 with an overlap of 0, and
+    injection degenerated into picking 3 of the N auto notes that quote the same
+    goal sentence back. One request to the platform the run is about to talk to
+    anyway turns those runs from "no note can match" into "the right note can".
+
+    Contract -- this runs on the run's critical path, so it must never hurt:
+    * bounded by ``_PLATFORM_HINT_TIMEOUT``;
+    * **it blocks its caller**: ``.result(timeout=...)`` waits on the calling thread,
+      so an event-loop caller stalls the loop for up to the timeout. The worker
+      thread bounds the SOCKET, it does not unblock the loop -- the solve path must
+      call :func:`_platform_identity_hint_async` instead (round-9 postmortem);
+    * never raises (an unconfigured platform, an unknown ref or any adapter error
+      resolves to ``"",`` which is simply "no hint");
+    * one attempt per ref per process -- memoised, including failures, so a broken
+      lookup is not retried on every turn.
+    """
+    token = str(origin or "").strip()
+    if not token or ":" not in token:
+        return ""
+    if token in _PLATFORM_HINT_MEMO:
+        return _PLATFORM_HINT_MEMO[token]
+
+    hint = ""
+    pool = None
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        hint = str(
+            pool.submit(_fetch_platform_identity, token).result(
+                timeout=_PLATFORM_HINT_TIMEOUT
+            )
+            or ""
+        )
+    except Exception:
+        hint = ""
+    finally:
+        if pool is not None:
+            # Never join: `result()` already timed out, and blocking here would give
+            # back the latency this whole helper is written to bound.
+            pool.shutdown(wait=False)
+    _PLATFORM_HINT_MEMO[token] = hint
+    return hint
+
+
+async def _platform_identity_hint_async(origin: str) -> str:
+    """Awaitable form for the solve loop: the lookup runs OFF the event loop.
+
+    Round-9 (2026-10-07) postmortem. :func:`_platform_identity_hint` bounds the socket
+    with a worker thread and then blocks its CALLER on ``.result(timeout=...)``; the
+    only production caller is the solve coroutine, so every identity-free run stalled
+    the loop -- and every sibling coroutine on it -- for up to
+    ``_PLATFORM_HINT_TIMEOUT``. This wrapper keeps the same contract (bounded, never
+    raises, one attempt per ref per process) while leaving the loop free.
+    """
+    token = str(origin or "").strip()
+    if not token or ":" not in token or token in _PLATFORM_HINT_MEMO:
+        # Guard hit or already resolved: the sync form answers from memory without
+        # touching a socket, so there is nothing to offload.
+        return _platform_identity_hint(origin)
+    hint = ""
+    try:
+        hint = str(
+            await asyncio.wait_for(
+                asyncio.to_thread(_fetch_platform_identity, token),
+                timeout=_PLATFORM_HINT_TIMEOUT,
+            )
+            or ""
+        )
+    except Exception:  # noqa: BLE001 - includes TimeoutError; "" means "no hint"
+        hint = ""
+    _PLATFORM_HINT_MEMO[token] = hint
+    return hint
+
+
+def _goal_is_identity_free(goal: str) -> bool:
+    """True when the goal carries no challenge identity of its own.
+
+    Exactly the condition that makes the platform lookup worth its latency: no class
+    signature (``challenge_class_signature``) and no host/URL/path named in the text
+    (``_goal_names_a_target``). Shared by the solve path, which resolves the hint
+    off-loop before calling the injector, and by the injector's own branch, so the
+    two can never disagree about when a request is spent.
+    """
+    from vulnclaw.agent.playbook import challenge_class_signature
+
+    return not challenge_class_signature(goal) and not _goal_names_a_target(goal)
+
+
 def _inject_prior_playbooks(
     *,
     origin: str,
@@ -1059,6 +1237,7 @@ def _inject_prior_playbooks(
     runtime: Any,
     stream_sink: Any,
     emit: Callable[[str, dict], None],
+    identity_hint: Optional[str] = None,
 ) -> int:
     """Inject auto-matched prior-run notes into the system prompt. Returns hits.
 
@@ -1090,6 +1269,25 @@ def _inject_prior_playbooks(
     signature = challenge_class_signature(goal)
     if signature:
         queries.append(("class", signature))
+    elif not _goal_names_a_target(goal):
+        # Identity-free goal (see _platform_identity_hint): the goal sentence is a
+        # platform template that names nothing, so ask the platform what this
+        # challenge actually IS and look that up instead. Without this the only
+        # query is the goal text, and no note keyed on the challenge can match.
+        # ``identity_hint`` is the solve path's already-resolved (off-loop) value;
+        # sync callers pass None and get the blocking form as the fallback.
+        hint = (
+            identity_hint
+            if identity_hint is not None
+            else _platform_identity_hint(origin)
+        )
+        if hint:
+            queries.append(("class", hint))
+            _notify_operator(
+                stream_sink,
+                "[playbook] goal carried no challenge identity; used platform "
+                f"metadata as the class key: {one_line(hint, 120)}",
+            )
     if not queries:
         return 0
 
@@ -1463,9 +1661,10 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
     # a flag (答题拿flag) fall through to the flag checks below — the platform
     # issues the flag through answering, so a flagless FINAL is premature.
     goal_text = state.goal or ""
-    if _looks_like_quiz(goal_text) and not re.search(
-        r"flag|getshell|shell", goal_text, re.IGNORECASE
-    ):
+    # Round-9: word-bounded like ``_implicit_flag_completion`` -- the old substring
+    # form matched `shell` inside "webshell"/"shellcode", which skipped this quiz
+    # path and pushed a drill goal into the flag-demand checks below.
+    if _looks_like_quiz(goal_text) and not _EXPLICIT_FLAG_DEMAND_RE.search(goal_text):
         if not state.evidence and not _quiz_questions_inline(goal_text):
             hint = (
                 "quiz goal: no questions found in the task text and no URL to fetch — "
@@ -1534,9 +1733,9 @@ def _implicit_flag_completion(state: AgentState, text: str) -> tuple[bool, str, 
     # Explicit flag demand only — not bare `_goal_wants_flag`, whose "ctf"
     # keyword would let a quiz goal be completed mid-paper by repeating any
     # flag-shaped string from the page evidence without ever submitting.
-    if not flags or not re.search(
-        r"flag|getshell|shell", (state.goal or ""), re.IGNORECASE
-    ):
+    # Word-bounded (round-9, 2026-10-07): the old substring form let a
+    # 应急响应 drill goal mentioning "webshell" count as an explicit flag demand.
+    if not flags or not _EXPLICIT_FLAG_DEMAND_RE.search(state.goal or ""):
         return False, "", []
     evidence_text = state.evidence_text()
     grounded = [flag for flag in flags if flag in evidence_text]
@@ -2039,9 +2238,16 @@ async def _solve_impl(
             # Deterministic playbook reuse — code-guaranteed, not left to model
             # initiative (past runs skipped lookup_playbook entirely).
             try:
+                # Resolve the platform identity OFF the event loop first: the blocking
+                # form would stall this coroutine and every sibling for up to
+                # _PLATFORM_HINT_TIMEOUT (see _platform_identity_hint_async).
+                identity_hint: Optional[str] = None
+                if _goal_is_identity_free(goal):
+                    identity_hint = await _platform_identity_hint_async(origin)
                 _inject_prior_playbooks(
                     origin=origin, goal=goal, runtime=runtime,
                     stream_sink=stream_sink, emit=emit,
+                    identity_hint=identity_hint,
                 )
             except Exception:
                 pass

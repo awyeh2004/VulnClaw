@@ -2,6 +2,18 @@
 
 ---
 
+<details open>
+<summary><strong>Unreleased</strong> — round-9 审查修复（平台身份查询移出事件循环 / 题名兜底 / quiz 谓词）</summary>
+
+- **修复平台身份查询阻塞事件循环（round-9 事故）** — 无身份 goal 会向平台补查一次挑战元数据，原实现在 `async` 求解路径上直接 `pool.submit(...).result(timeout=_PLATFORM_HINT_TIMEOUT)`：worker 线程只兜住了 socket，等待仍发生在**调用线程**，而唯一生产调用者就是 solve 协程，于是每个无身份 run 都把事件循环（及同循环上的兄弟协程）卡住最多 8 秒 —— 而原 docstring 恰恰声称"worker 线程保证 inside-an-event-loop 的调用者不会 stall solve"。现将阻塞读取抽为 `_fetch_platform_identity()`，新增 `_platform_identity_hint_async()` 用 `asyncio.wait_for(asyncio.to_thread(...))` 把查询移出循环（保持有界、不抛、每 ref 每进程只查一次三条契约）；求解路径在调用注入器前解析好 `identity_hint` 传入，注入器收到 `None` 时仍回落阻塞形态——9 处同步调用点的契约不变。副作用：生产路径不再每个 ref 新建一个 `ThreadPoolExecutor`。判定条件单点化为 `_goal_is_identity_free()`，生产调用点与注入器分支共用，避免各自漂移。
+- **任务句题名降级为兜底，避免挤掉对口笔记** — 平台启动句题名（`用 ctf2 工具解练习场 <pid> 的题目 <cid>：<name>。`）此前会并入**已有**类签名。以 224 条真实 goal + 真实笔记库实测（每个候选设计都跑真实 `lookup_playbook_multi`，查询列表与 `_inject_prior_playbooks` 一致 = target fingerprint + class）：并入后 11 条目标的查询结果集改变，其中 `[GeoServer] CVE-2024-36401` 丢掉对口的 `geoserver-cve-2024-36401-wfs-jxpath-rce`，被 `ir-triage-checklist-ten-drills` 顶掉——因为 `Playbook.score` 是"查询词被笔记命中的比例"，查询变长只会降分，而平台任务句原文恰好一字不差地出现在 auto 笔记里，curated 笔记因此被挤出 `limit=2`。改为**仅当签名为空时才用题名**后：那 5 条真正有价值的收益全部保留（变异凯撒→`mutated-caesar`、Quoted-printable→`quoted-printable-ctf2-crypto-easy`、丢失的MD5→`md5-lost-md5`、传感器→`sensor-manchester-ook`、一眼就解密→`base64`），已识别目标拿到的查询与改动前逐字相同，结果集结构上不可能改变（identical 208→214，churn 11→5，回归 0）；改完用已实现的代码复测得到同样的 5/0/214。
+- **quiz 分支的 flag 需求判定统一为词边界** — `_completion_gate` 的 quiz 短路仍内联 `flag|getshell|shell` 子串匹配，`shell ⊂ webshell` 让「知识竞赛答题：webshell 文件路径排查…」这类 quiz 形态目标跳过 quiz 路径、落到 flag 检查，再被 "FINAL did not cite evidence ids or quote recorded evidence" 拒掉。改用与 `_implicit_flag_completion` 同一个 `_EXPLICIT_FLAG_DEMAND_RE`（实测该形态下新=放行、旧=拒绝）。
+- **回归用例（+11 个节点）** — `test_playbook_goal_identity.py` 增 5 例：用"每 20ms 走一步的兄弟协程"钉住"查询期间 loop 未被占用"（**该用例第一版是无效的**：窗口写在兄弟协程体内，只会在查询结束后才开始计时，对同步阻塞也能通过；用故意同步阻塞的变体反测（期望失败）时误过才发现，窗口移到查询之前，旧实现下 tick=0）、异步形态的不抛/失败也 memo 契约、传 hint 时不得再走阻塞形态、传 `None` 时回落同步形态、`_goal_is_identity_free` 与注入器分支一致；`test_goal_wants_flag_boundary.py` 补 3 条**逐字取自真实语料**的主机型目标（`http://<hex>.http-ctf2.dasctf.com:80`，旧子串谓词靠 `ctf ⊂ ctf2` 把 362 条会话首目标里的 69 条判成"要 flag"）与 1 条 quiz+webshell 用例，把有意收窄写死，避免将来被当成 bug 改回子串匹配。
+- **round-9 原改动随组提交** — 未闭合 flag 脱敏第三层 `_FLAG_UNCLOSED_RE`（覆盖 `strings` 截断等"没有 `}`"的形态；当前 293 篇库实测零误伤，`base64{...}` 类构造性误伤仍存但无真实样本）；`_CLASS_TASK_NAME_RE` 识别平台任务句题名（39 条含"题目"的真实目标命中 35 条）；`scripts/audit_playbooks.py`、`scripts/verify_playbook_migration.py` 两个只读审计脚本；`_goal_wants_flag` 词边界化（362 条会话首目标中 72 条翻转，其中 69 条为主机型目标）。
+- **测试** — `tests/agent tests/platforms tests/ctf_platform`：**2067 passed / 7 skipped / 1 failed**（唯一失败为本机裸 `python` 为 Store 存根导致的 `test_bg_tasks.py::test_bg_launch_and_result_lifecycle`，改动前即固定失败；改动前基线 2056 passed，+11 即本次新增节点）。
+
+</details>
+
 <details>
 <summary><strong>Unreleased</strong> — 语言支持（bilingual UI）</summary>
 

@@ -83,6 +83,14 @@ _FLAG_FINGERPRINT_RE = re.compile(
 # tier 1 above (its prefix is a known platform name).
 _FLAG_BODY_CHARSET_RE = re.compile(r"^[A-Za-z0-9_\-+=/!@#$%^&*]+$")
 _FLAG_BODY_SIGNAL_RE = re.compile(r"[0-9A-Z_\-+=/]")
+# Stronger signal, used ONLY by the unclosed tier. `_FLAG_BODY_SIGNAL_RE` counts an
+# uppercase letter, which is not evidence enough when there is no closing brace to
+# anchor on: with it, `TemplateMetadata{renderer:ReportRenderer{postProcessor:...` —
+# a PHP POP chain in a curated note — read as flag material and got mangled into
+# `ReportRenderer{…}`. Requiring a digit or a real flag separator demands actual flag
+# shape and leaves camelCase identifiers alone. (`archiver`, `postProcessor`, and
+# `MyFlagIsHere` all fail it; `W0w_U_Ar3_V3ry_G00d_A7_C0unt1n9_` passes on both.)
+_FLAG_BODY_STRONG_SIGNAL_RE = re.compile(r"[0-9_\-+=/]")
 # Identifiers that precede a `{` in ordinary code/stylesheet text. Only consulted for
 # tier 2, where guessing wrong is possible.
 _NON_FLAG_BRACE_WORDS = frozenset(
@@ -91,6 +99,31 @@ _NON_FLAG_BRACE_WORDS = frozenset(
         "function", "return", "class", "def", "lambda", "import", "format", "print",
         "dict", "list", "set", "tuple", "map", "filter", "regex", "pattern", "query",
     }
+)
+
+# Tier 3 — UNTERMINATED flag literals. Round-9 (2026-10-07) postmortem: the closed-brace
+# pattern above cannot see a value whose `}` never made it into the note (a `strings`
+# dump cut off mid-constant, or a note pasting only the head). That is how
+# `flag{W0w_U_Ar3_V3ry_G00d_A7_C0unt1n9_` — a real ELF string constant, no closing brace
+# anywhere near it — sat in a `fingerprint:` in cleartext while the read-path gate
+# reported the note clean, because "a flag with no `}`" was not a shape that existed.
+#
+# Two guards keep it from eating prose. The body is a maximal run of FLAG-CHARSET
+# characters, so the match stops dead at the first quote, space, brace, comma or
+# newline and can never swallow the rest of the note (an earlier draft used `[^\s}]`,
+# which greedily ate the closing quote of `'flag{...}'` and then failed the charset
+# check, silently redacting nothing — caught by
+# tests/agent/test_playbook_unclosed_flag_redaction.py). `(?!…)` leaves an
+# already-masked `flag{abcd…3456}` alone instead of collapsing it; and
+# ``_looks_like_flag_body`` must still accept the body, so shape is required even for a
+# known prefix. Tier 1's "a known prefix is reason enough" deliberately does NOT apply
+# here: an unclosed brace is far more ambiguous than a closed one.
+_FLAG_UNCLOSED_RE = re.compile(
+    r"((?:" + "|".join(re.escape(name) for name in FLAG_PREFIX_NAMES) + r")(?:[0-9_]{0,3})?"
+    r"|" + _FLAGISH_PREFIX + r")"
+    r"\{([A-Za-z0-9_\-+=/!@#$%^&*]{1," + str(_FLAG_BODY_MAX) + r"})"
+    r"(?!…)(?![A-Za-z0-9_\-+=/!@#$%^&*])",
+    re.IGNORECASE,
 )
 
 _KNOWN_PREFIX_CACHE: Optional[tuple[tuple[str, ...], "re.Pattern[str]"]] = None
@@ -164,9 +197,11 @@ def _fingerprint_flags(text: str) -> str:
     keep full values for a length range, and 12 was not even principled: the fingerprint
     form `first4…last4` is 9 characters, so a 12-character body fingerprints fine.
 
-    Two tiers (round-8 R8-6, see the regex comment): a KNOWN platform prefix is redacted
-    whatever its body looks like, an UNKNOWN one is redacted when the body looks like flag
-    material -- so the gate no longer depends on a list of platform names being complete.
+    Two tiers for the closed form (round-8 R8-6, see the regex comment): a KNOWN platform
+    prefix is redacted whatever its body looks like, an UNKNOWN one is redacted when the
+    body looks like flag material -- so the gate no longer depends on a list of platform
+    names being complete. Tier 3 (round-9) covers the UNTERMINATED form, which the
+    closed-brace pattern structurally cannot match.
 
     Idempotent by construction: the fingerprint form still matches the pattern, so
     applying this twice is the same as applying it once. The read path
@@ -185,7 +220,35 @@ def _fingerprint_flags(text: str) -> str:
         # so the model can still tell a flag was found here.
         return f"{prefix}{{…}}"
 
-    return _FLAG_FINGERPRINT_RE.sub(_fp, text)
+    def _fp_unclosed(m: re.Match) -> str:
+        prefix, inner = m.group(1), m.group(2)
+        # Shape is required even for a known prefix here (see _FLAG_UNCLOSED_RE), and
+        # no part of the value is kept: without a closing brace there is no way to tell
+        # where the flag body ends, so every character of it is treated as the value.
+        # Two extra bars, both because an unclosed brace carries no end delimiter and is
+        # therefore far weaker evidence than a closed one:
+        #   * `_NON_FLAG_BRACE_WORDS` matters more here than in tier 2 — with no closing
+        #     brace to anchor on, a code identifier is the likelier reading, and
+        #     `function{returnvalue1234` would otherwise pass `_looks_like_flag_body`;
+        #   * an 8-character floor. `_looks_like_flag_body` alone accepts a 1-character
+        #     body that happens to carry a digit, which redacted the array subscript in
+        #     the bash loop `for i in array{1..10}` — caught by the pre-existing
+        #     "ordinary code in a note is left alone" test. Every observed flag body is
+        #     well over 8 characters; a shorter fragment is not a submittable value.
+        if len(inner) < 8:
+            return m.group(0)
+        if prefix.lower() in _NON_FLAG_BRACE_WORDS or not _looks_like_flag_body(inner):
+            return m.group(0)
+        # An UNKNOWN prefix needs the stronger signal as well: an unclosed brace under a
+        # camelCase identifier is ordinary code far more often than it is a flag (see
+        # _FLAG_BODY_STRONG_SIGNAL_RE). A known platform prefix keeps tier 2's rule.
+        if not _is_known_flag_prefix(prefix) and not _FLAG_BODY_STRONG_SIGNAL_RE.search(inner):
+            return m.group(0)
+        # A `…`-only body also keeps this idempotent: the redacted form is too short to
+        # re-match, and its `…` is outside the flag charset in any case.
+        return f"{prefix}{{…}}"
+
+    return _FLAG_UNCLOSED_RE.sub(_fp_unclosed, _FLAG_FINGERPRINT_RE.sub(_fp, text))
 
 PLAYBOOKS_DIR = CONFIG_DIR / "playbooks"
 
@@ -454,6 +517,24 @@ _CLASS_LABEL_RES = (
     re.compile(r"difficulty\s+([A-Za-z\u4e00-\u9fff][\w\u4e00-\u9fff\-]*)", re.IGNORECASE),
 )
 _CLASS_QUOTED_RE = re.compile(r"['\"]([^'\"]{3,60})['\"]")
+#: The CTF2 practice-ground task sentence carries the challenge title right after
+#: the id: ``用 ctf2 工具解练习场 <pid> 的题目 <cid>：<name>。``.
+#:
+#: Measured 2026-10-07 over 349 stored sessions: for a title like
+#: ``Quoted-printable`` this signature came back EMPTY, because `_CLASS_TAG_RE`
+#: needs brackets and `_CLASS_QUOTED_RE` needs quotes -- so the platform's most
+#: common launch path produced an identity-free goal (~47% of all runs) and the
+#: class key could never reach the notes keyed on that title. Bracketed titles
+#: (``[HDCTF2019]信号分析``) always worked, and that is exactly what hid the bug.
+#: Anchored on the challenge id so prose that merely mentions 题目 cannot fire it,
+#: and the id itself is never mistaken for a title (`_CLASS_BARE_ID_RE`).
+_CLASS_UUID_RE = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_CLASS_TASK_NAME_RE = re.compile(
+    rf"题目\s*[:：]?\s*{_CLASS_UUID_RE}\s*[:：]\s*([^\n。；;]{{1,60}})"
+)
+_CLASS_BARE_ID_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{6,}$")
 
 
 def challenge_class_signature(goal: str) -> str:
@@ -471,6 +552,11 @@ def challenge_class_signature(goal: str) -> str:
     This signature drops the endpoint and keeps the discriminators that DO carry
     across instances: the bracketed framework tag, the CVE id, the category and
     difficulty labels, and the quoted challenge title.
+
+    The platform task-sentence title (``_CLASS_TASK_NAME_RE``) is a FALLBACK, used
+    only when those extractors find nothing at all -- see the comment on the branch
+    below for the measured reason (adding it to an existing signature evicts
+    on-point curated notes, because ``Playbook.score`` is a share of query tokens).
 
     Kept deliberately short: ``Playbook.score`` is the share of the QUERY's tokens
     found in the note, so padding the query with prose lowers the score. Also note
@@ -491,6 +577,30 @@ def challenge_class_signature(goal: str) -> str:
     # scored 1.0, and the query declared no class -- which made the class-agreement
     # rule a no-op on exactly the case it exists for.
     bits += sorted(vulnerability_classes(text))
+    if not [bit for bit in bits if bit.strip()]:
+        # Round-9 审查 (2026-10-08). 平台任务句的题名只在**没有别的身份**时才用。
+        #
+        # 实测（224 条真实 goal + 真实笔记库，每个变体都跑真实 lookup_playbook_multi，
+        # 查询列表与 _inject_prior_playbooks 一致 = target fingerprint + class）：
+        # 把题名并进**已有**签名会让 11 条目标的查询结果集改变，其中 1 条丢掉对口笔记
+        # —— ``[GeoServer] CVE-2024-36401`` 原本命中 ``geoserver-cve-2024-36401-wfs-jxpath-rce``，
+        # 之后被 ``ir-triage-checklist-ten-drills`` 顶掉。原因是 ``Playbook.score`` 是
+        # 「查询词被笔记命中的比例」：查询变长只会降分，而平台任务句的原文又恰好一字
+        # 不差地出现在 auto 笔记里，于是 auto 笔记把 curated 笔记挤出 ``limit=2``。
+        #
+        # 改成"仅当签名为空时才用题名"后：那 5 条真正有价值的收益全部保留
+        # （变异凯撒→mutated-caesar、Quoted-printable→quoted-printable-ctf2-crypto-easy、
+        # 丢失的MD5→md5-lost-md5、传感器→sensor-manchester-ook、一眼就解密→base64），
+        # 而**已有身份**的目标拿到的查询与改动前逐字相同 —— 结果集结构上不可能改变
+        # （identical 208→214，churn 11→5，回归 0）。
+        bits += [
+            name
+            for name in (m.group(1).strip() for m in _CLASS_TASK_NAME_RE.finditer(text))
+            # A task sentence always ends its id with a colon, so an empty or id-shaped
+            # capture means the title was not actually there -- do not let a UUID (or a
+            # bare practice id) masquerade as a challenge name.
+            if name and not _CLASS_BARE_ID_RE.match(name)
+        ]
     seen: set[str] = set()
     out: list[str] = []
     for bit in bits:
