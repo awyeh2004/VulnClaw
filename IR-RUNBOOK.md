@@ -1054,6 +1054,40 @@ remote:
 
 ---
 
+## 五点五、赛前缺口清单（10/10 复核用）
+
+> 2026-10-08 实测出来的、**还没补上的**洞。每条都带证据，别当提醒清单扫一眼就过。
+
+### P0 — 不做有资格风险或现场翻车风险
+
+| # | 缺口 | 证据 | 谁做 |
+|---|---|---|---|
+| 1 | **AI 辅助的合规性没人问过** | 决赛通知与 10/9 培训**都没提 AI/自动化工具**；通知里"使用环境中提供的各类渗透测试工具"可被解读为限定工具来源，培训又强调"严禁非有效操作"、抽查系统日志 | **群里问一句**（和"能否搭隧道"一起） |
+| 2 | ~~录屏没有落地安排~~ **已关闭（10/9）** | 用户拍板：**不用录屏、也不用交** → 原先"先试录 10 分钟、落 E:/G:"的安排作废 | ✅ 无需动作 |
+| 3 | **LLM 凭据与余额（已加第二把 key，余额仍偏紧）** | 实测（2026-10-08）：两把 DeepSeek key **都返回 HTTP 200**（`deepseek-flash` / `deepseek-v4-pro`）；`/user/balance` 分别读到 **¥49.91**（旧）与 **¥47.22**（新）。旧 key 已失效的 zhipu 那把不再计入。`llm.api_keys` **已扩成 2 把**（`~/.vulnclaw/config.yaml`，备份 `config.yaml.bak-20261008b`）→ 429/配额/余额耗尽会**自动轮换** | ⚠️ 待确认：两把 key 是**两个账号**（总预算 ≈ ¥97）还是**同账号**（余额共享，加 key 只防限流）；**充值**仍建议 ¥100–200 打底；跨 provider 是**手动切换**（moonshot/qwen/siliconflow/openrouter…）；网络轴备**手机热点**；断网时 `.ir-tools`（vol/yara/D盾）仍可本地跑。⑥**预算旋钮（用历史数据校准过，别凭感觉砍）**：13 条有记账的 run 里 total token p50=2.81M / p90=4.16M / max=**5.21M**；**成功**的 7 条 p50=1.08M 但 **max 也是 5.21M**，**失败**的 6 条 1.67M–3.30M（中位 2.86M）。现值 `session.solve_max_model_tokens = 6,000,000` 在 13 条里**一次都没触发** → **保持不动**（砍到 2.5M 会直接掐死那条 5.21M 的成功题）；真正省钱的杠杆是**早停**：`competition.stall_turns` 8 → **5–6**、单题 `--max-steps` 用 **40–60**。无用消耗实测（最贵那条成功题，5.21M / 117 请求 / 135 次工具调用）：**11 次重复调用**（其中 4 次完全相同的 `python_execute`）+ **15 次失败调用**（python 12）+ 1 次空转 + **2 次被证据闸门拒掉的 FINAL（模型先猜 flag）**≈ 24 请求 ≈ **20% ≈ 1.0M token**；算上黑板为空时干跑的 8 轮则 **≈27% ≈ 1.4M**。注意 `_REPEAT_TOOL_LIMITS` 里 `python_execute`/`shell_command` 的同结果重复预算**已从 30 收紧到 10**（2026-10-08，代码默认与本机配置同步改；`competition.stall_turns` 也已 8 → 6）——但它**管不到**上面那 11 次冗余：实测那些重复是 **2–4 次一簇**，远低于任何阈值；真正有效的是 `stall_turns` / `--max-steps` 与人盯着"同一段代码别发第二遍"。 |
+
+### P1 — 直接影响得分效率
+
+| # | 缺口 | 证据 | 谁做 |
+|---|---|---|---|
+| 4 | **没有"可直接粘贴的短命令卡"** | IR references 里全是分面长文档，没有任何"粘贴即用"的短清单；而网页终端**可能不支持长粘贴** | 我（一页 Linux + 一页 Windows，每条 ≤120 字符） |
+| 5 | **"用 MCP 驱动网页终端"目前连本地都不可用** | `vulnclaw doctor`：`chrome-devtools: placeholder schema-only, attach_failed: stdio probe skipped for package-manager command`；`_npx` 缓存为空（**从未下载过**该包） | 要么现在跑一次 attach 测试，要么**别把它算进方案** |
+| 6 | **WP（演练报告）交付格式未定，PDF 导不出** | `vulnclaw report --pdf` 需要未安装的 `weasyprint`；`python-docx` 可用，且有 `office-docx` skill + 自带 LibreOffice | 我（把 Markdown → docx/pdf 的路径打通并实跑一次） |
+| 7 | **没有一次端到端彩排** | 单题能力有 304 份历史报告为证，但"按现场流程走一遍"从未做过：控制台/隧道 → 读题 → 打点 → 落马 → 找 flag → **人工提交** → 生成 WP | 我 + 你（今晚用练习场或本地容器跑一次） |
+| 8 | **时间盒与角色分工未定** | 渗透 2.5h、IR 3h10m、**一血/二血权重**，但没定"每题最多几分钟"与谁盯时间/谁提交 | 我出一版建议，你拍板 |
+
+### P2 — 已知技术债（不一定现场用得上，但要知道）
+
+| # | 缺口 | 证据 | 影响 |
+|---|---|---|---|
+| 9 | `remote_*` 从未真机验证，且 **paramiko 只有 2.8.1** | `paramiko 2.8.1`（2021 年）；rsa-sha2 支持是 2.9+ 才有，现代 OpenSSH 只给 RSA 主机键时会握手失败 | 走 SSH/隧道前先 `pip install -U paramiko` 并用真实服务端验一次 |
+| 10 | 裸 IP 的 `shell_command` 不受作用域检查 | `_validate_command_url_scope` 只扫 URL | 隧道/VPN 场景下边界靠人 |
+| 11 | `permission_mode: full_access` | 本机 config | 所有命令免批准（你说过不管，但现场无人值守时风险自担） |
+| 12 | `uvx` 未安装 | `vulnclaw doctor`：`uvx: missing` | 依赖 uvx 的 MCP 会静默降级（`fetch` 已由本地实现兜住，影响小） |
+| 13 | burp / ctf2 MCP 是 placeholder | `burp: sse server unreachable`、`ctf2: unreachable` | 工具面板有"看着能用其实不能用"的项；本赛用不上 |
+
+---
+
 ## 六、常见问题
 
 **Q: 技能明明加载了，为什么模型行为没变化？**
