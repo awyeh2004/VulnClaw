@@ -1159,25 +1159,27 @@ python .ir-tools\verify-ir.py
    commit `d5df744`），但**合规没松就别当主路径**。
 2. **录屏是否需上交** + 用什么软件仍待问。
 
-### ⚠️ 10/9 新发现：`.ir-tools` 的 vol 自检 FAIL=2（不是本次改动引起）
+### ✅ 10/9：`.ir-tools` 的 vol 自检 FAIL=2 —— **已修**（根因两层，都不是 vol 的问题）
 
-`.ir-tools/verify-ir.py` 现报 `PASS=97 FAIL=2 WARN=0`（此前记录是 FAIL=0），两条失败
-都在 volatility3：
+原本报 `PASS=97 FAIL=2`（两条都在 volatility3），现在 **`PASS=99 FAIL=0 WARN=0`，
+结论"功能可用"**，`vol 真分析可用（banners 提取到符号键 ntkrnlmp.pdb…）`。两层根因：
 
-```
-[FAIL] vol 调用未输出版本号
-[FAIL] vol 真分析无预期输出（banners 未提取到 PDB 横幅）
-```
+1. **`os.execve` 在这台机器的 Anaconda 3.12.7 上直接崩（访问违例 rc=139）**。最小对照即可复现：
+   `python -c "import os,sys;os.execve(sys.executable,[sys.executable,'-c','print(42)'],dict(os.environ))"`
+   → rc=139；`-X faulthandler` 指到 `_vol_entry.py` 的 execve 行。而 `vol.cmd` 用裸 `python`，
+   本机 PATH 第一位就是 `D:\anacond_1` → **每次都在这里死，`vol --help` 一个字都不输出**。
+   → 改成 `subprocess.call(...)` + 回传子进程退出码。
+2. **App 注入的 `PYTHONPATH=…\resources\backend\_internal` 污染**（里头是 **Py3.11 的 .pyd**）：
+   `import socket` 报 `ImportError: Module use of python311.dll conflicts with this version of Python`。
+   文档原写"-S 会清掉 PYTHONPATH"是**错的**（实测 -S 照样认 PYTHONPATH），入口还把污染原样
+   传给了子进程 → 改成：剔除 `_internal`/`routercode` 的 sys.path 与环境项，子进程只给 pylib。
+   另外 `vol.cmd` 现在自带 `-S`，常态路径根本不会再 re-exec。
 
-复查到**两个独立问题**（都不是代码改动引起的，我没碰 `.ir-tools`）：
+**验收**：带污染时 `bin/vol.cmd --help` 也 rc=0（182 个插件行）。
+`.ir-tools/verify-ir.py` → `PASS=99 FAIL=0 WARN=0`。
 
-1. **`bin/vol.cmd` 用的是裸 `python`** —— `python "%HERE%_vol_entry.py" %*`。在这个 App
-   注入 PATH 的 shell 里，`python` 解析到了 **Windows Store 的 stub**
-   （`…\AppData\Local\Microsoft\WindowsApps\python`）→ 什么都不输出、静默失败。
-   现场 shell 里 `python` 到底是谁，开赛前必须确认一次。
-2. **即使用绝对路径的 Anaconda python 跑，`bin/_vol_entry.py --help` 也是
-   `rc=139`（SIGSEGV）、stdout/stderr 全空** —— 这是崩溃，不是"找不到解释器"。
-   四点八那次 `python -S` 隔离修的是 pyOpenSSL 冲突；现在换成了段错误，需要再查。
-
-**影响**：内存取证（volatility3）目前**在本机不可用**。两条路二选一：现场把它修好，
-或改用**平台内置工具库**（培训确认平台自带免费工具可下载）。**别等到要用的时候才发现**。
+⚠️ **两件必须记住的事**：
+* **`.ir-tools/` 是 gitignore 的**（`.gitignore:130`）→ 这个修复**只在本机磁盘**，没进任何提交。
+  **换机/重装工具箱要把它带过去**（就改了 `bin/_vol_entry.py` 和 `bin/vol.cmd` 两个文件）。
+* `verify-ir.py` **要在干净的 PYTHONPATH 下跑**（`env -u PYTHONPATH -u PYTHONHOME …`）。
+  直接在 App 终端里跑会被那层污染带偏成 `PASS=43 FAIL=3` —— 那是测量工具被污染，不是工具箱坏。
