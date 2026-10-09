@@ -340,6 +340,52 @@ def answer_card_evidence_merge(existing_evidence: str, new_evidence: str) -> str
     return f"{existing} | {new}"
 
 
+class RetestVerdict(str, Enum):
+    """复测结论三选一（A1 借鉴 ARTEX 的 ``finding_retests.verdict``）。"""
+
+    REPRODUCED = "reproduced"
+    FIXED = "fixed"
+    INCONCLUSIVE = "inconclusive"
+
+
+class RetestStatus(str, Enum):
+    """一次复测记录的生命周期。``RUNNING`` 只属于「正在进行的那一条」。"""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+
+
+class RetestRecord(BaseModel):
+    """一条 finding 的一次复测会话记录（A1 / ARTEX ``finding_retests`` 的文件式对应物）。
+
+    ``snapshot`` 在发起复测的那一刻冻结 —— 复测期间 finding 被改写（补证据、改严重度）
+    都不会移动本轮结论的依据，所以「依据什么判的」事后可复现。``verdict`` 只有第一轮
+    （``round == 1``）能写；后续追问轮只能附记录，不能改写结论。
+    """
+
+    retest_id: str
+    finding_id: str
+    round: int = 1
+    status: RetestStatus = RetestStatus.RUNNING
+    verdict: str = Field(default="", description="reproduced/fixed/inconclusive，未判定时为空")
+    note: str = Field(default="", description="复测人（或上层）写的一句话依据")
+    snapshot: dict[str, Any] = Field(default_factory=dict, description="发起时冻结的 finding + 约束快照")
+    created_at: str = ""
+    updated_at: str = ""
+    completed_at: Optional[str] = None
+
+    @property
+    def is_fixed(self) -> bool:
+        """只有「已完成 且 结论为 fixed」才算修复 —— 复测唯一的处置翻转条件。"""
+
+        return self.status is RetestStatus.COMPLETED and self.verdict == RetestVerdict.FIXED.value
+
+
+def _now_iso(now: datetime | None = None) -> str:
+    return (now or datetime.now()).isoformat()
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 
@@ -394,6 +440,12 @@ class VulnerabilityFinding(BaseModel):
 
     # ★ 漏洞唯一标识（用于去重）
     finding_id: str = Field(default="", description="漏洞唯一标识：vuln_type + target + location")
+
+    # ★ 复测（A1）：发起时冻结快照，结论只有第一轮能写，只有 fixed 才翻转 lifecycle_status。
+    # 旧 finding 反序列化为空列表，因此这条字段是纯增量。
+    retest_history: list[RetestRecord] = Field(
+        default_factory=list, description="历次复测记录（含追问轮），最新在末尾"
+    )
 
     def model_post_init(self, *args, **kwargs) -> None:
         # ★ Generate the dedup identity FIRST, from the caller-supplied fields —

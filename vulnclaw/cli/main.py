@@ -1404,6 +1404,11 @@ from vulnclaw.cli.code import code_app  # noqa: E402
 
 app.add_typer(code_app, name="code")
 
+# ── Retest sub-command (A1: 复测已上报的结论 / finding_retests) ──────────────
+from vulnclaw.cli.retest_cmd import retest_command  # noqa: E402
+
+app.command("retest", help="复测一条已上报的 finding（A1）")(retest_command)
+
 
 @app.command()
 def run(

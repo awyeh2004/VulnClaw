@@ -210,6 +210,38 @@ SUBAGENT_ROLE_REGISTRY: dict[str, AgentRole] = {
         session_kind="leaf",
         task_kinds=("general",),
     ),
+    # ★ A1 复测员（借鉴 ARTEX ``retester``）：只回答「这条已上报的结论现在还成立吗」，
+    # 在一个冻结快照 + 原任务约束下做最小定向探测。工具面刻意收窄成只读 + 探测：
+    # 没有 shell / python / 子代理，复测者既不能改目标，也不能顺手把原任务重跑一遍。
+    "retester": AgentRole(
+        name="retester",
+        persona=(
+            "You are the Retester. Decide whether ONE already-reported finding still "
+            "holds, using the smallest directed probe that separates "
+            "reproduced / fixed / inconclusive. Do not re-run the original task, do "
+            "not widen scope beyond the frozen original constraints, and do not "
+            "touch other findings."
+        ),
+        allowed_tool_globs=(
+            "load_skill_reference",
+            "memory_search",
+            "evidence_*",
+            "vault_*",
+            "source_extract",
+            "fetch",
+            "http*",
+            "request*",
+            "runtime_diff_probe",
+        ),
+        goal_template=(
+            "Retest objective: {objective}\n"
+            "Done when: {done_when}\n"
+            "Return exactly one verdict (reproduced/fixed/inconclusive) plus the "
+            "evidence that supports it."
+        ),
+        session_kind="leaf",
+        task_kinds=("retest",),
+    ),
 }
 
 def normalize_role_name(role: str | None) -> str | None:

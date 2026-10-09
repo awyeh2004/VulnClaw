@@ -50,6 +50,9 @@ _LIFECYCLE_BUCKETS = (
     "pending_verification",
     "needs_manual_review",
     "verified",
+    # ★ A1: a finding whose fix was confirmed by a completed ``fixed`` retest. It is a
+    # disposition state, not a verification state — it never counts as ``verified``.
+    "fixed",
     "rejected",
 )
 
