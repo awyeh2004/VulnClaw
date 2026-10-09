@@ -3,6 +3,13 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 赛前分工按 4 人定稿（runbook §9.3）+ 作业卡同步</summary>
+
+- **文档** — `IR-RUNBOOK.md` §九 按**实际队制 4 人**定稿（该节原规则：人数一确定就把另外两档删掉，故删除"①单人 / ②双人"）：**A 档（默认）= 主链 3 人（主攻 / 记录+计时+提交核对 / 素材+WP）+ 复核线 1 人**；**B 档（备选）= 双线 2+2**（前提是现场确认"4 个账号能各做不同的题"，否则别用）。顺带修掉草案里一处**自相矛盾**：原"**统一由他人提交** flag"与同节"**一人一个账号**"冲突 —— 别人的账号里交不了你的 flag，故改为**发现者本人在自己账号上提交 + 记录员只做提交核对**（台账登记 + 锚点逐题点名），只有赛方允许共用单一账号时才回到"一人统一提交"。分诊改为 4 人并行（仍守"开赛 10 分钟内不许开打"）。新增**现场待确认第 8 条**（4 个账号的题集 / 能否共用单账号），§八 P1-8 标记关闭。`IR-FIELD-CARD.md` 同步：提交纪律加"4 人版"两条、现场待验证表加第 6 行（现场只看那一页）。
+
+</details>
+
+<details open>
 <summary><strong>Unreleased</strong> — 证据改为 per-run 目录（写读同锚、删除跨 run 兜底读）</summary>
 
 - **证据存储改为 per-run：写入与读取都由 run 目录锚定，读侧不再跨 run 兜底** — 此前抓包日志与固定证据落在 **process-wide** 的 `CONFIG_DIR/evidence`（可被 `VULNCLAW_EVIDENCE_DIR` 覆盖），而读侧在目标 run 目录为空时**静默兜底**到该全局树，于是「没有自己证据的 run」会把**上一个 run 的抓包**当成自己的 proof 渲染进报告 —— 同进程多 run（批量扫描 / 并发）下这条泄漏尤其致命。现在：① 写侧 `resolve_traffic_store` / `resolve_evidence_store`（`vulnclaw/traffic/paths.py`，经 `agent/builtin_tools.py` 的 `traffic_capture` / `traffic_bind` 使用）优先取 `agent.run_dir`（由 `orchestrator` 在 checkpoint 前注入 `run_context.run_dir`），落到 `<run_dir>/evidence/traffic`；② 读侧 `resolve_report_*_store` 与工具侧**共用同一 seam**，但语义是**显式 `run_dir` 即权威** —— 该 run 没有抓包就读到空，绝不再回落到 config 默认（D2）；③ `generate_report(session, output_path=..., run_dir=...)` 新增 `run_dir` 参数，把**报告落点**与**证据位置**解耦（`output_path` 只决定报告写哪；修掉「报告写到 `SESSIONS_DIR` 就再也读不到本 run 证据」的坑，D3）；④ 扫描（headless）路径与 `RunContext` 路径共用同一套 run 目录骨架，此前 `_create_run_layout` 已含 `evidence/`，现抽为公共幂等函数 `run_context.ensure_run_layout`，扫描路径在生成 run 目录后同样补齐 `evidence/`（D4）。**实测**：`tests/traffic/test_evidence_report.py` 新增 A/B 双 run **同进程** 隔离用例（B 报告不得出现 A 的 host、请求行、响应体标记与快照 id；两个 run 的响应体刻意取不同值，以免内容寻址的快照摘要撞车造成误判）、`tests/traffic/test_report_export.py` 补「显式 run_dir 不读 config 默认」「缺 run_dir 不内联邻近 run」两条、`tests/cli/test_cli_noninteractive.py` 新增「扫描产物的报告/summary 落在 agent 自己写的 run 目录、且该目录含 `evidence/`」断言；`tests/run/test_headless.py` 补 `ensure_run_layout` 骨架用例。回归 `tests/{traffic,report,run,cli}` 全绿。
