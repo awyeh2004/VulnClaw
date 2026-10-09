@@ -281,3 +281,57 @@ def test_default_stall_threshold_when_config_says_nothing(
     main._competition_solve(bare, "10662")
 
     assert captured_solve["max_steps"] == 60
+
+
+# ── the A2 evidence-chain nudge (2026-10-09) ────────────────────────────────
+#
+# Measured on a live Web challenge: a goal that only said "submit the flag" made
+# the model run 57 tool calls and never touch report_finding / traffic_*. The
+# tools existed but nothing told the model the report wants findings with bound
+# proof, so the whole evidence chain stayed dark. The goal now names the chain --
+# but only for challenges with a live environment (the only ones that can produce
+# capturable HTTP traffic).
+
+
+def test_env_goal_teaches_the_evidence_chain(stub_platforms, captured_solve, monkeypatch):
+    monkeypatch.setattr(main, "load_config", lambda: _cfg())
+    stub_platforms.ctf2._challenge = _challenge(
+        "Leaking", category="WEB", difficulty="Easy", needs_env=True
+    )
+
+    main._competition_solve(_cfg(), "ctf2:practice:pid-1:cid-2")
+
+    goal = captured_solve["goal"]
+    for tool in ("report_finding", "traffic_list", "traffic_bind_evidence"):
+        assert tool in goal, f"the goal must point the model at {tool}"
+    # The capture-layer caveat is the thing the live run tripped over: an empty
+    # traffic_list does not mean "no vuln", it means the request bypassed capture.
+    assert "traffic_repeat" in goal
+    assert "empty" in goal.lower()
+
+
+def test_env_less_goal_does_not_teach_the_evidence_chain(
+    stub_platforms, captured_solve, monkeypatch
+):
+    """Attachment-only challenges have no HTTP traffic: the chain must not
+    appear, or the model goes looking for a tool with nothing to bind."""
+    monkeypatch.setattr(main, "load_config", lambda: _cfg())
+    stub_platforms.ctf2._challenge = _challenge("RSA", category="crypto", needs_env=False)
+
+    main._competition_solve(_cfg(), "ctf2:practice:pid-1:cid-2")
+
+    goal = captured_solve["goal"]
+    assert "report_finding" not in goal
+    assert "traffic_bind_evidence" not in goal
+
+
+def test_evidence_chain_nudge_does_not_reintroduce_ref_repetition(
+    stub_platforms, captured_solve, monkeypatch
+):
+    """The nudge adds prose; it must not smuggle the long token back in."""
+    monkeypatch.setattr(main, "load_config", lambda: _cfg())
+    stub_platforms.ctf2._challenge = _challenge("Leaking", category="WEB", needs_env=True)
+
+    main._competition_solve(_cfg(), LONG_TOKEN)
+
+    assert captured_solve["goal"].count(LONG_TOKEN) == 1

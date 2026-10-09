@@ -2659,6 +2659,29 @@ def _competition_solve(cfg: Any, ref: str) -> None:
             else "This challenge needs no running environment. "
         )
         + "Submit the flag with platform_submit once it is known.\n"
+        # The A2 evidence chain needs an explicit nudge. Measured 2026-10-09 on a
+        # live Web challenge: with a goal that only said "submit the flag", the
+        # model ran 57 tool calls and never once reached for report_finding /
+        # traffic_* -- it had no reason to, because nothing told it the report
+        # wants findings with bound proof. The tools existing is not the same as
+        # the model knowing to use them.
+        + (
+            "If the target is a live web service and you confirm a vulnerability "
+            "(injection / IDOR / upload / credential leak / misconfig), do not stop "
+            "at the flag:\n"
+            "  1. look at the captured HTTP traffic (traffic_list) and note the "
+            "request_id of the exchange that proves it;\n"
+            "  2. record the finding with report_finding (title/severity/vuln_type/"
+            "description/evidence, verified=true only if you reproduced it);\n"
+            "  3. bind the proof with traffic_bind_evidence -- ref that finding and "
+            "those request_ids (role=proof for the exploit, role=baseline for the "
+            "normal request) so the report carries the raw request/response.\n"
+            "Only traffic that went through the capture layer is listable; if "
+            "traffic_list is empty, issue the proving request via traffic_repeat or "
+            "the browser so the exchange is captured.\n"
+            if challenge.needs_env
+            else ""
+        )
         + (
             "Its attachments are ALREADY DOWNLOADED to local paths, use them directly:\n"
             + "\n".join(f"  {path}" for path in predownloaded)
