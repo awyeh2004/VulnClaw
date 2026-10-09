@@ -1289,6 +1289,33 @@ python .ir-tools\verify-ir.py
 
 ---
 
+### 🎯 P1-7 彩排 · **渗透半**（agent 驱动，CTF2 练习场真靶机）—— 已完成 2026-10-09
+
+> ⚠️ **前置坑：CTF2 的浏览器 session 会过期**（实测 `TOKEN_EXPIRED` / `errors.auth.token_expired_login`）→ 会话态列表写题（**session-only** 路由）全废。**但 Open API 的 API key 仍有效**，所以 `read_challenge` / `start_environment` / `get_environment` / `stop_target` 都能用，**只有 `get_target` 是 session-only**。
+> **绕法（不用登录）**：① 题目 id 从 `~/.vulnclaw/playbooks/` 里 `ctf2:practice:<pid>:<cid>` 的引用捞；② `start_environment()` 起靶机；③ `get_environment()` 拿 `access_url`（`get_target` 拿不到）。
+> **释放**：跑完 `stop_target()`（实测返回 `removed: true`）——别白占容器槽位。
+
+- 题目：**BUU LFI COURSE 1**（practice `4cdd8933-…` / challenge `31ceabbf-…`，Easy，`has_container: true`）
+- 靶机：`http://9c8d2d0ea9fd2fedaf9c4b2c.http-ctf2.dasctf.com:80`（TTL 3580 秒）
+- 结果：`completed` / **1 轮 / 7 次工具调用** / prompt 85,850 + completion 1,781（≈0.09M）
+- 利用链：`?file=php://filter/convert.base64-encode/resource=index.php` 读源码 → `?file=/flag` → **`CTF2{13506443-96d5-4fdf-9faa-402a44c1b373}`**
+- ⚠️ **这次 1 轮命中不算冷解**：playbook `buu-lfi-course-1.md` 的 mtime 是 **10-06**（3 天前解过）⇒ 本次是**复用 playbook** 一发命中。playbook 复用是设计内的好事，**但别拿它当现场速度**；冷解基线仍是 §四点九 的「SSTI 16 条证据 / 3 轮」。
+
+**⭐ 交付链实测（跑这半的真正目的）**
+
+| | `vulnclaw report` | `vulnclaw wp` |
+|---|---|---|
+| Verified Findings | **0**（"No valid vulnerabilities were found"） | — |
+| flag 在里面？ | ✅ 但只在 **§4 攻击路径摘要**里（LLM 摘要救的场） | ✅ 在答案卡里（结构化） |
+| 利用链 / 证据 | 摘要里带 `GET /?file=/flag` | 答案卡证据原文 + 人工待补清单 |
+| 体量 | 77 行 / 2,478 B | 148 行 / 5,117 B |
+
+⇒ **flag 型渗透题与 IR 一样，优先用 `vulnclaw wp`** —— 它不依赖"摘要恰好被生成"这个运气。`report` 只在该 run 真有 verified findings + 绑定证据时才是正确交付物（评估型 run）。
+
+⚠️ **`evidence_bundles` 本次没生成，而且不是 bug**：agent 全程**没调 `traffic_bind_evidence`**（工具序列 = `fetch`×3 / `dir_enum` / `http_probe_batch` / `blackboard_record_answer` / `save_playbook`）⇒ run 里既无 `snapshots.jsonl` 也无 http_capture 引用，所以第 6 条那条线不启用。**只有 agent 真去固化证据才会有包** —— 这是纪律/prompt 问题，不是代码问题。
+
+---
+
 ## 九、时间盒与角色分工（**V2 · 4 人定稿**，2026-10-09）
 
 > 依据（培训确认的硬事实）：**9:30–12:00 渗透（150 分）/ 12:00–12:20 午休 / 12:20–15:30
@@ -1312,7 +1339,7 @@ python .ir-tools\verify-ir.py
 |---|---|---|
 | 12:20–12:35 | **分诊**：数题 / 分值 / 解锁顺序；判每题是"网页终端手打"还是"agent 打" | 同样 15 分钟不许开打 |
 | 12:35–15:00 | **主攻**：按 `flag-landing-spots.md` 的**五步**走（内容搜 → 时间圈定 → 进程/环境 → 服务侧 → 变形解码）；优先 `remote_collect` 一键固化现场 | 每题 **30 分钟硬盒**；到点写 3 行状态跳走。**不要一进题就全盘搜索**（实测 271 秒起） |
-| 15:00–15:20 | **回收 + 出 WP**：IR 题用 **`vulnclaw wp <session.json> --pdf`**（答案卡 = 结论 + 证据原文**自动填入**，模板骨架附在文末，人只需补时间线/影响/建议）；渗透题用 **`vulnclaw report <session.json> --pdf`**（会按 `run_id` 自动找回本 run 证据；拿不准就加 `--run-dir`）。把截图/命令输出补进报告 | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
+| 15:00–15:20 | **回收 + 出 WP**：**IR 题与 flag 型渗透题都用 `vulnclaw wp <session.json> --pdf`**（答案卡 = 结论 + 证据原文**自动填入**，人只需补时间线/影响/建议；实测 `report` 对这两类都出 0 findings，flag 只是碰运气落在 LLM 摘要里）。评估型 run（真有 verified findings + 绑定证据）才用 `vulnclaw report <session.json> --pdf`（按 `run_id` 自动找回本 run 证据；拿不准加 `--run-dir`） | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
 | 15:20–15:30 | 最终提交核对（**链式：逐题确认都交了**）+ 交付物落盘 | 漏交一个可能少解锁一整题 | 
 
 ### 9.3 角色分工（**4 人定稿** · 单人 / 双人两档已按原规则删除）
