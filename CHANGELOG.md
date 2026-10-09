@@ -3,6 +3,19 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 证据维护落地：GC 终于有人调（run 收尾 + <code>vulnclaw evidence gc</code>），解绑/重排有了暴露面</summary>
+
+- **修（缺口 1）：`EvidenceStore.collect()` 在生产代码里**没有**任何调用方 —— 孤立 blob 只增不减** — 2026-10-09 复核。实现本身一直是对的（只删「没有任何索引行引用 + 超过 grace」的 blob），缺的是**调度**和**边界**：`run_dir=None` 会落到 `CONFIG_DIR/evidence` 这个跨 run 的全局根，一次误删就是别人的证据。新增 `vulnclaw/traffic/maintenance.py`：`collect_run_evidence(run_dir)` 只作用于**显式给定的单个 run**、best-effort 永不抛、**拒绝 `run_dir=None`**；索引不存在或**有坏行**时直接返回 `[]`（引用集不完整时"无人引用"的判断不可信，宁可少删 —— blob 只是占磁盘，删错就是证据丢失）。调度点：`orchestrator` 在 `mark_run_status(..., "completed")` 的**同一分支**调用（紧邻既有的 distillation 调度），默认 24h 宽限（报告刚渲完还能读到证据），回收条数写进 run 事件 `evidence_gc`。
+- **新（缺口 2）：`vulnclaw evidence` 子命令组** — 三个动作都只在显式给定的 run 目录 / findings 文件上生效：`gc [--grace-days N] [--dry-run]`（dry-run 走 `plan_run_evidence_gc`，与真删共用同一条谓词，不会各自漂移）、`unbind <finding> --snapshot …`、`reorder <finding> --handles h1,h2`。**解绑/重排默认只看不写**，`--write` 才落盘 —— 这两个动作会削弱报告的证据面 / 改变引用顺序，不该一条命令就跑掉。谓词只留一份：`EvidenceStore.stale_digests()`（`collect()` 改为复用它）；findings 读写抽到 `cli/findings_io.py`（`retest` 与 `evidence` 共用同一套定位/落盘规则，原子写）。
+- **复核发现（未改代码，等拍板）** — `unbind_finding_evidence()` 的 docstring 说"即使没匹配上也 bump `evidence_version`"，实现只在真删掉绑定时才 bump（`vulnclaw/traffic/binding.py`）。CLI 因此必须自己把"没有匹配到"打出来，否则调用方从版本号看不出这次请求被考虑过。改哪边会动绑定语义，留作赛后决定。
+- **测试** — `tests/traffic/test_evidence_gc_schedule.py` 12 例（无 run 上下文绝不删全局 / 无索引不删 / **坏索引不删** / 引用再老也留 / 只作用于本 run / dry-run 与真删一致 / 收尾异常不外抛 / 源码级钉子：调度点必须与 completed 分支同函数）+ `tests/cli/test_evidence_cmd.py` 9 例；连带 `tests/traffic` + `tests/cli` + `tests/retest` 实测 **615 passed**（0 failed）。
+- **文档** — `docs/project-map.md` 补 `evidence` 命令与 `traffic/maintenance.py`。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 复测（A1）：<code>vulnclaw retest</code> —— 已上报的结论可以被复核，但改处置状态只有一个入口</summary>
 
 - **新：复测工作流（A1，借鉴 ARTEX 的 `finding_retests` / `retester` 语义，不抄代码）** — 2026-10-09。此前 finding 一旦上报就是单向的：报告上写着"已验证 / 待验证"，**没有任何机制回答"打补丁之后这条还成立吗"**，处置状态也没有第二个来源能改。新增 `vulnclaw/retest/`（`store.py` 文件式会话存储、`service.py` 语义内核）、`vulnclaw retest` 子命令、`retester` 叶子角色。四条不变量照 ARTEX 的设计意图（而非它的 Go+PostgreSQL 实现）：
