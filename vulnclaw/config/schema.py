@@ -628,8 +628,12 @@ class SessionConfig(BaseModel):
     # on one dead probe path, but for stateful web challenges the model
     # legitimately re-fetches the same endpoint (e.g. a file list or status page)
     # many times to observe changing state (bot-posted exfil results). These
-    # generic observation tools therefore get generous budgets, and the whole
+    # generic observation tools therefore get larger budgets, and the whole
     # table is overridable from config so a platform can tune per exercise.
+    # 2026-10-08: 30 -> 10 for the executor tools — a solved run still burned
+    # ~12% of 5.21M tokens on redundant calls at ~43K prompt tokens each. Safe
+    # against the round-22 "lost the tool" failure because the guard counts
+    # consecutive IDENTICAL RESULTS, not calls, and resets on any change.
     repeat_tool_limits: dict[str, int] = Field(
         default_factory=lambda: {
             "brute_force_login": 2,
@@ -641,8 +645,8 @@ class SessionConfig(BaseModel):
             "subdomain_enum": 2,
             "js_recon": 2,
             "fetch": 50,
-            "python_execute": 30,
-            "shell_command": 30,
+            "python_execute": 10,
+            "shell_command": 10,
         },
         description="Per-tool cross-round repetition-guard threshold, keyed by tool name",
     )

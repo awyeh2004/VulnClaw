@@ -56,12 +56,20 @@ _REPEAT_TOOL_LIMITS = {
     "space_search": 2,
     "subdomain_enum": 2,
     "js_recon": 2,
-    # Generic observation/probe tools get generous budgets: stateful web
-    # challenges legitimately re-fetch the same endpoint (e.g. the file list)
-    # many times to observe changing state (bot-posted exfil results).
+    # Generic observation/probe tools get larger budgets than the 2-call probes
+    # above: stateful web challenges legitimately re-fetch the same endpoint to
+    # observe changing state (e.g. bot-posted exfil results).
+    #
+    # 30 -> 10 (2026-10-08, competition budget postmortem): a stored run that
+    # solved its challenge still spent ~12% of 5.21M tokens on redundant calls,
+    # and an executor call costs ~43K prompt tokens. The tighter value is safe
+    # against the round-22 failure mode precisely because the counter is keyed on
+    # the RESULT signature and resets the moment the result changes (see
+    # _remember_target_result): a run that keeps learning something new is never
+    # throttled, so only genuinely identical consecutive results are capped.
     "fetch": 50,
-    "python_execute": 30,
-    "shell_command": 30,
+    "python_execute": 10,
+    "shell_command": 10,
 }
 _DEFAULT_REPEAT_TOOL_LIMIT = 8
 _GUARD_LAST_RESULT_MAX_CHARS = 1500

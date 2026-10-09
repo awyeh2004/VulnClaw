@@ -18,6 +18,7 @@ import types
 
 from vulnclaw.agent import runtime_state
 from vulnclaw.agent.tool_call_manager import (
+    _REPEAT_TOOL_LIMITS,
     _remember_target_result,
     _repeat_guard_violation,
     _result_signature,
@@ -136,3 +137,42 @@ def test_the_real_run_would_no_longer_lock_python_execute():
             f"call #{i} was blocked by the guard"
         )
         _remember_target_result(agent, "python_execute", PROBE, response)
+
+
+class TestShippedDefaultBudget:
+    """The shipped executor budget, tightened for competition token cost.
+
+    2026-10-08: a *solved* run (`batch-1005t-01`, SETCTF) still spent 5.21M
+    tokens, of which ~12% went to redundant calls — 11 duplicate-call sets and 15
+    failed calls, at ~43K prompt tokens per request. The executor limits were
+    30 identical results; 10 keeps the round-22 protection (the counter is keyed
+    on the RESULT signature, so progressive probing always resets it) while
+    capping the genuinely stuck case sooner.
+    """
+
+    def test_shipped_limits_are_the_tightened_ones(self):
+        assert _REPEAT_TOOL_LIMITS["python_execute"] == 10
+        assert _REPEAT_TOOL_LIMITS["shell_command"] == 10
+        # Stateful observation tools keep their large budget on purpose.
+        assert _REPEAT_TOOL_LIMITS["fetch"] == 50
+
+    def test_ten_identical_results_trip_the_shipped_default(self):
+        agent = _agent()  # no override: the shipped table applies
+        for _ in range(10):
+            assert _repeat_guard_violation(agent, "python_execute", PROBE) is None
+            _remember_target_result(agent, "python_execute", PROBE, SAME_RESULT)
+
+        blocked = _repeat_guard_violation(agent, "python_execute", PROBE)
+        assert blocked is not None and "SAME result" in blocked
+
+    def test_progressive_results_never_trip_the_shipped_default(self):
+        """The round-22 guarantee must survive the tighter number: 10 distinct
+        results in a row keep the tool."""
+        agent = _agent()
+        for i in range(10):
+            assert _repeat_guard_violation(agent, "python_execute", PROBE) is None, (
+                f"progressive call #{i} was throttled at the shipped default"
+            )
+            _remember_target_result(
+                agent, "python_execute", PROBE, f"GET {TARGET}/api/x-{i} 200 body={i}"
+            )
