@@ -1162,7 +1162,7 @@ python .ir-tools\verify-ir.py
 | P1-4 | 短命令卡 | ✅ **已补**：`references/paste-cards-linux.md` + `paste-cards-windows.md`（逐行可粘贴；Windows 那份在本机 Win11 23H2 逐条实跑） | **关闭** |
 | P1-5 | chrome-devtools 驱动终端 | ❌ `_npx` 缓存目录**不存在**（从未下载过） | 建议**不做** |
 | P1-6 | WP / PDF 交付 | ✅ **已打通**。拦路虎只是缺 extra，且**正确包名是 `reportlab`（不是 weasyprint）**。实测两条腿都出 PDF：`pdf_exporter.export_pdf()` → 10.1 KB、`%PDF-1.4`、5 个页对象；CLI `vulnclaw report <session.json> --pdf --pdf-out ...` → **rc=0** 且打印 "PDF exported" → 5.2 KB PDF | **关闭**（`pip install 'vulnclaw[pdf]'`） |
-| P1-7 | 端到端彩排 | ❌ 仍未做（单题能力有历史报告为证，但"按现场流程走一遍"没有） | 待做（约 1–2 小时） |
+| P1-7 | 端到端彩排 | ⚠️ **A 半已完成（2026-10-09）** —— 5/6 分、105 秒，但**暴露出 IR 交付链是断的**（见下）；B 半（副驾交接）待做 | A 半完成；待做 B 半 |
 | P1-8 | 时间盒/分工 | ✅ 人数已定 = **4 人** → §9.3 已按 4 人定稿（单/双人两档已删；顺带修掉草案里"统一由他人提交"与"一人一个账号"的矛盾；新增一条现场待确认：4 个账号的题集 / 能否共用单账号） | **关闭** |
 | P2-9 | paramiko / `remote_*` 真机验证 | ✅ **已升级 + 已验证**。2.8.1 → **5.0.0**（+invoke 3.0.3）。证据见下 | **关闭** |
 | P2-11 | `permission_mode: full_access` | 确认仍在（无人值守时风险自担） | 不变 |
@@ -1217,6 +1217,50 @@ python .ir-tools\verify-ir.py
   **换机/重装工具箱要把它带过去**（就改了 `bin/_vol_entry.py` 和 `bin/vol.cmd` 两个文件）。
 * `verify-ir.py` **要在干净的 PYTHONPATH 下跑**（`env -u PYTHONPATH -u PYTHONHOME …`）。
   直接在 App 终端里跑会被那层污染带偏成 `PASS=43 FAIL=3` —— 那是测量工具被污染，不是工具箱坏。
+
+---
+
+### 🎯 P1-7 彩排 · **A 半**（agent 驱动，本地容器）—— 已完成 2026-10-09
+
+> 靶机：本机 Docker `ir-drill`（`docker start ir-drill`；镜像 `ir-drill:1.0`）。跑前 `docker exec ir-drill ls -A /tmp` **为空** ⇒ 脚手架没泄漏进镜像（setup 的 scrub 有效）。
+> 跑法：`vulnclaw solve ir-drill --goal "完成应急响应排查：…" --prompt "$(cat 题面)" --max-steps 12 --run-name drill-rehearsal-1`
+> ⚠️ BRIEF 里写的 `docker-container://ir-drill` **不是真 scheme**（全仓 0 命中），目标串只是描述性的，真正驱动 agent 的是 `--prompt`。
+> 结果：`status=completed` / `agent_state.completed=true` / **105 秒** / 3 轮 / 38 次工具调用 / prompt 415,468 + completion 18,072 tokens（≈0.43M）。
+> 会话档（权威）：`~/.vulnclaw/sessions/20261009_162535_ir-drill.json`；run 目录：`~/.vulnclaw/runs/drill-rehearsal-1/`。
+
+**用时分解（对照 §9 时间盒）**
+
+| 阶段 | 时刻 | 说明 |
+|---|---|---|
+| 启动 → 首次调用 | 16:24:52 → 16:24:57 | 5 秒 |
+| 侦察爆发 | 16:24:57 → 16:25:08 | 11 条 `shell_command`（11 秒） |
+| 深挖 | 16:25:18 → 16:25:39 | 基线 `diff` / `find` / `grep`（21 秒） |
+| 写答案 | 16:25:39 → 16:26:05 | 26 秒（整段生成 6 答） |
+| 完成闸 + 收尾 | 16:26:05 → 16:26:37 | 记 6 答 → 扫描面 → LOCK/facts/angles |
+
+**⇒ 这类"笔记本可达、agent 直连"的题 105 秒就闭合，§9 的 15/25/30 分钟硬盒对它过于宽松。** 硬盒真正的约束对象是"只能经跳板机手打的题"（= B 半要验的）。
+
+**评分（ANSWER-KEY 6 项）：5 / 6**
+
+| 项 | 分 | 依据 |
+|---|---|---|
+| 1 三个恶意文件（含**被篡改的** upload.php） | ✅ | 3/3 命中，且用基线 `diff` 找出注入。**但多报 3 条**（两处 cron + `/etc/passwd`）：前两条实为"持久化"，第三条是系统文件 ⇒ 分类混淆 |
+| 2 攻击者 IP | ✅ | `203.0.113.47`，并显式排除 `198.51.100.9`（伪 Googlebot）与 `192.168.1.10`（运维 webadmin） |
+| 3 首次入侵时间 | ❌ | 答 **09:22:31**（探测起点），应为 **09:22:51**（`upload.php` 返回 200 = 上传成功那一刻）。数据它都拿到了，只是选错了那一个 |
+| 4 漏洞类型 + 行号 | ✅ | 上传扩展名校验缺陷 / 第 21 行 `pathinfo(...,PATHINFO_EXTENSION)` / 注入行 38–39 |
+| 5 两处 cron + UID=0 账号 | ✅ | `crontabs/root` + `/etc/cron.d/demo-persistence` + `sysupdate` |
+| 6 清除方案顺序 | ✅ | 明确"只删文件不够"：阻断 → **先拆持久化** → 删文件 → 基线覆盖 → 修漏洞 → 加固 |
+
+观察项：⑦ 真跑了 `ls -la`（e003/e006/e019）✅；⑧ 报告里 5 条路径逐条 `docker exec` 复核 **全部真实存在** ✅；⑨ 全程 `[观测]` 标注 ✅。
+完成闸有实效：过程中被拒 1 次（"先 LOCK + 确认关键事实 + 关掉 ANGLES 再宣布完成"），随后补齐才结束。
+
+**⭐⭐ 彩排真正抓到的两个问题（现场会直接扣分/白干）**
+
+1. **`vulnclaw report --pdf` 对 IR 题出的是空报告** —— 6 个答案经 `blackboard_record_answer` 落库后是 **pending/candidate**，而 `generate_report` 只渲染 verified findings ⇒ 生成的 MD 里是 **"Verified Findings: 0 / Pending Verification: 6 (not shown in this report)"**，IP、时间、路径**一个都没进报告**；PDF 虽有效（4,640 B、`%PDF-1.4`）却是白纸。
+   ⇒ §9.2 那句"IR 用 `IR-WP-TEMPLATE.md` 骨架"**不是结构偏好，是必须**：不换路径，15:00–15:20 交的就是空报告。
+2. **`evidence_bundles` 在 IR 场景不会生成**（两层原因）：① CLI `report` **没有 `--run-dir`**，取证仓库回退到 `output.parent`（= `~/.vulnclaw/sessions`），拿不到本 run 的 evidence 树；② 即便拿到，IR 的 finding 引用的是命令/文件证据，不是 `http_capture` 快照 ⇒ 引用集为空。所以新接的第 6 条那条线**只对渗透（web）类有意义**。
+
+**小摩擦（不扣分，但现场会重复出现）**：`load_skill_reference("incident-response/ir-competition-strategy")` 文档不存在 ⇒ 1 次 degraded；两条命令被 Windows shell 包装吃掉（`find -exec` → `CommandNotFoundException`、`Out-File` → `DirectoryNotFound`）；一条 `awk` 语法错。框架口径 0 次失败调用，但真实命令里有 3 处语法级失败。
 
 ---
 
