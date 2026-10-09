@@ -111,7 +111,7 @@ CLAUDE.md
 # 会话包就含平台 token），一次 `git add -A` 就会把 key 写进历史 —— 与 .ir-tools/
 # 同一条教训。注意 gitignore **不挡** tests/security/test_no_committed_secrets.py：
 # 它用 os.walk 扫整棵树（只跳 .test-tmp/.venv/.git 等），所以**解包出来的文本
-# 请落在仓库外**（如 D:\GitClone\VulnClaw\.dsh-scratch\）；zip 因后缀被跳过。
+# 请落在仓库外**（`%TEMP%` 之类的仓库外目录）；zip 因后缀被跳过。
 /.routercode/
 
 # Local docs / local-only artifacts
