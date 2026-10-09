@@ -1254,11 +1254,27 @@ python .ir-tools\verify-ir.py
 观察项：⑦ 真跑了 `ls -la`（e003/e006/e019）✅；⑧ 报告里 5 条路径逐条 `docker exec` 复核 **全部真实存在** ✅；⑨ 全程 `[观测]` 标注 ✅。
 完成闸有实效：过程中被拒 1 次（"先 LOCK + 确认关键事实 + 关掉 ANGLES 再宣布完成"），随后补齐才结束。
 
-**⭐⭐ 彩排真正抓到的两个问题（现场会直接扣分/白干）**
+**⭐⭐ 彩排真正抓到的两个问题**
 
-1. **`vulnclaw report --pdf` 对 IR 题出的是空报告** —— 6 个答案经 `blackboard_record_answer` 落库后是 **pending/candidate**，而 `generate_report` 只渲染 verified findings ⇒ 生成的 MD 里是 **"Verified Findings: 0 / Pending Verification: 6 (not shown in this report)"**，IP、时间、路径**一个都没进报告**；PDF 虽有效（4,640 B、`%PDF-1.4`）却是白纸。
-   ⇒ §9.2 那句"IR 用 `IR-WP-TEMPLATE.md` 骨架"**不是结构偏好，是必须**：不换路径，15:00–15:20 交的就是空报告。
-2. **`evidence_bundles` 在 IR 场景不会生成**（两层原因）：① CLI `report` **没有 `--run-dir`**，取证仓库回退到 `output.parent`（= `~/.vulnclaw/sessions`），拿不到本 run 的 evidence 树；② 即便拿到，IR 的 finding 引用的是命令/文件证据，不是 `http_capture` 快照 ⇒ 引用集为空。所以新接的第 6 条那条线**只对渗透（web）类有意义**。
+1. **WP 交付链不对接**（我先前"空报告是 bug"的定性**需更正**）—— 6 个答案经 `blackboard_record_answer` 落库后是
+   `vuln_type="ir-answer"` 的 Info/always-pending 卡片，而**报告 / SARIF / verify-pending / `--fail-on` 消费者按设计就必须跳过答案卡**
+   （`domain_models.ANSWER_CARD_VULN_TYPE`，round-10 finding #1：不跳的话"漏洞名称"这种提问会被当成已验证漏洞印进报告）。
+   ⇒ `vulnclaw report` 对 IR 出 0 findings **是设计，不是 bug**。
+   **但操作后果照样成立**：WP 只能走 `IR-WP-TEMPLATE.md` 人肉填，而**没有任何工具把答案卡渲染进那个骨架**
+   ⇒ 15:00–15:20 那 20 分钟得有人从会话/黑板抄 6 条结论 + 证据 —— 这是**分工里没落到的活**。
+2. **`vulnclaw report <session.json>`（CLI 路）拿不到本 run 的取证仓库，而且是"假告警"**（**受控实验**，非推断）：
+   `generate_report_from_file()` → `generate_report(session)` **不传 `run_dir`** ⇒ 取证仓库回退到 `output.parent`
+   （= `~/.vulnclaw/sessions`）→ 空。同一个 run 各渲一次的实测对照：
+
+   | 路径 | 正文内联 | 报告里的措辞 | `evidence_bundles` |
+   |---|---|---|---|
+   | A `report(session)`（= CLI `vulnclaw report`） | ❌ | **⚠ 已绑定但正文不可读取（快照已不在索引中）** ×2 | ❌ |
+   | B `report(session, run_dir=…)`（= agent/orchestrator） | ✅ 原文进报告 | 正常渲染 `GET … → 500` + 响应体 | ✅ **实测已生成** |
+
+   ⇒ 不光丢证据，还**把"证据就在那儿"误报成"证据没了"**。§9.2 让用 `vulnclaw report <session.json> --pdf` 交 WP，
+   那交出去的就是一份**自己声称证据不可读**的报告 —— **渗透题同样中招**，不只是 IR。
+   ⚠️ 顺带确认：新接的第 6 条那条 `evidence_bundles` 线在**传了 `run_dir` 时确实生效**（B 路径实测产出），
+   所以它不是"在 IR 不生成"，而是**只有 CLI 那条路生成不了**。
 
 **小摩擦（不扣分，但现场会重复出现）**：`load_skill_reference("incident-response/ir-competition-strategy")` 文档不存在 ⇒ 1 次 degraded；两条命令被 Windows shell 包装吃掉（`find -exec` → `CommandNotFoundException`、`Out-File` → `DirectoryNotFound`）；一条 `awk` 语法错。框架口径 0 次失败调用，但真实命令里有 3 处语法级失败。
 
