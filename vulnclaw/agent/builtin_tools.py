@@ -532,6 +532,76 @@ def execute_traffic_bind_tool(agent: AgentContext, args: dict[str, Any]) -> str:
     )
 
 
+#: The model-facing finding-write verb. Measured 2026-10-09: the model had NO
+#: way to create a finding — ``findings_report``/``findings_diff`` are read-only,
+#: every other finding came from ``finding_parser`` regexing model prose, and
+#: ``blackboard_record_answer`` writes an ``ir-answer`` card that reports filter
+#: out. So ``traffic_bind_evidence`` ("report the finding first") had no upstream
+#: verb: four live runs produced 4/4 answer cards and zero bindable findings, and
+#: the whole evidence chain was unreachable from the model's seat.
+REPORT_FINDING_TOOL_NAME = "report_finding"
+
+_SEVERITIES = ("Critical", "High", "Medium", "Low", "Info")
+
+
+def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> str:
+    """Record a vulnerability finding the model has actually established.
+
+    Deliberately narrow: it writes ONE finding and returns its id. Verification
+    is the caller's claim (``verified``), never implied -- an unverified report
+    is stored as a candidate, which is the honest shape for "I think this is
+    exploitable but have not proven it". Binding captured proof is a SEPARATE
+    step (``traffic_bind_evidence``) so a model cannot claim proof it never saw.
+    """
+    from vulnclaw.config.domain_models import VulnerabilityFinding
+
+    title = str(args.get("title") or "").strip()
+    if not title:
+        return "[report_finding] 拒绝：缺少 title（漏洞标题不能为空）"
+
+    severity = str(args.get("severity") or "Medium").strip().title()
+    if severity not in _SEVERITIES:
+        severity = "Medium"
+
+    session = getattr(agent, "session_state", None)
+    if session is None or not hasattr(session, "add_finding"):
+        return "[report_finding] 拒绝：当前会话不支持记录漏洞发现"
+
+    finding = VulnerabilityFinding(
+        title=title,
+        severity=severity,
+        vuln_type=str(args.get("vuln_type") or "").strip(),
+        description=str(args.get("description") or "").strip(),
+        impact=str(args.get("impact") or "").strip(),
+        evidence=str(args.get("evidence") or "").strip(),
+        remediation=str(args.get("remediation") or "").strip(),
+        endpoint=str(args.get("endpoint") or "").strip() or None,
+        method=str(args.get("method") or "").strip().upper() or None,
+        code_location=str(args.get("code_location") or "").strip() or None,
+    )
+    verified = bool(args.get("verified", False))
+    if verified:
+        finding.mark_verified(note=str(args.get("verification_note") or "").strip())
+
+    try:
+        stored = session.add_finding(finding)
+    except Exception as exc:  # noqa: BLE001 - a tool must return, not raise
+        return f"[report_finding] 记录失败：{type(exc).__name__}: {exc}"
+
+    handle = str(getattr(finding, "finding_id", "") or "")
+    state = "已记为已验证漏洞" if verified else "已记为候选漏洞（未验证）"
+    if not stored:
+        return (
+            f"[report_finding] 「{title}」{state}，但与已有发现重复（finding_id={handle}）。"
+            "如需为它补充证据，请用 traffic_bind_evidence 指定该标题或 finding_id。"
+        )
+    return (
+        f"[report_finding] 「{title}」{state}（severity={severity}，finding_id={handle}）。\n"
+        "  下一步：用 traffic_list 拿到请求 request_id，再用 traffic_bind_evidence "
+        "把这个漏洞的复现证据绑定进报告。"
+    )
+
+
 
 def enforce_traffic_repeat_constraints(
     agent: AgentContext, store: Any, args: dict[str, Any]
@@ -1690,6 +1760,11 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         # the capture log, so it routes through its own agent-aware handler.
         return await asyncio.to_thread(execute_traffic_bind_tool, agent, args)
 
+    if tool_name == REPORT_FINDING_TOOL_NAME:
+        # Pure in-process state write (session findings), no I/O: the model's
+        # only way to create the finding that traffic_bind_evidence binds proof to.
+        return execute_report_finding_tool(agent, args)
+
     if tool_name in {"evidence_list", "evidence_view", "evidence_search"}:
         return execute_evidence_tool(agent, tool_name, args)
 
@@ -2600,6 +2675,71 @@ def build_openai_tools(
 
     for tool in traffic_tool_schemas():
         append_tool(tool)
+
+    # The finding-write verb sits next to the traffic tools on purpose: the two
+    # form the evidence chain the model actually walks (report_finding ->
+    # traffic_list -> traffic_bind_evidence), and the binding schema's own
+    # description tells the model to report first. Without this verb that
+    # instruction pointed at nothing (no tool could create a finding).
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": REPORT_FINDING_TOOL_NAME,
+                "description": (
+                    "上报一个你已确认的漏洞发现，写入本次运行的报告。"
+                    "当你在授权范围内确认了可复现的漏洞（注入/越权/上传/凭证泄露等）时调用它——"
+                    "报告只统计经此上报的发现，blackboard_record_answer 记的是答题卡，不进漏洞报告。"
+                    "上报后请用 traffic_list 拿到 request_id，再用 traffic_bind_evidence "
+                    "把复现报文绑定为该漏洞的证据。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "漏洞标题，如 'SQL Injection in /user'（必填，唯一标识）",
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": list(_SEVERITIES),
+                            "description": "严重级别，默认 Medium",
+                        },
+                        "vuln_type": {
+                            "type": "string",
+                            "description": "漏洞类型，如 SQLi / XSS / RCE / IDOR",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "漏洞描述：问题与位置（what/where）",
+                        },
+                        "impact": {"type": "string", "description": "影响与业务风险"},
+                        "evidence": {
+                            "type": "string",
+                            "description": "证明漏洞存在的关键观察（文字摘要；报文证据用 traffic_bind_evidence 绑定）",
+                        },
+                        "remediation": {"type": "string", "description": "修复建议"},
+                        "endpoint": {"type": "string", "description": "受影响的 URL/端点"},
+                        "method": {"type": "string", "description": "HTTP 方法，如 POST"},
+                        "code_location": {
+                            "type": "string",
+                            "description": "源码位置 file:line（代码审计类发现）",
+                        },
+                        "verified": {
+                            "type": "boolean",
+                            "description": "你是否已实弹验证该漏洞（默认 false=仅候选项）",
+                            "default": False,
+                        },
+                        "verification_note": {
+                            "type": "string",
+                            "description": "验证方式说明（verified=true 时建议填写）",
+                        },
+                    },
+                    "required": ["title"],
+                },
+            },
+        }
+    )
 
     for tool in ctf2_tool_schemas(config):
         append_tool(tool)
