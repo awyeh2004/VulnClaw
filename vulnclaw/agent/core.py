@@ -85,6 +85,12 @@ class AgentCore:
         # Wire the vault to the run output directory so archiving can persist.
         self.context.vault_output_dir = config.session.output_dir
         self.active_role: str | None = None
+        # Per-run evidence anchor, supplied by the orchestrator (see
+        # ``orchestrator.run_agent_task``). Deliberately NOT part of
+        # ``SessionState``: it is execution context, so it stays off the
+        # serialized snapshot. "" means "not inside a run" -- the evidence
+        # writers/readers then fall back to the config-scoped root.
+        self.run_dir: str = ""
         self._subagent_ctx = SubagentContext()
         self._client = None
         # Failover key pool: prefer llm.api_keys, else the single llm.api_key.

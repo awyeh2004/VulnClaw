@@ -1,9 +1,11 @@
 """Resolve where the traffic evidence store lives.
 
-Inside the per-run Docker sandbox the store lives at ``<run>/evidence/traffic/``.
-Until the run-directory PRD lands, resolution falls back to a config-scoped
-evidence directory (overridable via ``VULNCLAW_EVIDENCE_DIR``), so headless/CI
-runs still get a durable, addressable store.
+Evidence is per-run: each run owns ``<run_dir>/evidence/`` -- the capture log at
+``evidence/traffic`` and the pinned snapshots/blobs beside it. Resolution takes an
+explicit ``run_dir`` and is deterministic: it never falls back to another run's
+tree. Only when there is no run context (``run_dir is None``) does a
+config-scoped default apply (overridable via ``VULNCLAW_EVIDENCE_DIR``), so
+headless/CI runs still get a durable, addressable store.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vulnclaw.traffic.evidence import EvidenceStore
     from vulnclaw.traffic.store import TrafficStore
 
 TRAFFIC_SUBDIR = "traffic"
@@ -40,6 +43,16 @@ def traffic_dir(base: str | Path | None = None) -> Path:
     return evidence_root() / TRAFFIC_SUBDIR
 
 
+def evidence_dir(base: str | Path | None = None) -> Path:
+    """Return the ``evidence/`` root that owns both the capture log and pinned evidence.
+
+    Derived from :func:`traffic_dir` rather than duplicated, so the two can never
+    disagree about where a run's evidence tree lives -- ``<evidence>/traffic`` is
+    the capture log and ``<evidence>`` holds the pinned snapshots and blobs.
+    """
+    return traffic_dir(base).parent
+
+
 def resolve_traffic_store(run_dir: str | Path | None = None) -> "TrafficStore":
     """Resolve the store the agent *writes* captures to.
 
@@ -56,21 +69,40 @@ def resolve_traffic_store(run_dir: str | Path | None = None) -> "TrafficStore":
 def resolve_report_traffic_store(run_dir: str | Path | None = None) -> "TrafficStore":
     """Resolve the store the report generator *reads* from.
 
-    Prefers ``run_dir``'s store when it already holds captures; otherwise falls
-    back to the config-scoped default, so a report generated outside the run
-    directory still finds captures the agent wrote there (the common case until
-    the run-directory PRD provides an explicit per-run path). Read-only: the
-    fallback never affects where captures are written.
+    An explicit ``run_dir`` is authoritative -- it returns that run's own store
+    even when it holds no captures yet, so a report can never read another run's
+    traffic (the defect this replaces: an empty run silently fell back to the
+    config-scoped root and picked up a previous run's captures). Only when no run
+    context exists (``run_dir is None``) is the config-scoped default used;
+    ``VULNCLAW_EVIDENCE_DIR`` still overrides that default for headless/CI.
+    Read-only: never affects where captures are written.
     """
-    from vulnclaw.traffic.store import INDEX_FILENAME, TrafficStore
+    from vulnclaw.traffic.store import TrafficStore
 
-    candidates: list[Path] = []
-    if run_dir is not None:
-        candidates.append(traffic_dir(run_dir))
-    candidates.append(traffic_dir(None))  # config-scoped default
+    return TrafficStore(traffic_dir(run_dir))
 
-    for path in candidates:
-        if (path / INDEX_FILENAME).exists():
-            return TrafficStore(path)
-    # Nothing captured anywhere yet: honor the caller's run dir, else default.
-    return TrafficStore(candidates[0])
+
+def resolve_evidence_store(run_dir: str | Path | None = None) -> "EvidenceStore":
+    """Resolve the pinned-evidence store the agent *writes* to.
+
+    Deterministic, exactly like :func:`resolve_traffic_store`: a given ``run_dir``
+    always maps to its own ``evidence/`` root, so a fresh run's pins never land in
+    a stale global store.
+    """
+    from vulnclaw.traffic.evidence import EvidenceStore
+
+    return EvidenceStore(evidence_dir(run_dir))
+
+
+def resolve_report_evidence_store(run_dir: str | Path | None = None) -> "EvidenceStore":
+    """Resolve the pinned-evidence store the report generator *reads* from.
+
+    Mirrors :func:`resolve_report_traffic_store`: an explicit ``run_dir`` is
+    authoritative and never falls back to the config-scoped root, so a run's
+    report cannot surface another run's pinned proof. With no run context the
+    config-scoped default applies (``VULNCLAW_EVIDENCE_DIR`` overridable).
+    Read-only: never affects where pins are written.
+    """
+    from vulnclaw.traffic.evidence import EvidenceStore
+
+    return EvidenceStore(evidence_dir(run_dir))

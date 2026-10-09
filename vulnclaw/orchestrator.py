@@ -151,6 +151,13 @@ async def run_agent_task(
             preview={"target": primary_target.raw},
         )
 
+    if run_context is not None:
+        # Hand the agent its run directory *before* the run starts, so every
+        # evidence write during the run lands inside this run and the report
+        # reader resolves the same place (builtin_tools writers / report
+        # generator readers both key off agent.run_dir).
+        agent.run_dir = str(run_context.run_dir)
+
     checkpoint = (
         _install_checkpoint_hook(agent, command, run_context, targets)
         if run_context is not None

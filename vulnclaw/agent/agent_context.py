@@ -53,6 +53,7 @@ class AgentContext(Protocol):
     config: VulnClawConfig
     mcp_manager: Any
     active_role: str | None
+    run_dir: str
     _finding_parser: FindingParser
     _kb_retriever: Any
     _kb_context_cache: dict[Any, str]

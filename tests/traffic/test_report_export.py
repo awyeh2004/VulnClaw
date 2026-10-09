@@ -125,11 +125,14 @@ def test_verified_finding_inlines_http_capture_english(tmp_path):
         init_i18n(lang=previous_lang)
 
 
-def test_shared_resolver_finds_config_default_when_no_run_captures(tmp_path, monkeypatch):
-    """The report reader and agent writer share one resolver seam.
+def test_shared_resolver_keeps_an_explicit_run_dir_isolated(tmp_path, monkeypatch):
+    """The report reader must not fall back to the config default for a run.
 
-    When the agent wrote captures to the config-default store (no per-run dir),
-    the report generator's resolver still finds them.
+    Guards D2: the two resolvers share one seam, but that seam is *deterministic*
+    -- an explicit run dir reads only that run's captures. A run that captured
+    nothing must see nothing, never a previous run's traffic that happens to sit
+    in the config-scoped default (which is exactly the cross-run leak that made a
+    fresh report cite stale proof).
     """
     from vulnclaw.traffic.paths import (
         resolve_report_traffic_store,
@@ -139,7 +142,7 @@ def test_shared_resolver_finds_config_default_when_no_run_captures(tmp_path, mon
     evidence_root = tmp_path / "config-evidence"
     monkeypatch.setenv("VULNCLAW_EVIDENCE_DIR", str(evidence_root))
 
-    # Agent-side write: no run dir -> lands in the config default.
+    # Agent-side write with no run context: lands in the config default.
     writer = resolve_traffic_store(None)
     capture = TrafficCapture(
         writer, ScopeChecker([Target(host="app.test")], mode=ScopeMode.STRICT)
@@ -152,10 +155,11 @@ def test_shared_resolver_finds_config_default_when_no_run_captures(tmp_path, mon
         source="proxy",
     )
 
-    # Report-side read for a run dir that has no captures of its own: falls back
-    # to the same config default and finds the agent's capture.
-    reader = resolve_report_traffic_store(tmp_path / "run-with-no-captures")
-    assert reader.find(request_id) is not None
+    # A run dir with no captures of its own stays empty -- no fallback leak.
+    run_dir = tmp_path / "run-with-no-captures"
+    reader = resolve_report_traffic_store(run_dir)
+    assert reader.base_dir == run_dir / "evidence" / "traffic"
+    assert reader.find(request_id) is None
 
 
 def test_write_resolver_never_falls_back_to_stale_store(tmp_path, monkeypatch):

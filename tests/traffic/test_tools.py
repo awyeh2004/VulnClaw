@@ -16,6 +16,7 @@ from vulnclaw.traffic import (
     TrafficStore,
 )
 from vulnclaw.traffic.tools import (
+    TRAFFIC_BIND_TOOL_NAMES,
     TRAFFIC_TOOL_NAMES,
     dispatch_traffic_tool,
     traffic_repeat,
@@ -96,8 +97,21 @@ def test_traffic_sitemap_reflects_capture(tmp_path):
 
 
 def test_schemas_cover_all_tool_names():
+    """No schema may be exposed without a dispatch path (and vice versa).
+
+    The traffic face has two dispatch sets: the store-only tools routed through
+    ``dispatch_traffic_tool``, and ``traffic_bind_evidence``, which also needs
+    the target finding and the pinned-evidence store and therefore has its own
+    agent-aware handler. Both count as dispatchable here.
+    """
     names = {s["function"]["name"] for s in traffic_tool_schemas()}
-    assert names == set(TRAFFIC_TOOL_NAMES)
+    assert names == set(TRAFFIC_TOOL_NAMES) | set(TRAFFIC_BIND_TOOL_NAMES)
+
+
+def test_bind_tool_is_not_in_the_store_only_dispatch_set():
+    """Guard the split itself: routing bind through the store-only path would
+    silently drop the finding and evidence-store arguments it needs."""
+    assert not (TRAFFIC_BIND_TOOL_NAMES & TRAFFIC_TOOL_NAMES)
 
 
 class _DummySession:

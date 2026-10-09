@@ -18,7 +18,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from vulnclaw.i18n import I18nLoader, _
 
@@ -119,18 +119,42 @@ class StepStatus(str, Enum):
 
 # Typed evidence-reference kinds. ``sandbox_output`` refs land under
 # ``evidence/sandbox/`` (produced by the sandbox PRD), ``http_capture`` refs are
-# resolved against the traffic store via ``request_id`` (traffic-store PRD), and
+# resolved against the pinned-evidence store via ``snapshot_id`` (falling back to
+# the capture log via ``request_id`` for refs bound before pinning existed), and
 # ``file`` refs point at any other artifact inside the per-run ``evidence/`` tree.
 EvidenceKind = Literal["sandbox_output", "http_capture", "file"]
+
+#: What part a piece of evidence plays in proving a finding. Without this a
+#: reader cannot tell the normal-case request from the request that proved the
+#: bug, which is exactly the comparison that makes an HTTP finding legible.
+#: ``baseline`` = the unmodified control request; ``proof`` = the request that
+#: demonstrates the vulnerability; ``verification`` = a follow-up check (e.g.
+#: confirming impact); ``supporting`` = anything else (the default, so refs
+#: written before roles existed keep loading unchanged).
+EvidenceRole = Literal["baseline", "proof", "verification", "supporting"]
+
+DEFAULT_EVIDENCE_ROLE: EvidenceRole = "supporting"
+
+EVIDENCE_ROLES: tuple[EvidenceRole, ...] = (
+    "baseline",
+    "proof",
+    "verification",
+    "supporting",
+)
 
 
 class EvidenceRef(BaseModel):
     """A typed pointer from a finding into the per-run ``evidence/`` tree.
 
     ``path`` is always relative to that tree so evidence stays portable across
-    machines. ``request_id`` is the optional hook a traffic store resolves an
-    ``http_capture`` against; it is ``None`` for refs that are self-contained
-    files (``sandbox_output`` / ``file``).
+    machines. For an ``http_capture`` the durable handle is ``snapshot_id`` -- an
+    immutable, content-addressed copy under ``evidence/blobs/`` -- while
+    ``request_id`` remains the (reclaimable) capture-log id. Refs bound before
+    the snapshot layer existed carry only ``request_id`` and are still resolved
+    against the live store, so both shapes must keep working.
+
+    ``role`` / ``note`` / ``sha256`` / ``captured_at`` are all defaulted: a ref
+    serialized by an older build must deserialize unchanged.
     """
 
     kind: EvidenceKind = Field(description="sandbox_output | http_capture | file")
@@ -138,6 +162,71 @@ class EvidenceRef(BaseModel):
     request_id: Optional[str] = Field(
         default=None, description="Traffic-store request id for http_capture refs"
     )
+    # ── pinned-evidence handle (http_capture) ────────────────────────────
+    snapshot_id: Optional[str] = Field(
+        default=None, description="Immutable pinned-snapshot id for http_capture refs"
+    )
+    sha256: Optional[str] = Field(
+        default=None, description="Content hash of the pinned response body, when present"
+    )
+    captured_at: Optional[str] = Field(
+        default=None, description="Capture timestamp carried over from the traffic index"
+    )
+    # ── provenance a reader needs to interpret the pair ──────────────────
+    role: EvidenceRole = Field(
+        default=DEFAULT_EVIDENCE_ROLE, description="baseline | proof | verification | supporting"
+    )
+    note: str = Field(default="", description="Why this exchange is evidence for the finding")
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_empty_provenance(self, handler: Any, info: Any) -> dict[str, Any]:
+        """Omit binding fields that carry no information.
+
+        ``evidence_refs`` is part of the published ``findings.json`` /
+        SARIF-adjacent contract, and a ref can appear many times per finding, so
+        the new pinned-evidence fields must not bloat every ref that never used
+        them. A legacy ``http_capture`` ref therefore serializes to exactly the
+        same three keys it always did, and the extra keys appear only on refs
+        that are actually pinned or annotated.
+        """
+        data = handler(self)
+        if data.get("snapshot_id") is None:
+            # Not pinned: nothing about the binding extension applies.
+            data.pop("snapshot_id", None)
+            data.pop("sha256", None)
+            data.pop("captured_at", None)
+            if data.get("role") == DEFAULT_EVIDENCE_ROLE:
+                data.pop("role", None)
+        if not data.get("note"):
+            data.pop("note", None)
+        return data
+
+
+def evidence_binding_signature(refs: list[EvidenceRef]) -> str:
+    """Deterministic hash over a finding's ordered evidence bindings.
+
+    Used as the staleness primitive: a report records the signature it rendered
+    and can then prove whether the bindings changed underneath it. Order is part
+    of the identity because the list order is the reading order in the report.
+    """
+    import hashlib
+
+    hasher = hashlib.sha256()
+    for ref in refs or []:
+        hasher.update(
+            "\x1f".join(
+                [
+                    str(ref.kind or ""),
+                    str(ref.snapshot_id or ref.request_id or ""),
+                    str(ref.role or DEFAULT_EVIDENCE_ROLE),
+                    str(ref.sha256 or ""),
+                    str(ref.note or ""),
+                ]
+            ).encode("utf-8", "replace")
+        )
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()[:16]
+
 
 
 #: ``vuln_type`` marker for IR answer-sheet cards. ``blackboard_record_answer``
@@ -276,6 +365,11 @@ class VulnerabilityFinding(BaseModel):
     # ★ Typed evidence references into the per-run evidence/ tree (alongside the
     # free-text ``evidence`` blob, which is retained for backward compatibility).
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    # ★ Monotonic counter bumped every time a binding is (re)written. A report
+    # records the version it rendered so a reader -- or a later re-render -- can
+    # tell whether the evidence moved after the report was written. 0 means "never
+    # bound", which is also what every pre-existing finding deserializes to.
+    evidence_version: int = Field(default=0, description="Binding revision, bumped on (re)bind")
     # ★ Optional skill-loading provenance (reserved by the skill-loading PRD);
     # mapped into finding metadata / SARIF ``properties`` when present.
     skill_provenance: Optional[dict[str, Any]] = Field(default=None)

@@ -69,8 +69,10 @@ from vulnclaw.intel.tools import (
     intel_tool_schemas,
 )
 from vulnclaw.traffic.tools import (
+    TRAFFIC_BIND_TOOL_NAMES,
     TRAFFIC_TOOL_NAMES,
     dispatch_traffic_tool,
+    traffic_bind_evidence_text,
     traffic_tool_schemas,
 )
 from vulnclaw.ctf_platform import (
@@ -434,18 +436,100 @@ LAB_MODE_PATTERNS: list[str] = [
 ]
 
 
+def _evidence_base(agent: AgentContext) -> Any:
+    """The directory that owns this agent's evidence tree.
+
+    Ordered: the live run anchor (``agent.run_dir``, injected by the
+    orchestrator -- see ``orchestrator.run_agent_task``) wins, then the legacy
+    session-level carrier, then ``None`` so the resolver uses the config-scoped
+    root. The run anchor must win: a resumed or concurrent agent can still be
+    carrying a session that was built before the run-dir work landed.
+    """
+    run_dir = getattr(agent, "run_dir", None)
+    if run_dir:
+        return run_dir
+    session = getattr(agent, "session_state", None)
+    return getattr(session, "evidence_dir", None) or getattr(session, "run_dir", None)
+
+
 def resolve_traffic_store(agent: AgentContext) -> Any:
     """Resolve the per-run traffic evidence store for this agent.
 
-    Prefers a run/evidence directory carried on the session (once the run-dir
-    PRD lands); otherwise falls back to the config-scoped evidence directory so
-    headless/CI runs still get a durable store.
+    Prefers the agent's own run directory (injected per run); otherwise falls
+    back to the config-scoped evidence directory so headless/CI runs still get a
+    durable store.
     """
     from vulnclaw.traffic.paths import resolve_traffic_store as _resolve
 
+    return _resolve(_evidence_base(agent))
+
+
+def resolve_evidence_store(agent: AgentContext) -> Any:
+    """Resolve the pinned-evidence store this agent writes to.
+
+    Same base-directory seam as :func:`resolve_traffic_store`, so pins land
+    beside the capture log in the run's own ``evidence/`` tree rather than in a
+    stale global directory.
+    """
+    from vulnclaw.traffic.paths import resolve_evidence_store as _resolve
+
+    return _resolve(_evidence_base(agent))
+
+
+def _session_findings(agent: AgentContext) -> list[Any]:
+    """Every finding this agent has recorded, in insertion order."""
     session = getattr(agent, "session_state", None)
-    base = getattr(session, "evidence_dir", None) or getattr(session, "run_dir", None)
-    return _resolve(base)
+    findings = getattr(session, "findings", None)
+    if findings is None:
+        ctx_state = getattr(getattr(agent, "context", None), "state", None)
+        findings = getattr(ctx_state, "findings", None)
+    return list(findings or [])
+
+
+def resolve_finding_for_binding(agent: AgentContext, handle: str) -> tuple[Any | None, str]:
+    """Find the finding a binding call names.
+
+    Returns ``(finding, message)`` where a ``None`` finding always comes with the
+    reason. ``finding_id`` matches exactly and wins outright; anything else is a
+    case-insensitive title substring, which is how a model that just reported a
+    finding tends to refer back to it. Ambiguity is reported rather than guessed:
+    binding proof to the WRONG finding is worse than asking again.
+    """
+    needle = str(handle or "").strip()
+    if not needle:
+        return None, "缺少 finding 参数（请传 finding_id 或标题片段）"
+
+    findings = _session_findings(agent)
+    if not findings:
+        return None, "当前会话还没有任何漏洞发现，请先上报漏洞再绑定证据"
+
+    for finding in findings:
+        if str(getattr(finding, "finding_id", "") or "") == needle:
+            return finding, ""
+
+    lowered = needle.lower()
+    matches = [f for f in findings if lowered in str(getattr(f, "title", "") or "").lower()]
+    if not matches:
+        titles = "; ".join(str(getattr(f, "title", "")) for f in findings[:5])
+        return None, f"没有匹配「{handle}」的漏洞发现。已有: {titles}"
+    if len(matches) > 1:
+        titles = "; ".join(str(getattr(f, "title", "")) for f in matches)
+        return None, f"「{handle}」匹配到多个漏洞发现，请用更精确的标题或 finding_id: {titles}"
+    return matches[0], ""
+
+
+def execute_traffic_bind_tool(agent: AgentContext, args: dict[str, Any]) -> str:
+    """Bind captured requests to a finding as durable reproduction evidence."""
+    finding, message = resolve_finding_for_binding(agent, str(args.get("finding", "")))
+    if finding is None:
+        return f"[traffic] {message}"
+    return traffic_bind_evidence_text(
+        finding,
+        traffic_store=resolve_traffic_store(agent),
+        evidence_store=resolve_evidence_store(agent),
+        specs=args.get("evidence"),
+    )
+
 
 
 def enforce_traffic_repeat_constraints(
@@ -1599,6 +1683,11 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             args,
             proxy=resolve_egress_proxy(_runtime_config(agent)),
         )
+
+    if tool_name in TRAFFIC_BIND_TOOL_NAMES:
+        # Binding needs the target finding and the pinned-evidence store, not just
+        # the capture log, so it routes through its own agent-aware handler.
+        return await asyncio.to_thread(execute_traffic_bind_tool, agent, args)
 
     if tool_name in {"evidence_list", "evidence_view", "evidence_search"}:
         return execute_evidence_tool(agent, tool_name, args)

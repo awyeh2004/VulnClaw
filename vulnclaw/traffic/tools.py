@@ -10,12 +10,25 @@ from __future__ import annotations
 
 from typing import Any
 
+from vulnclaw.config.domain_models import EVIDENCE_ROLES
+from vulnclaw.traffic.binding import (
+    EvidenceBindError,
+    bind_finding_evidence,
+    parse_binding_specs,
+)
+from vulnclaw.traffic.evidence import EvidenceError
 from vulnclaw.traffic.replay import ReplayError, replay_request
 from vulnclaw.traffic.store import TrafficStore
 
 TRAFFIC_TOOL_NAMES = frozenset(
     {"traffic_list", "traffic_view", "traffic_repeat", "traffic_sitemap"}
 )
+
+#: Binding is deliberately NOT in TRAFFIC_TOOL_NAMES: that set is dispatched with
+#: the traffic store alone, while binding also needs the target finding and the
+#: pinned-evidence store, so it has its own agent-aware handler. Its schema is
+#: still returned by :func:`traffic_tool_schemas` so the model can see it.
+TRAFFIC_BIND_TOOL_NAMES = frozenset({"traffic_bind_evidence"})
 
 _MAX_BLOB_CHARS = 4000
 
@@ -97,6 +110,51 @@ def traffic_tool_schemas() -> list[dict[str, Any]]:
                     "用于快速了解目标攻击面与已覆盖的端点。"
                 ),
                 "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "traffic_bind_evidence",
+                "description": (
+                    "把已抓取的请求绑定为某个漏洞发现的复现证据（http_capture）。"
+                    "绑定后会生成独立于抓包日志的不可变快照，因此后续清理流量不会丢失证据，"
+                    "报告会按绑定顺序内联原始请求/响应。绑定前必须先用 traffic_list / traffic_view "
+                    "确认 request_id 真实存在；任何一条无效则整次绑定被拒绝且发现保持不变。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "finding": {
+                            "type": "string",
+                            "description": (
+                                "目标漏洞：优先用 finding_id（精确），也可用标题片段匹配。"
+                            ),
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "description": (
+                                "按阅读顺序排列的证据列表。每项为 "
+                                '{"request_id": "...", "role": "baseline|proof|verification|supporting", "note": "..."}；'
+                                "role 缺省为 supporting。baseline = 正常对照请求，"
+                                "proof = 证明漏洞的请求，verification = 补充验证。"
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "request_id": {"type": "string"},
+                                    "role": {
+                                        "type": "string",
+                                        "enum": list(EVIDENCE_ROLES),
+                                    },
+                                    "note": {"type": "string"},
+                                },
+                                "required": ["request_id"],
+                            },
+                        },
+                    },
+                    "required": ["finding", "evidence"],
+                },
             },
         },
     ]
@@ -226,3 +284,44 @@ def dispatch_traffic_tool(
     if tool_name == "traffic_sitemap":
         return traffic_sitemap(store)
     return f"[traffic] 未知工具: {tool_name}"
+
+
+def traffic_bind_evidence_text(
+    finding: Any,
+    *,
+    traffic_store: TrafficStore,
+    evidence_store: Any,
+    specs: Any,
+) -> str:
+    """Bind captures to ``finding`` and return the agent-facing result string.
+
+    Errors are returned as text rather than raised: a rejected binding is a
+    normal, recoverable outcome the model must see and act on (it named a
+    ``request_id`` that does not exist, or a role that is not real), and turning
+    it into an exception would surface as a tool crash instead of a correction.
+    """
+    try:
+        parsed = parse_binding_specs(specs)
+        outcome = bind_finding_evidence(
+            finding,
+            traffic_store=traffic_store,
+            evidence_store=evidence_store,
+            specs=parsed,
+        )
+    except (EvidenceBindError, EvidenceError) as exc:
+        return f"[traffic] 证据绑定被拒绝，漏洞发现未改动：{exc}"
+
+    header = (
+        f"[traffic] 已为「{finding.title}」绑定复现证据"
+        f"（evidence_version=v{outcome.version}，共 {outcome.bindings} 条）"
+    )
+    lines = [header]
+    if outcome.added:
+        lines.append("  新增快照: " + ", ".join(outcome.added))
+    if outcome.duplicates:
+        lines.append("  已绑定过（未重复添加，原 role/说明保留）: " + ", ".join(outcome.duplicates))
+    lines.append(
+        "  快照独立于抓包日志，清理流量不会影响这些证据；报告会按此顺序内联原始报文。"
+    )
+    return "\n".join(lines)
+
