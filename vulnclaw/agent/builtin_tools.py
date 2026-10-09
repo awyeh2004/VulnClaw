@@ -50,6 +50,7 @@ from vulnclaw.utils.http_client import (
     async_http_client as make_async_http_client,
     bypass_proxy_for,
     http_client as make_http_client,
+    resolve_egress_proxy,
 )
 from vulnclaw.utils.subprocess_text import combine_output, run_text
 from vulnclaw.config.source_render import (
@@ -1591,7 +1592,13 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             if violation is not None:
                 return violation
         # traffic_repeat issues a real network request; keep the loop responsive.
-        return await asyncio.to_thread(dispatch_traffic_tool, store, tool_name, args)
+        return await asyncio.to_thread(
+            dispatch_traffic_tool,
+            store,
+            tool_name,
+            args,
+            proxy=resolve_egress_proxy(_runtime_config(agent)),
+        )
 
     if tool_name in {"evidence_list", "evidence_view", "evidence_search"}:
         return execute_evidence_tool(agent, tool_name, args)
@@ -3166,11 +3173,18 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
             else:
                 proxied.append(item)
 
+        # An operator-configured egress proxy (network.http_proxy /
+        # VULNCLAW_HTTP_PROXY) supersedes the split above: private targets are
+        # then exactly what the operator wants to reach *through* it. Only
+        # loopback targets stay direct (see http_client.egress_settings), so
+        # both groups are handed the same proxy.
+        egress_proxy = resolve_egress_proxy(_runtime_config(agent))
         for group in (proxied, direct):
             if not group:
                 continue
             with make_http_client(
                 targets=[str(item.get("url") or "") for item in group],
+                proxy=egress_proxy,
                 follow_redirects=follow_redirects,
                 timeout=timeout,
                 verify=verify_tls,
@@ -3969,6 +3983,7 @@ async def execute_brute_force(agent: AgentContext, args: dict[str, Any]) -> str:
 
     async with make_async_http_client(
         targets=url,
+        proxy=resolve_egress_proxy(_runtime_config(agent)),
         verify=False,
         timeout=30.0,
         follow_redirects=True,

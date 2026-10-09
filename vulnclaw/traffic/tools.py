@@ -163,9 +163,12 @@ def traffic_repeat(
     overrides: dict[str, Any] | None = None,
     *,
     transport: Any | None = None,
+    proxy: str | None = None,
 ) -> str:
     try:
-        record = replay_request(store, request_id, overrides, transport=transport)
+        record = replay_request(
+            store, request_id, overrides, transport=transport, proxy=proxy
+        )
     except ReplayError as exc:
         return f"[traffic] 重放失败: {exc}"
     except Exception as exc:  # network / transport errors
@@ -190,9 +193,18 @@ def traffic_sitemap(store: TrafficStore) -> str:
 
 
 def dispatch_traffic_tool(
-    store: TrafficStore, tool_name: str, args: dict[str, Any]
+    store: TrafficStore,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    proxy: str | None = None,
 ) -> str:
-    """Route a traffic tool call to its handler and return an agent string."""
+    """Route a traffic tool call to its handler and return an agent string.
+
+    ``proxy`` is the operator's explicit egress proxy (see
+    ``vulnclaw.utils.http_client``); only ``traffic_repeat`` opens a socket, so
+    it is the only branch that uses it.
+    """
     if tool_name == "traffic_list":
         status = args.get("status")
         return traffic_list(
@@ -210,7 +222,7 @@ def dispatch_traffic_tool(
         for key in ("method", "url", "headers", "body"):
             if key in args and args[key] is not None:
                 overrides[key] = args[key]
-        return traffic_repeat(store, str(args.get("request_id", "")), overrides)
+        return traffic_repeat(store, str(args.get("request_id", "")), overrides, proxy=proxy)
     if tool_name == "traffic_sitemap":
         return traffic_sitemap(store)
     return f"[traffic] 未知工具: {tool_name}"

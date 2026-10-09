@@ -58,6 +58,7 @@ def replay_request(
     *,
     transport: Any | None = None,
     timeout: float = 30.0,
+    proxy: str | None = None,
 ) -> TrafficRecord:
     """Re-issue ``request_id`` with ``overrides`` and record the new exchange."""
     original = store.load_request(request_id)
@@ -77,7 +78,9 @@ def replay_request(
     # The replay target is whatever URL the capture happened to record — very
     # often an internal host. Route it through the proxy-aware factory so a
     # running system proxy cannot silently turn a replay into "unreachable".
-    with make_http_client(targets=request.url, **client_kwargs) as client:
+    # ``proxy`` carries the operator's explicit egress proxy (a tunnel), which
+    # is honoured even for the internal hosts this tool exists to replay.
+    with make_http_client(targets=request.url, proxy=proxy, **client_kwargs) as client:
         http_response = client.request(
             request.method,
             request.url,

@@ -1590,7 +1590,7 @@ class MCPLifecycleManager(ProbeMixin):
         try:
             import httpx
 
-            from vulnclaw.utils.http_client import async_http_client
+            from vulnclaw.utils.http_client import async_http_client, resolve_egress_proxy
 
             request = self._prepare_fetch_request(args)
 
@@ -1602,10 +1602,19 @@ class MCPLifecycleManager(ProbeMixin):
             # The fetch target is model-chosen and routinely an internal host;
             # the proxy-aware factory keeps a running system proxy from turning
             # it into a silent "unreachable".
+            #
+            # An operator-configured egress proxy (network.http_proxy /
+            # VULNCLAW_HTTP_PROXY - e.g. `ssh -D 1080 jumpbox`) is the opposite
+            # case and *is* honoured for those internal hosts; loopback stays
+            # direct inside the factory. The TLS-retry client below needs the
+            # same proxy, otherwise the downgrade would silently leave the
+            # tunnel.
             fetch_targets = (request.get("kwargs") or {}).get("url")
+            fetch_proxy = resolve_egress_proxy(getattr(self, "config", None))
             try:
                 async with async_http_client(
                     targets=fetch_targets,
+                    proxy=fetch_proxy,
                     verify=request["verify_tls"],
                     timeout=request["timeout"],
                     follow_redirects=request["follow_redirects"],
@@ -1618,6 +1627,7 @@ class MCPLifecycleManager(ProbeMixin):
                     request = {**request, "verify_tls": False, "tls_retry": True}
                     async with async_http_client(
                         targets=fetch_targets,
+                        proxy=fetch_proxy,
                         verify=False,
                         timeout=request["timeout"],
                         follow_redirects=request["follow_redirects"],

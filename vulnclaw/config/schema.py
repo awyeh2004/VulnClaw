@@ -373,6 +373,21 @@ class ReconConfig(BaseModel):
     )
 
 
+class NetworkConfig(BaseModel):
+    """Network egress for the agent's *target-facing* HTTP tools."""
+
+    http_proxy: str = Field(
+        default="",
+        description=(
+            "Explicit proxy for target-facing HTTP (fetch / http_probe_batch / "
+            "login brute force / traffic replay). e.g. socks5://127.0.0.1:1080 "
+            "after `ssh -D 1080 jumpbox`, or http://host:port. Empty = off "
+            "(default: local/private targets go direct). Loopback targets stay "
+            "direct even when set. SOCKS needs the 'socks' extra."
+        ),
+    )
+
+
 class SafetyConfig(BaseModel):
     """Safety / sandbox configuration."""
 
@@ -1058,6 +1073,7 @@ class VulnClawConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     mcp: MCPServersConfig = Field(default_factory=MCPServersConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     recon: ReconConfig = Field(default_factory=ReconConfig)

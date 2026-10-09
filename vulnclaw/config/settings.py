@@ -396,6 +396,13 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
     if v := os.environ.get("VULNCLAW_LLM_CHATGPT_AUTO_PROXY"):
         config.llm.chatgpt_auto_proxy = v.lower() in ("1", "true", "yes", "on")
 
+    # ── Network ──────────────────────────────────────────────────────
+    # Read by vulnclaw.utils.http_client.resolve_egress_proxy() as the fallback
+    # for network.http_proxy. VULNCLAW_-prefixed so it cannot be confused with
+    # the system HTTP_PROXY that the HTTP factory deliberately bypasses.
+    if v := os.environ.get("VULNCLAW_HTTP_PROXY"):
+        config.network.http_proxy = v.strip()
+
     # ── Session ──────────────────────────────────────────────────────
     if v := os.environ.get("VULNCLAW_SESSION_OUTPUT_DIR"):
         config.session.output_dir = Path(v)

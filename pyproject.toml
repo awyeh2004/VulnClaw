@@ -73,6 +73,13 @@ traffic = [
     "mitmproxy>=10.0",
     "playwright>=1.40",
 ]
+socks = [
+    # Optional: route target-facing HTTP through a SOCKS proxy, e.g.
+    # `ssh -D 1080 jumpbox` + network.http_proxy=socks5://127.0.0.1:1080.
+    # Plain http:// proxies need nothing extra; without this, asking for a
+    # socks5:// proxy raises an actionable error instead of failing silently.
+    "socksio>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/Netw0rkNoob/VulnClaw"
