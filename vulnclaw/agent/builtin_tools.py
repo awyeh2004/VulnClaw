@@ -50,6 +50,7 @@ from vulnclaw.utils.http_client import (
     async_http_client as make_async_http_client,
     bypass_proxy_for,
     http_client as make_http_client,
+    is_local_target,
     resolve_egress_proxy,
 )
 from vulnclaw.utils.subprocess_text import combine_output, run_text
@@ -3209,6 +3210,48 @@ _HTTP_PROBE_SENSITIVE_HEADER_NAMES = {
 }
 
 
+def _group_http_probe_batch(
+    items: list[dict[str, Any]], egress_proxy: str
+) -> list[tuple[list[dict[str, Any]], str]]:
+    """Split a probe batch into ``(group, proxy)`` pairs -- one client per group.
+
+    ``targets=`` keeps the *system* proxy away from loopback/private hosts: httpx
+    defaults to ``trust_env=True`` and ignores the Windows ProxyOverride bypass
+    list, so a running proxy tool would send the batch from the wrong source
+    address (and internal hosts would read as unreachable). ``targets_need_direct()``
+    is an EVERY test, so a batch that mixes an internal host with a public one
+    cannot share one client -- the factory's documented remedy is one client per
+    group.
+
+    An operator-configured egress proxy (``network.http_proxy`` /
+    ``VULNCLAW_HTTP_PROXY``) supersedes that split, because private hosts are then
+    exactly what the tunnel exists to reach -- **but loopback keeps its own
+    proxy-less client**. Round-1 (2026-10-09) postmortem: loopback used to ride the
+    group that received the tunnel, and ``egress_settings`` only keeps an
+    *all-local* target set direct, so a batch mixing ``127.0.0.1`` with a target
+    silently aimed the local request at the far end of the tunnel -- while this
+    function's predecessor comment claimed the opposite.
+    """
+    local: list[dict[str, Any]] = []
+    direct: list[dict[str, Any]] = []
+    proxied: list[dict[str, Any]] = []
+    for item in items:
+        url = str(item.get("url") or "")
+        if is_local_target(url):
+            local.append(item)
+        elif bypass_proxy_for(url):
+            direct.append(item)
+        else:
+            proxied.append(item)
+
+    groups: list[tuple[list[dict[str, Any]], str]] = [
+        (local, ""),                 # this machine: never the tunnel
+        (direct, egress_proxy),      # internal/private: tunnel when one is configured
+        (proxied, egress_proxy),     # public: environment proxy, or the tunnel
+    ]
+    return [(group, proxy) for group, proxy in groups if group]
+
+
 async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) -> str:
     """Run HTTP probes for URL/param/header/body variants."""
 
@@ -3248,32 +3291,24 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
         # the environment proxy for every request, so a spec whose raw_url overrides
         # a public base_url with an internal host would still be proxied and then
         # reported unreachable. That is the failure this bypass exists to prevent,
-        # so build one client per group (the factory's documented remedy). A
-        # raw_url is not a rare shape: http_probe_batch is used for exactly this
-        # kind of host/path mixing.
-        proxied: list[dict[str, Any]] = []
-        direct: list[dict[str, Any]] = []
+        # so build one client per group. A raw_url is not a rare shape:
+        # http_probe_batch is used for exactly this kind of host/path mixing.
+        #
+        # The grouping itself lives in _group_http_probe_batch (loopback /
+        # internal / public -- one proxy per group); specs that failed preparation
+        # are answered below without a request.
+        request_items: list[dict[str, Any]] = []
         for item in prepared:
             if item.get("error"):
                 results.append(item)
-                continue
-            if bypass_proxy_for(str(item.get("url") or "")):
-                direct.append(item)
             else:
-                proxied.append(item)
+                request_items.append(item)
 
-        # An operator-configured egress proxy (network.http_proxy /
-        # VULNCLAW_HTTP_PROXY) supersedes the split above: private targets are
-        # then exactly what the operator wants to reach *through* it. Only
-        # loopback targets stay direct (see http_client.egress_settings), so
-        # both groups are handed the same proxy.
         egress_proxy = resolve_egress_proxy(_runtime_config(agent))
-        for group in (proxied, direct):
-            if not group:
-                continue
+        for group, group_proxy in _group_http_probe_batch(request_items, egress_proxy):
             with make_http_client(
                 targets=[str(item.get("url") or "") for item in group],
-                proxy=egress_proxy,
+                proxy=group_proxy,
                 follow_redirects=follow_redirects,
                 timeout=timeout,
                 verify=verify_tls,

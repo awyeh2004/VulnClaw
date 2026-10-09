@@ -1005,7 +1005,8 @@ class TestSolveScratchWorkdir:
         agent = self._agent(tmp_path, run_id='a<b>:c?d|e"f')
         d = builtin_tools._default_workdir(agent)
         assert d.parent == tmp_path.resolve()
-        assert not any(ch in d.name for ch in '<>:"/\|?*')
+        # raw string: "\|" is an invalid escape (SyntaxWarning today, error later)
+        assert not any(ch in d.name for ch in r'<>:"/\|?*')
 
     def test_unusable_root_falls_back_to_cwd(self, tmp_path):
         import os
@@ -1210,3 +1211,82 @@ class TestNmapThreadOffload:
         assert "constraint_violation" not in result
         assert worker_threads, "the nmap runner was never reached"
         assert worker_threads[0] != loop_thread, "nmap ran on the event loop thread"
+
+
+# ── http_probe_batch grouping: one client per group ─────────────────────────
+#
+# Round-1 (2026-10-09) postmortem. The batch is split because `targets=` is an
+# EVERY test inside http_client: a batch mixing an internal host with a public one
+# cannot share a client, or the internal host keeps the environment proxy and is
+# reported unreachable. An operator egress proxy (network.http_proxy /
+# VULNCLAW_HTTP_PROXY) supersedes that split -- but loopback must not ride it,
+# because through a SOCKS tunnel `127.0.0.1` is the *far end*. Loopback used to be
+# grouped with the tunneled requests, so a batch mixing `127.0.0.1` with a target
+# silently aimed the local request at the jumpbox's own localhost.
+
+
+def _probe_items(*urls):
+    return [{"url": url, "index": i} for i, url in enumerate(urls, start=1)]
+
+
+def _groups_as_urls(groups):
+    return [[item["url"] for item in group] for group, _ in groups]
+
+
+class TestHttpProbeBatchGrouping:
+    def test_loopback_is_peeled_off_when_a_tunnel_is_configured(self):
+        groups = builtin_tools._group_http_probe_batch(
+            _probe_items("http://127.0.0.1:8080/a", "http://10.20.0.1/b"),
+            "socks5://127.0.0.1:1080",
+        )
+
+        assert _groups_as_urls(groups) == [
+            ["http://127.0.0.1:8080/a"],
+            ["http://10.20.0.1/b"],
+        ]
+        assert [proxy for _, proxy in groups] == ["", "socks5://127.0.0.1:1080"]
+
+    def test_a_loopback_only_batch_stays_direct(self):
+        groups = builtin_tools._group_http_probe_batch(
+            _probe_items("http://127.0.0.1:9000/", "http://localhost:9001/"),
+            "socks5://127.0.0.1:1080",
+        )
+
+        assert len(groups) == 1
+        assert groups[0][1] == "", "the module promises loopback is never tunneled"
+
+    def test_public_targets_share_one_tunneled_group(self):
+        groups = builtin_tools._group_http_probe_batch(
+            _probe_items("https://a.test/x", "https://b.test/y"), "http://127.0.0.1:8888"
+        )
+
+        assert _groups_as_urls(groups) == [["https://a.test/x", "https://b.test/y"]]
+        assert groups[0][1] == "http://127.0.0.1:8888"
+
+    def test_without_a_tunnel_the_original_bypass_split_is_kept(self):
+        """No egress proxy configured -> behaviour must be exactly as before."""
+        groups = builtin_tools._group_http_probe_batch(
+            _probe_items(
+                "http://127.0.0.1:8080/a",
+                "http://10.20.0.1/b",
+                "https://example.com/c",
+            ),
+            "",
+        )
+
+        assert _groups_as_urls(groups) == [
+            ["http://127.0.0.1:8080/a"],
+            ["http://10.20.0.1/b"],
+            ["https://example.com/c"],
+        ]
+        assert all(proxy == "" for _, proxy in groups)
+
+    def test_every_group_keeps_a_proxy_decision(self):
+        """The batch runner hands each group its own proxy string -- never None."""
+        groups = builtin_tools._group_http_probe_batch(
+            _probe_items("http://127.0.0.1:1/", "http://10.0.0.5/", "https://x.test/"),
+            "socks5://127.0.0.1:1080",
+        )
+
+        assert all(isinstance(proxy, str) for _, proxy in groups)
+        assert sorted(len(group) for group, _ in groups) == [1, 1, 1]

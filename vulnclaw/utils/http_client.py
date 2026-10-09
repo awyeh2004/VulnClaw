@@ -97,6 +97,7 @@ __all__ = [
     "egress_settings",
     "http_client",
     "async_http_client",
+    "is_local_target",
     "normalise_proxy_url",
     "resolve_egress_proxy",
     "targets_need_direct",
@@ -199,6 +200,18 @@ def _host_is_local_address(host: str) -> bool:
     return bool(addr.is_loopback or addr.is_unspecified)
 
 
+def is_local_target(target: str) -> bool:
+    """True when ``target`` addresses this machine itself (loopback/unspecified).
+
+    Public because a call site that builds **one client per group** has to peel
+    loopback out itself: :func:`egress_settings` keeps an *all-local* target set
+    direct, so a batch that mixes ``127.0.0.1`` with a target still hands the whole
+    set to the tunnel -- and through a tunnel the far end reads ``127.0.0.1`` as
+    itself.
+    """
+    return _host_is_local_address(_host_of(str(target or "")))
+
+
 def _targets_are_local_only(targets: Iterable[str] | str | None) -> bool:
     """True when a non-empty target set addresses only this machine."""
     if targets is None:
@@ -206,7 +219,7 @@ def _targets_are_local_only(targets: Iterable[str] | str | None) -> bool:
     items = [targets] if isinstance(targets, str) else [t for t in targets if t]
     if not items:
         return False
-    return all(_host_is_local_address(_host_of(t)) for t in items)
+    return all(is_local_target(t) for t in items)
 
 
 def _check_proxy_url(url: str) -> None:
