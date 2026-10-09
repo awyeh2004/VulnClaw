@@ -499,6 +499,25 @@ class TestWebServices:
         assert result[1]["name"] == "old.md"
         assert result[1]["kind"] == "markdown"
 
+    def test_web_report_default_name_is_one_component(self, monkeypatch, tmp_path):
+        """Round-1 (2026-10-09): the web path had the lossy half of the same bug.
+
+        Its regex was safe (ASCII-only, so no separator could survive) but a
+        Chinese target collapsed to underscores; and it fed the same directory the
+        report generator wrote a nested tree into. Both now use one helper.
+        """
+        import vulnclaw.web.services.report_service as report_service
+
+        monkeypatch.setattr(report_service, "SESSIONS_DIR", tmp_path)
+
+        path = report_service._default_report_path(r"C:\Users\伟\d\a.zip", "markdown")
+
+        assert path.parent == tmp_path
+        assert "\\" not in path.name and "/" not in path.name
+        assert "a.zip" in path.name
+        chinese = report_service._default_report_path("/证据", "html")
+        assert "证据" in chinese.name and chinese.name.endswith(".html")
+
     @pytest.mark.asyncio
     async def test_web_task_manager_event_flow(self):
         from vulnclaw.web.schemas import TaskCreateRequest

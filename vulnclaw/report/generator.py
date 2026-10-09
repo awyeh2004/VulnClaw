@@ -25,6 +25,7 @@ from vulnclaw.i18n.phases import localized_phase_name, localized_report_phase_he
 from vulnclaw.report.filter import ReportContentFilter, deduplicate_report_findings
 from vulnclaw.report.findings_output import write_findings_artifacts
 from vulnclaw.report.poc_builder import generate_pocs
+from vulnclaw.utils.fs_names import safe_name_component
 
 
 def _rl(zh: str, en: str) -> str:
@@ -457,7 +458,7 @@ def generate_report(
 
     if output_path is None:
 
-        safe_target = (session.target or "unknown").replace("/", "_").replace(":", "_")
+        safe_target = safe_name_component(session.target)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = str(SESSIONS_DIR / f"report_{timestamp}_{safe_target}.md")
 
@@ -1051,7 +1052,7 @@ def generate_persistent_cycle_report(
 
     if output_path is None:
 
-        safe_target = (session.target or "unknown").replace("/", "_").replace(":", "_")
+        safe_target = safe_name_component(session.target)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = str(
             SESSIONS_DIR / f"persistent_cycle{cycle_num:03d}_{timestamp}_{safe_target}.md"

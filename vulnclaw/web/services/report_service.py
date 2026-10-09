@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from vulnclaw.config.settings import SESSIONS_DIR, ensure_dirs, load_config
 from vulnclaw.i18n import init_i18n
 from vulnclaw.report.generator import generate_report_from_target_state
 from vulnclaw.target_state.store import load_target_state
+from vulnclaw.utils.fs_names import safe_name_component
 from vulnclaw.web.schemas import ReportContentView
 
 
@@ -25,8 +25,11 @@ def _report_item(path: Path, kind: str) -> dict[str, str | int]:
 
 
 def _default_report_path(target: str, report_format: str) -> Path:
-    safe_target = re.sub(r"[^A-Za-z0-9_.-]+", "_", target or "unknown").strip("._")
-    safe_target = safe_target[:80] or "unknown"
+    # Shared rule (vulnclaw.utils.fs_names): it used to be an ASCII-only regex
+    # here, which is safe on Windows but degrades a Chinese target to a row of
+    # underscores; the report generator's copy dropped the backslash and split
+    # Windows-path targets into a directory tree. One helper now.
+    safe_target = safe_name_component(target)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = ".html" if report_format == "html" else ".md"
     return SESSIONS_DIR / f"report_{timestamp}_{safe_target}{suffix}"

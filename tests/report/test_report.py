@@ -1102,3 +1102,26 @@ def test_report_body_omits_answer_cards(tmp_path):
     for card in cards:
         assert card.title not in report_text
         assert card.description not in report_text
+
+
+def test_default_report_name_survives_a_path_shaped_target(tmp_path, monkeypatch):
+    """Round-1 (2026-10-09): a Windows-path target must not create a subdirectory.
+
+    With the old ``.replace("/", "_").replace(":", "_")`` chain a backslash
+    survived, so on Windows ``Path`` split the default name into
+    ``SESSIONS_DIR\\report_<ts>_C_\\Users\\...`` and the report (plus its ``pocs/``)
+    landed in a freshly created tree that ``report_service.list_reports()`` never
+    lists. Measured on this machine: 7 of 222 distinct targets are Windows paths.
+    """
+    import vulnclaw.report.generator as generator
+    from vulnclaw.agent.context import SessionState
+    from vulnclaw.report.generator import generate_report
+
+    monkeypatch.setattr(generator, "SESSIONS_DIR", tmp_path)
+    session = SessionState(target=r"C:\Users\伟\Downloads\a9c4fb8a551948e6981cbcfe84b17ed0.zip")
+
+    report_path = Path(generate_report(session))
+
+    assert report_path.parent == tmp_path, "the report must land in SESSIONS_DIR itself"
+    assert report_path.name.startswith("report_")
+    assert "/" not in report_path.name and "\\" not in report_path.name
