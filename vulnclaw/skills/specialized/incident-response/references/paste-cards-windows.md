@@ -96,7 +96,8 @@ powershell -c "gci C:\Users,C:\ProgramData -Recurse -File -EA 0 | ? Length -lt 5
 dir /a /s /o:d C:\ | findstr /I "flag secret key backup"
 dir /s /b "%USERPROFILE%\Desktop" "%USERPROFILE%\Documents"
 dir /a C:\ /o:d
-powershell -c "gci C:\ -Recurse -File -EA 0 -Include *.txt,*.log,*.bak | ? LastWriteTime -gt (Get-Date).AddDays(-3) | select -F 30 FullName"
+powershell -c "gci $env:TEMP -R -File -EA 0|? LastWriteTime -gt (Get-Date).AddDays(-3)|% FullName"
+powershell -c "gci C:\inetpub -R -File -EA 0|? LastWriteTime -gt (Get-Date).AddDays(-3)|% FullName"
 ```
 
 > 编码变形（`flag{` 被 base64/hex/大小写打散）见 `references/flag-landing-spots.md`；
