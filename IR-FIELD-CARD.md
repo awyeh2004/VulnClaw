@@ -135,6 +135,7 @@ VULNCLAW_HTTP_PROXY=socks5://127.0.0.1:1080 vulnclaw solve --only-host 10.20.0.0
 ## 5. 收工（15:00 起）
 
 - [ ] 每题结果落台账：**flag 原文**、出处（命令/路径）、是否已提交、未验收的强候选写清楚
+- [ ] **出 WP**：IR 题 **`vulnclaw wp <session.json> --pdf`**（答案卡=结论+证据原文自动填入）；渗透题 **`vulnclaw report <session.json> --pdf`**
 - [ ] `log.txt` + Solve Report 保全（赛后可能抽查 System 日志与答题思路 —— 这两样正好自证）
 - [ ] **逐题确认 flag 都已提交**（链式解锁：漏交一个可能少解锁一整题）
 - [ ] 顺手记下"强候选未验收/大写未试"的题，复盘要用

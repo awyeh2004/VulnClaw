@@ -3,6 +3,15 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — CLI 报告找回本 run 证据（run_id 反查 + --run-dir）；新增 <code>vulnclaw wp</code> 出 IR 交付物</summary>
+
+- **修：`vulnclaw report <session.json>` 拿不到本 run 的取证仓库，还把"证据就在那儿"误报成"证据没了"** — 2026-10-09 彩排实测（受控实验，同一个 run 各渲一次）：**A 路** `report(session)`（= CLI；`generate_report_from_file()` **不传 `run_dir`**）正文**不内联**、两条引用被写成 **"⚠ 已绑定但正文不可读取（快照已不在索引中）"**、且不产出 `evidence_bundles`；**B 路** `report(session, run_dir=…)`（agent/orchestrator 路）正文 + 响应体正常内联、bundles 正常生成。**根因比表面深一层**：`vulnclaw solve` 从前**根本没把 run 写进会话**（`session.run_id` 为空 —— 只有 subagent 那条路会生成 `run_id`），"从会话找回 run"这条链在源头就是断的。修法两层：① `orchestrator` 在注入 `agent.run_dir` 的同一处把 `run.json` 的 `run_id` 写进 `session_state.run_id`（已有值不覆盖，兼容 resume）；② 新增 `run_context.find_run_dir_by_run_id()`（best-effort：无 id / 无 root / 无匹配一律 `None`，不抛 —— 调用方是拿它**改善默认值**，不是校验 run）+ `generate_report_from_file(session_path, run_dir=None)` 先反查再渲染 + `vulnclaw report` 新增 `--run-dir`（显式优先，不被反查推翻）。**实测**：新 run 的会话 `session.run_id` == 该 run 的 `run.json.run_id`，反查命中 run 目录；单测 4 例（正文内联 / 显式优先 / 反查 best-effort / 无 run 仍能出报告且保留"不可读取"提示）。⚠️ **渗透题同样中招**，不只 IR —— §9.2 让用 `report <session.json> --pdf` 交 WP，交出去的报告会自述证据不可读。
+- **新增 `vulnclaw wp <session.json> [--out] [--template] [--pdf]`：把 IR 答案卡渲成交付物** — `blackboard_record_answer` 把每条答案落成 `vuln_type="ir-answer"` 的 Info/always-pending 卡片，而报告 / SARIF / verify-pending / `--fail-on` 消费者**按设计必须跳过**它们（答案卡不是漏洞；不跳则"漏洞名称"这类提问会被当成已验证漏洞印进报告，round-10 finding #1）。跳过对"漏洞报告"是对的、对"交付物"是致命的：彩排时 WP 只能人肉从会话/黑板抄 6 条结论 + 证据（且只有 15:00–15:20 那 20 分钟）。新命令把答案卡（问题 / 答案 / **证据原文**）+ 人工待补清单渲成 WP，模板骨架按需附在文末（`--template`；默认找 CWD 或仓库根的 `IR-WP-TEMPLATE.md`，装了 wheel 找不到就不附 —— 不报错）。**报告本身照旧跳过答案卡**，并有回归用例钉住这个设计决定（`tests/report/test_ir_wp.py::test_the_report_itself_still_omits_answer_cards`）。**实测**：真实 drill 会话 → 218 行 / 12,153 字节，6 个答案（`203.0.113.47`、`09:22:31`、`a7f3c1`、`sysupdate`、`demo-persistence` …）与证据原文全部在内；`--pdf` 同时出 PDF。
+- **文档** — `IR-RUNBOOK.md` §八 补记彩排 A 半结果（105 秒 / 5-6 分 / 用时分解）并附"同日已修"表，§9.2 的 15:00–15:20 出 WP 步骤改为 `vulnclaw wp` 与 `report --run-dir`；`IR-FIELD-CARD.md` 收工清单同步这条命令。
+
+</details>
+
+<details open>
 <summary><strong>Unreleased</strong> — 赛前分工按 4 人定稿（runbook §9.3）+ 作业卡同步</summary>
 
 - **文档** — `IR-RUNBOOK.md` §九 按**实际队制 4 人**定稿（该节原规则：人数一确定就把另外两档删掉，故删除"①单人 / ②双人"）：**A 档（默认）= 主链 3 人（主攻 / 记录+计时+提交核对 / 素材+WP）+ 复核线 1 人**；**B 档（备选）= 双线 2+2**（前提是现场确认"4 个账号能各做不同的题"，否则别用）。顺带修掉草案里一处**自相矛盾**：原"**统一由他人提交** flag"与同节"**一人一个账号**"冲突 —— 别人的账号里交不了你的 flag，故改为**发现者本人在自己账号上提交 + 记录员只做提交核对**（台账登记 + 锚点逐题点名），只有赛方允许共用单一账号时才回到"一人统一提交"。分诊改为 4 人并行（仍守"开赛 10 分钟内不许开打"）。新增**现场待确认第 8 条**（4 个账号的题集 / 能否共用单账号），§八 P1-8 标记关闭。`IR-FIELD-CARD.md` 同步：提交纪律加"4 人版"两条、现场待验证表加第 6 行（现场只看那一页）。

@@ -155,6 +155,40 @@ def resolve_runs_root(runs_dir: str | Path | None = None, config: Any | None = N
     return CONFIG_DIR / "runs"
 
 
+def find_run_dir_by_run_id(
+    run_id: str, *, runs_dir: str | Path | None = None, config: Any | None = None
+) -> Path | None:
+    """The run directory whose ``run.json`` records ``run_id``, if one exists.
+
+    A session JSON carries ``run_id`` but not the run's path, so a report built
+    from a saved session could not find the run's evidence tree: the evidence
+    root fell back to ``output.parent`` (the sessions directory), resolved to no
+    store at all, and every bound capture rendered as "unreadable" while the
+    bytes sat in the run. This is the missing link from a session back to its run.
+
+    Best-effort by design: a missing root, an unreadable manifest or an unknown
+    id all return ``None`` rather than raising, because callers use this to
+    *improve* a default (the report's evidence root) and not to validate a run.
+    Silence is right here: the caller's fallback already handles "no run".
+    """
+    if not run_id:
+        return None
+    root = resolve_runs_root(runs_dir, config)
+    if not root.is_dir():
+        return None
+    for candidate in sorted(root.iterdir()):
+        manifest_path = candidate / "run.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict) and str(manifest.get("run_id") or "") == str(run_id):
+            return candidate
+    return None
+
+
 def create_run_context(
     *,
     command: str,

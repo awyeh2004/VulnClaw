@@ -1278,6 +1278,15 @@ python .ir-tools\verify-ir.py
 
 **小摩擦（不扣分，但现场会重复出现）**：`load_skill_reference("incident-response/ir-competition-strategy")` 文档不存在 ⇒ 1 次 degraded；两条命令被 Windows shell 包装吃掉（`find -exec` → `CommandNotFoundException`、`Out-File` → `DirectoryNotFound`）；一条 `awk` 语法错。框架口径 0 次失败调用，但真实命令里有 3 处语法级失败。
 
+**✅ 同日已修（2026-10-09）**
+
+| 问题 | 修法 | 验证 |
+|---|---|---|
+| ② CLI 报告拿不到 run 证据 | `generate_report_from_file()` 先按 `session.run_id` 反查 run 目录；`vulnclaw report` 加 `--run-dir`（显式优先）。**根因比表面更深**：`vulnclaw solve` 从前根本没把 run 写进会话（`session.run_id` 为空，只有 subagent 那条路会生成）→ 一并修在 `orchestrator` 注入 `agent.run_dir` 的地方 | `tests/traffic/test_evidence_report.py` 新增 4 例（正文内联 / 显式优先 / 反查 best-effort / 无 run 不崩）；**真实 run 复核**：新会话 `session.run_id` == `run.json.run_id`，`find_run_dir_by_run_id` 反查命中 run 目录 |
+| ① WP 要人肉抄答案卡 | 新增 **`vulnclaw wp <session.json> [--out] [--template] [--pdf]`**：把答案卡（问题 / 答案 / **证据原文**）+ 人工待补清单渲成 WP，模板骨架按需附在文末。报告本身**照旧跳过答案卡**（那是设计，已有回归用例钉住不许改） | **真实 drill 会话实测**：218 行 / 12,153 字节，6 个答案（`203.0.113.47`、`09:22:31`、`a7f3c1`、`sysupdate`、`demo-persistence` …）与证据原文全部在内；`--pdf` 同时出 PDF |
+
+⇒ 15:00–15:20 那段从"人肉抄 6 条结论 + 证据"变成**一条命令**。
+
 ---
 
 ## 九、时间盒与角色分工（**V2 · 4 人定稿**，2026-10-09）
@@ -1303,7 +1312,7 @@ python .ir-tools\verify-ir.py
 |---|---|---|
 | 12:20–12:35 | **分诊**：数题 / 分值 / 解锁顺序；判每题是"网页终端手打"还是"agent 打" | 同样 15 分钟不许开打 |
 | 12:35–15:00 | **主攻**：按 `flag-landing-spots.md` 的**五步**走（内容搜 → 时间圈定 → 进程/环境 → 服务侧 → 变形解码）；优先 `remote_collect` 一键固化现场 | 每题 **30 分钟硬盒**；到点写 3 行状态跳走。**不要一进题就全盘搜索**（实测 271 秒起） |
-| 15:00–15:20 | **回收 + 出 WP**：**IR 题用 `IR-WP-TEMPLATE.md` 骨架**（`vulnclaw report` 生成的只有渗透类报告，不含 IR 结构）；渗透题用 `vulnclaw report <session.json> --pdf`。把截图/命令输出补进报告 | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
+| 15:00–15:20 | **回收 + 出 WP**：IR 题用 **`vulnclaw wp <session.json> --pdf`**（答案卡 = 结论 + 证据原文**自动填入**，模板骨架附在文末，人只需补时间线/影响/建议）；渗透题用 **`vulnclaw report <session.json> --pdf`**（会按 `run_id` 自动找回本 run 证据；拿不准就加 `--run-dir`）。把截图/命令输出补进报告 | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
 | 15:20–15:30 | 最终提交核对（**链式：逐题确认都交了**）+ 交付物落盘 | 漏交一个可能少解锁一整题 | 
 
 ### 9.3 角色分工（**4 人定稿** · 单人 / 双人两档已按原规则删除）

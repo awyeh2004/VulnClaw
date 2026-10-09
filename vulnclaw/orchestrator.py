@@ -157,6 +157,15 @@ async def run_agent_task(
         # reader resolves the same place (builtin_tools writers / report
         # generator readers both key off agent.run_dir).
         agent.run_dir = str(run_context.run_dir)
+        # Stamp the run identity onto the session as well. `run_dir` lives only in
+        # this process; the session file outlives it, and
+        # `vulnclaw report <session.json>` has nothing but the session to go on --
+        # without the run id it resolves no evidence store and renders every bound
+        # capture as "unreadable" while the bytes are still sitting in the run.
+        session_state = getattr(agent, "session_state", None)
+        run_id = str(run_context.manifest.get("run_id") or "")
+        if session_state is not None and run_id and not getattr(session_state, "run_id", ""):
+            session_state.run_id = run_id
 
     checkpoint = (
         _install_checkpoint_hook(agent, command, run_context, targets)

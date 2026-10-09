@@ -552,10 +552,22 @@ def generate_report(
     return output
 
 
-def generate_report_from_file(session_path: str) -> Path:
-    """Generate a report from a saved session JSON file."""
+def generate_report_from_file(session_path: str, run_dir: str | Path | None = None) -> Path:
+    """Generate a report from a saved session JSON file.
+
+    ``run_dir`` defaults to the run this session belongs to, resolved from the
+    session's ``run_id``. That lookup is what lets a report rendered from a
+    session file (``vulnclaw report <session.json>``) read the run's evidence:
+    without it the evidence root falls back to ``output.parent`` -- the sessions
+    directory -- and every bound capture renders as "bound but unreadable" while
+    the bytes are still sitting in the run.
+    """
     session = SessionState.load(Path(session_path))
-    return generate_report(session)
+    if run_dir is None:
+        from vulnclaw.run_context import find_run_dir_by_run_id
+
+        run_dir = find_run_dir_by_run_id(str(getattr(session, "run_id", "") or ""))
+    return generate_report(session, run_dir=run_dir)
 
 
 def generate_report_from_target_state(

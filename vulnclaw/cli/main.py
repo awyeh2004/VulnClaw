@@ -3480,6 +3480,14 @@ def report(
     target_mode: bool = typer.Option(
         False, "--target", help="Interpret argument as target and generate report from target state"
     ),
+    run_dir: Optional[str] = typer.Option(
+        None,
+        "--run-dir",
+        help=(
+            "Run directory holding this session's evidence "
+            "(default: resolved from the session's run_id)"
+        ),
+    ),
     pdf: bool = typer.Option(
         False, "--pdf", help="Also export the report to PDF (requires the vulnclaw[pdf] extra)"
     ),
@@ -3503,11 +3511,11 @@ def report(
         if not state:
             err_console.print(f"[!] Target state not found: {session}")
             raise typer.Exit(1)
-        report_path = generate_report_from_target_state(state)
+        report_path = generate_report_from_target_state(state, run_dir=run_dir)
     else:
         from vulnclaw.report.generator import generate_report_from_file
 
-        report_path = generate_report_from_file(session)
+        report_path = generate_report_from_file(session, run_dir=run_dir)
     console.print(f"[+] Report generated: {report_path}")
 
     if pdf:
@@ -3523,6 +3531,66 @@ def report(
             err_console.print(f"[!] {exc}")
             raise typer.Exit(1) from exc
         console.print(f"[+] PDF exported: {out}")
+
+
+@app.command()
+def wp(
+    session: str = typer.Argument(..., help="Path to session JSON file"),
+    out: str = typer.Option(
+        "", "--out", help="Output path (default: <sessions>/WP-<target>.md)"
+    ),
+    template: str = typer.Option(
+        "", "--template", help="WP skeleton to append (default: IR-WP-TEMPLATE.md when visible)"
+    ),
+    pdf: bool = typer.Option(False, "--pdf", help="Also export the WP to PDF"),
+    pdf_out: str = typer.Option("", "--pdf-out", help="PDF output path"),
+) -> None:
+    """Render an IR deliverable (WP) from a session's answer cards.
+
+    ``vulnclaw report`` renders zero findings for an IR engagement on purpose --
+    answer cards are Info/pending cards that the report/SARIF consumers must skip
+    (an answer card is not a vulnerability). That left the WP to be hand-assembled
+    inside the 15:00-15:20 write-up window. This prints the recorded answers with
+    their verbatim evidence so the operator only writes the narrative.
+    """
+    from pathlib import Path
+
+    from vulnclaw.agent.context import SessionState
+    from vulnclaw.config.settings import SESSIONS_DIR
+    from vulnclaw.report.ir_wp import build_ir_wp, default_template_path
+
+    session_path = Path(session)
+    if not session_path.is_file():
+        err_console.print(f"[!] Session file not found: {session}")
+        raise typer.Exit(1)
+    state = SessionState.load(session_path)
+
+    template_text = None
+    chosen = Path(template) if template else default_template_path()
+    if chosen is not None:
+        template_text = Path(chosen).read_text(encoding="utf-8")
+
+    document = build_ir_wp(state, template_text=template_text)
+
+    if out:
+        wp_path = Path(out)
+    else:
+        safe_target = (state.target or "unknown").replace("/", "_").replace(":", "_")
+        wp_path = SESSIONS_DIR / f"WP-{safe_target}.md"
+    wp_path.parent.mkdir(parents=True, exist_ok=True)
+    wp_path.write_text(document, encoding="utf-8")
+    console.print(f"[+] WP generated: {wp_path}")
+
+    if pdf:
+        from vulnclaw.report.pdf_exporter import export_pdf
+
+        pdf_path = Path(pdf_out) if pdf_out else wp_path.with_suffix(".pdf")
+        try:
+            export_pdf(document, pdf_path, title="IR WP")
+        except RuntimeError as exc:
+            err_console.print(f"[!] {exc}")
+            raise typer.Exit(1) from exc
+        console.print(f"[+] PDF exported: {pdf_path}")
 
 
 def _print_cli_manual(topic: Optional[str], output_format: str) -> None:

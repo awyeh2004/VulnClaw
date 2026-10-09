@@ -540,3 +540,135 @@ def test_bundles_are_not_rewritten_once_complete(tmp_path):
     _run_and_report(tmp_path)
 
     assert marker.stat().st_mtime_ns == before
+
+
+# ── a session file finds its run's evidence (rehearsal finding, 2026-10-09) ──
+
+
+def _run_manifest(tmp_path, run_name: str = "run-1", run_id: str = "rid-1"):
+    """A run tree whose manifest maps run_id -> this directory."""
+    import json
+
+    run_dir = tmp_path / "runs" / run_name
+    (run_dir / "evidence").mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": run_id, "run_name": run_name}), encoding="utf-8"
+    )
+    return run_dir
+
+
+def _bound_session(run_dir, tmp_path, *, run_id: str = "rid-1"):
+    """Bind + verify a finding into ``run_dir``, then save the session to disk."""
+    traffic = TrafficStore(run_dir / "evidence" / "traffic")
+    evidence = EvidenceStore(run_dir / "evidence")
+    baseline = _capture(traffic, "http://app.test/user?id=1")
+    proof = _capture(traffic, "http://app.test/user?id=1'")
+
+    finding = VulnerabilityFinding(
+        title="SQL Injection in /user",
+        severity="High",
+        vuln_type="SQLi",
+        evidence="id parameter is injectable",
+    )
+    bind_finding_evidence(
+        finding,
+        traffic_store=traffic,
+        evidence_store=evidence,
+        specs=[
+            {"request_id": baseline, "role": "baseline"},
+            {"request_id": proof, "role": "proof"},
+        ],
+    )
+    finding.mark_verified()
+
+    session = SessionState(target="http://app.test")
+    session.run_id = run_id
+    session.add_finding(finding)
+    return session.save(tmp_path / "sessions" / "saved.json")
+
+
+def test_report_from_file_reads_the_runs_evidence_not_the_sessions_dir(tmp_path, monkeypatch):
+    """``vulnclaw report <session.json>`` must inline the run's captures.
+
+    The evidence root used to fall back to ``output.parent`` -- the sessions
+    directory -- so the delivery command emitted a report that declared its own
+    bound evidence unreadable while the bytes sat in the run tree. The only link
+    from a session file back to the run is the session's ``run_id``.
+    """
+    from vulnclaw.report.generator import generate_report_from_file
+
+    run_dir = _run_manifest(tmp_path)
+    session_path = _bound_session(run_dir, tmp_path)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    # The report must land outside the run tree, so only the run_id lookup can help.
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text = generate_report_from_file(str(session_path)).read_text(encoding="utf-8")
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "GET /user?id=1' HTTP/1.1" in text
+    assert "SQL syntax error near" in text
+    assert "正文不可读取" not in text
+    assert "完整性校验失败" not in text
+
+
+def test_report_from_file_honours_an_explicit_run_dir(tmp_path, monkeypatch):
+    """An operator who names the run must not be overruled by the lookup."""
+    from vulnclaw.report.generator import generate_report_from_file
+
+    correct = _run_manifest(tmp_path, run_name="right", run_id="rid-1")
+    _run_manifest(tmp_path, run_name="decoy", run_id="rid-other")
+    session_path = _bound_session(correct, tmp_path)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text = generate_report_from_file(str(session_path), run_dir=str(correct)).read_text(
+            encoding="utf-8"
+        )
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "GET /user?id=1' HTTP/1.1" in text
+    assert "正文不可读取" not in text
+
+
+def test_find_run_dir_by_run_id_is_silent_when_it_cannot_match(tmp_path, monkeypatch):
+    """Best-effort lookup: no id, no root, no match -- all None, never a raise."""
+    from vulnclaw.run_context import find_run_dir_by_run_id
+
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "absent"))
+    assert find_run_dir_by_run_id("") is None
+    assert find_run_dir_by_run_id("rid-1") is None
+
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    run_dir = _run_manifest(tmp_path)
+    assert find_run_dir_by_run_id("rid-1") == run_dir
+    assert find_run_dir_by_run_id("rid-nope") is None
+
+
+def test_a_session_without_a_run_still_renders_a_report(tmp_path, monkeypatch):
+    """No run to find is not an error -- the report is still produced."""
+    from vulnclaw.report.generator import generate_report_from_file
+
+    run_dir = _run_manifest(tmp_path)
+    session_path = _bound_session(run_dir, tmp_path, run_id="")
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "absent"))
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text = generate_report_from_file(str(session_path)).read_text(encoding="utf-8")
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "SQL Injection in /user" in text
+    # unresolvable evidence is still reported rather than dropped silently
+    assert "正文不可读取" in text
