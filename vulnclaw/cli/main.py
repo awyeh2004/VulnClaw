@@ -273,6 +273,25 @@ def _emit_competition_writeup(agent: Any, config: Any, writeup_dir: Path) -> Opt
 # 鈹€鈹€ REPL 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
+def _repl_last_run_finished(agent: Any) -> bool:
+    """Whether the agent's last autonomous run reached its own end.
+
+    Distinguishes "there is nothing to replay" from "the launch text is still
+    valid to retry". ``_repl_has_in_progress_run`` answers the sibling question
+    (is there a run worth resuming); this one answers "did the previous run
+    already finish", which is the guard the empty-Enter replay path needs.
+
+    Conservative by design: an agent whose state cannot be read reports NOT
+    finished, so the worst case is the old behaviour (a retry) rather than
+    silently dropping a legitimate retry.
+    """
+    try:
+        state = agent.context.state.agent_state
+        return bool(getattr(state, "completed", False))
+    except Exception:
+        return False
+
+
 def _repl_has_in_progress_run(agent: Any) -> bool:
     """Return True when the agent still holds an unfinished autonomous run
     (evidence gathered / blackboard populated) that Enter should resume in place
@@ -705,7 +724,17 @@ def _run_repl() -> None:
                     if last_auto_input and _looks_like_quiz(last_auto_input):
                         user_input += _("cli.resume_quiz_suffix")
                     console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}[/]")
-                elif last_auto_input:
+                elif last_auto_input and not _repl_last_run_finished(agent):
+                    # No live run to resume, but the previous launch text survived
+                    # (it was interrupted before the run started, e.g. during a
+                    # start-up LLM call). Replaying it is the intended "try again".
+                    #
+                    # The `_repl_last_run_finished` guard is the fix for the
+                    # 2026-10-06 report: a COMPLETED run used to leave its launch
+                    # text here, so an empty Enter re-ran the finished task — and
+                    # because the operator's new line had just been eaten by the
+                    # Ctrl+C exit-confirm, it looked like the agent ignored them
+                    # and "solved the old challenge again on its own".
                     user_input = last_auto_input
                     console.print(f"[dim]↻ {_('cli.resuming_auto_pentest')}: {last_auto_input[:60]}...[/]")
                 else:
@@ -1109,6 +1138,14 @@ def _run_repl() -> None:
 
                     asyncio.run(_run_auto())
                     auto_mode_active = True
+                    # The run finished on its own (not interrupted), so there is
+                    # nothing to resume: clearing the launch text is what stops a
+                    # later empty Enter from silently re-playing the whole task.
+                    # Measured 2026-10-06: after a completed CTF2 solve the operator
+                    # typed a NEW task, lost that line to the Ctrl+C exit-confirm,
+                    # pressed Enter, and the REPL re-ran the OLD challenge instead
+                    # of asking (the agent looked like it ignored the operator).
+                    last_auto_input = ""
                     console.print(_("cli.auto_mode_hint"))
 
                 else:
