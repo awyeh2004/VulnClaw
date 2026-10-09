@@ -348,6 +348,29 @@ def test_export_writes_a_self_contained_bundle(tmp_path):
     assert manifest["url"] == "https://app.test/login"
 
 
+def test_export_http_mirrors_the_stored_bytes_exactly(tmp_path):
+    """``.http`` is the same message, not a lossy re-rendering.
+
+    Round-2 (2026-10-09) regression: the writer rebuilt the message from
+    head + body, which duplicated the head (the whole message was handed over as
+    the body) and let the Windows newline translation turn every CRLF the head
+    already contained into CRCRLF -- two ways for a bundle's readable copy to
+    disagree with its own bytes.
+    """
+    traffic, evidence, _ = _stores(tmp_path)
+    record = traffic.record(_exchange(), source="proxy")
+    snapshot = evidence.pin(traffic, record.request_id)
+
+    dest = evidence.export(snapshot.snapshot_id, tmp_path / "bundle")
+
+    assert (dest / "request.http").read_bytes() == (dest / "request.bin").read_bytes()
+    assert (dest / "response.http").read_bytes() == (dest / "response.bin").read_bytes()
+    # the message is written once, and it is the verified blob
+    assert (dest / "request.bin").read_bytes() == _raw_request(_exchange())
+    assert (dest / "request.http").read_bytes().count(b"HTTP/1.1") == 1
+    assert b"\r\r\n" not in (dest / "request.http").read_bytes()
+
+
 def test_export_refuses_corrupted_evidence(tmp_path):
     traffic, evidence, _ = _stores(tmp_path)
     record = traffic.record(_exchange(), source="proxy")
@@ -367,3 +390,77 @@ def test_export_of_request_only_snapshot_omits_the_response_files(tmp_path):
     names = {p.name for p in dest.iterdir()}
     assert "response.bin" not in names
     assert "request.bin" in names
+
+
+# ── index robustness (audit 2026-10-08: items 2 and 5) ──────────────────────
+
+
+def test_a_row_appended_twice_is_read_once(tmp_path):
+    """Two interleaved pins can land the same content-derived row twice."""
+    traffic, evidence, _ = _stores(tmp_path)
+    record = traffic.record(_exchange(), source="proxy")
+    snapshot = evidence.pin(traffic, record.request_id)
+
+    # Simulate the racing writer: the same row appended a second time.
+    row = evidence.index_path.read_text(encoding="utf-8").strip()
+    with evidence.index_path.open("a", encoding="utf-8") as handle:
+        handle.write(row + "\n")
+
+    assert [r["snapshot_id"] for r in evidence.entries()] == [snapshot.snapshot_id]
+    assert len(evidence.snapshots()) == 1
+
+
+def test_index_problems_names_the_lines_that_were_dropped(tmp_path):
+    """A silently dropped row looks exactly like one that was never written."""
+    traffic, evidence, _ = _stores(tmp_path)
+    record = traffic.record(_exchange(), source="proxy")
+    evidence.pin(traffic, record.request_id)
+
+    with evidence.index_path.open("a", encoding="utf-8") as handle:
+        handle.write("{not json\n")
+        handle.write("\n")  # a blank line is not a problem
+
+    problems = evidence.index_problems()
+    assert len(problems) == 1
+    assert problems[0]["line"] == 2
+    assert "{not json" in problems[0]["snippet"]
+    # entries() still yields the good row -- corruption must not hide it
+    assert len(evidence.entries()) == 1
+
+
+def test_index_problems_is_empty_for_a_healthy_store(tmp_path):
+    traffic, evidence, _ = _stores(tmp_path)
+    record = traffic.record(_exchange(), source="proxy")
+    evidence.pin(traffic, record.request_id)
+
+    assert evidence.index_problems() == []
+
+
+# ── retention tolerates foreign files (audit item 4) ────────────────────────
+
+
+def test_blob_digests_ignores_names_the_store_never_wrote(tmp_path):
+    """A stray ``*.bin`` used to make collect() raise on an unrelated file."""
+    traffic, evidence, _ = _stores(tmp_path)
+    record = traffic.record(_exchange(), source="proxy")
+    snapshot = evidence.pin(traffic, record.request_id)
+
+    prefix_dir = next(p for p in evidence.blobs_dir.iterdir() if p.is_dir())
+    nested = prefix_dir / "not.a.digest.bin"  # stem is "not.a.digest"
+    upper = prefix_dir / "ABCDEF.bin"
+    nested.write_bytes(b"foreign")
+    upper.write_bytes(b"foreign")
+
+    digests = evidence.blob_digests()
+    assert "not.a.digest" not in digests
+    assert "ABCDEF" not in digests
+    assert snapshot.request_sha256 in digests
+
+    removed = evidence.collect(now=10**12, grace_seconds=0)
+
+    assert removed == []
+    # the foreign files are not ours to delete
+    assert nested.exists()
+    assert upper.exists()
+    # and the referenced evidence survived
+    assert evidence.response_body(snapshot.snapshot_id) == _raw_response(_exchange())

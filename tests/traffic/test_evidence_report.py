@@ -119,8 +119,15 @@ def test_report_renders_binding_notes(tmp_path):
     assert "payload triggers the error" in text
 
 
-def test_report_marks_bound_but_unreadable_evidence_instead_of_dropping_it(tmp_path):
-    """The headline regression: a corrupt body must be visible, not absent."""
+def test_report_flags_tampered_evidence_as_an_integrity_failure(tmp_path):
+    """The headline regression: a corrupt body must be visible, not absent.
+
+    Round-2 (2026-10-08) audit: the tamper case used to be reported as the
+    generic "unreadable", which a reader takes to mean "a retry might help".
+    Bytes that were verified at pin time and no longer match their hash are not
+    that -- the report has to say the evidence was altered or rotted, and carry
+    the underlying reason rather than swallowing it.
+    """
 
     def corrupt(traffic, evidence, finding, run_dir):
         # Destroy one pinned body, leaving the binding in place.
@@ -134,12 +141,19 @@ def test_report_marks_bound_but_unreadable_evidence_instead_of_dropping_it(tmp_p
     finally:
         init_i18n(lang=previous_lang)
 
-    assert "正文不可读取" in text
+    assert "完整性校验失败" in text
+    # the specific reason reaches the reader -- not collapsed into one phrase
+    assert "length mismatch" in text or "hash mismatch" in text
     assert "SQL syntax error near" not in text
 
 
 def test_report_reports_a_pinned_handle_that_is_gone_entirely(tmp_path):
-    """A binding whose snapshot was deleted must not vanish silently."""
+    """A binding whose snapshot was deleted must not vanish silently.
+
+    The index row survives but the blob it names does not, so this is still an
+    integrity failure -- the evidence the report promises is not the evidence
+    that is there -- and it must not be mistaken for "no evidence was bound".
+    """
 
     def drop_snapshot(traffic, evidence, finding, run_dir):
         shutil.rmtree(run_dir / "evidence" / "traffic")
@@ -152,7 +166,33 @@ def test_report_reports_a_pinned_handle_that_is_gone_entirely(tmp_path):
     finally:
         init_i18n(lang=previous_lang)
 
+    assert "完整性校验失败" in text
+
+
+def test_report_separates_an_unreadable_store_from_corrupt_evidence(tmp_path, monkeypatch):
+    """A store that cannot be read at all is not the same as altered evidence.
+
+    Round-2 (2026-10-08) audit: both used to render as one word. Only the
+    integrity failure is a claim about the evidence; a store-level failure is a
+    claim about this machine, and the two must stay distinguishable.
+    """
+
+    def boom(self, snapshot_id):
+        raise RuntimeError("index unreadable: device not ready")
+
+    def break_store(traffic, evidence, finding, run_dir):
+        # Patch only while the report renders -- pinning needs a working store.
+        monkeypatch.setattr(type(evidence), "get", boom)
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text, _, _, _ = _run_and_report(tmp_path, mutate=break_store)
+    finally:
+        init_i18n(lang=previous_lang)
+
     assert "正文不可读取" in text
+    assert "完整性校验失败" not in text
 
 
 def test_legacy_request_id_only_refs_still_render_from_the_capture_log(tmp_path):
@@ -412,3 +452,91 @@ def test_report_ignores_a_stale_global_store(tmp_path, monkeypatch):
     assert "```http" not in text
     assert "other.test" not in text
     assert "GET /admin?id=9'" not in text
+
+
+# ── index corruption is named, not swallowed (audit item 2) ─────────────────
+
+
+def test_report_names_index_rows_it_could_not_read(tmp_path):
+    """A dropped index row is otherwise indistinguishable from one never written."""
+
+    def add_bad_row(traffic, evidence, finding, run_dir):
+        with evidence.index_path.open("a", encoding="utf-8") as handle:
+            handle.write("{not json\n")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text, _, _, _ = _run_and_report(tmp_path, mutate=add_bad_row)
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "证据索引存在无法解析的行" in text
+    assert "not json" in text
+    # the readable snapshots still render -- corruption must not hide the rest
+    assert "抓包复现证据" in text
+    assert "SQL syntax error near" in text
+
+
+def test_report_stays_silent_about_a_healthy_index(tmp_path):
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text, _, _, _ = _run_and_report(tmp_path)
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "证据索引存在无法解析的行" not in text
+
+
+# ── cited snapshots ship as replayable bundles (audit item 6) ───────────────
+
+
+def test_report_exports_a_bundle_per_cited_snapshot(tmp_path):
+    """The report is a claim; the bundle is what a reviewer can check it against."""
+    text, finding, _, run_dir = _run_and_report(tmp_path)
+
+    bundles = run_dir / "evidence_bundles"
+    cited = [ref.snapshot_id for ref in finding.evidence_refs if ref.snapshot_id]
+    assert cited
+    assert sorted(p.name for p in bundles.iterdir()) == sorted(cited)
+    for snapshot_id in cited:
+        assert (bundles / snapshot_id / "manifest.json").exists()
+        assert (bundles / snapshot_id / "request.bin").read_bytes()
+
+
+def test_a_corrupt_snapshot_is_skipped_but_the_report_still_generates(tmp_path):
+    """One rotted blob must not cost the whole write-up."""
+
+    def corrupt(traffic, evidence, finding, run_dir):
+        # Corrupt a body only the proof needs. The response blob is shared with
+        # the baseline -- identical bytes are stored once -- so tampering with it
+        # would take the baseline down too.
+        proof = evidence.get(finding.evidence_refs[1].snapshot_id)
+        evidence._blob_path(proof.request_sha256).write_bytes(b"tampered")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text, finding, _, run_dir = _run_and_report(tmp_path, mutate=corrupt)
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "完整性校验失败" in text
+    bundles = run_dir / "evidence_bundles"
+    assert {p.name for p in bundles.iterdir()} == {finding.evidence_refs[0].snapshot_id}
+    # a failed export must leave no half-bundle pretending to be evidence
+    assert not (bundles / finding.evidence_refs[1].snapshot_id).exists()
+
+
+def test_bundles_are_not_rewritten_once_complete(tmp_path):
+    """Snapshot ids are content-derived, so a complete bundle is immutable."""
+    _, _, _, run_dir = _run_and_report(tmp_path)
+    bundle = next(p for p in (run_dir / "evidence_bundles").iterdir())
+    marker = bundle / "request.bin"
+    before = marker.stat().st_mtime_ns
+
+    # Regenerate: the export must be skipped, not re-copied over.
+    _run_and_report(tmp_path)
+
+    assert marker.stat().st_mtime_ns == before

@@ -92,6 +92,18 @@ class EvidenceIntegrityError(EvidenceError):
     """A stored body does not match the hash/length recorded at pin time."""
 
 
+def is_valid_blob_digest(value: str) -> bool:
+    """True when ``value`` is a name this store could have written.
+
+    Blobs are named by the lower-case hex sha256 of their bytes. Anything else
+    sitting under ``blobs/`` is foreign -- a stray ``foo.bin.bin`` (whose stem is
+    ``foo.bin``), an upper-case name, an editor backup -- and retention walks the
+    directory rather than the index, so it has to tell the two apart instead of
+    raising on a file that was never ours.
+    """
+    return len(value) >= 2 and all(c in "0123456789abcdef" for c in value)
+
+
 def split_head_body(raw: bytes) -> tuple[str, bytes]:
     """Split a raw HTTP blob into its (decoded) head and its body.
 
@@ -217,7 +229,7 @@ class EvidenceStore:
 
     # ── blob plumbing ────────────────────────────────────────────────────
     def _blob_path(self, digest: str) -> Path:
-        if len(digest) < 2 or any(c not in "0123456789abcdef" for c in digest):
+        if not is_valid_blob_digest(digest):
             raise EvidenceIntegrityError(f"malformed blob digest: {digest!r}")
         return self.blobs_dir / digest[:2] / f"{digest}{_BLOB_SUFFIX}"
 
@@ -273,19 +285,38 @@ class EvidenceStore:
 
     # ── index ────────────────────────────────────────────────────────────
     def entries(self) -> list[dict[str, Any]]:
-        """Every index row, in pin order."""
+        """Every index row, in pin order, de-duplicated by snapshot id.
+
+        A row that cannot be parsed is skipped so one truncated append cannot
+        hide every good snapshot; :meth:`index_problems` is how a caller reports
+        what was dropped instead of quietly losing it.
+
+        De-duplication is exact rather than a heuristic: ``pin`` refuses to
+        append a row it can already see, but that check is ``get``-then-``append``
+        and not atomic across processes, so two concurrent pins of the same
+        capture can interleave and land the same content-derived row twice.
+        Keeping the first occurrence keeps every count a report derives from the
+        index honest.
+        """
         if not self.index_path.exists():
             return []
         rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
         with self.index_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                snapshot_id = str(row.get("snapshot_id", "")) if isinstance(row, dict) else ""
+                if snapshot_id:
+                    if snapshot_id in seen:
+                        continue
+                    seen.add(snapshot_id)
+                rows.append(row)
         return rows
 
     def snapshots(self) -> list[EvidenceSnapshot]:
@@ -299,6 +330,31 @@ class EvidenceStore:
 
     def has_index(self) -> bool:
         return self.index_path.exists()
+
+    def index_problems(self) -> list[dict[str, Any]]:
+        """Index lines that cannot be read, as ``{line, error, snippet}``.
+
+        :meth:`entries` skips a bad line so one truncated append cannot hide
+        every good snapshot. For evidence, silence is the wrong default: a row
+        lost to corruption is indistinguishable from a row that was never
+        written, which is the exact confusion this layer exists to end. Callers
+        that present evidence (the report) use this to name what was dropped.
+        """
+        if not self.index_path.exists():
+            return []
+        problems: list[dict[str, Any]] = []
+        with self.index_path.open("r", encoding="utf-8") as handle:
+            for lineno, line in enumerate(handle, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    problems.append(
+                        {"line": lineno, "error": str(exc), "snippet": stripped[:120]}
+                    )
+        return problems
 
     # ── pinning ──────────────────────────────────────────────────────────
     def pin(
@@ -357,6 +413,10 @@ class EvidenceStore:
             response_present=response_present,
         )
 
+        # Idempotent: an identical capture re-pins to the same id, so the row is
+        # written once. This check is *not* atomic across processes (that is why
+        # `entries()` de-duplicates on read) -- it only avoids the common
+        # same-process re-pin landing a second identical line.
         if self.get(snapshot.snapshot_id) is None:
             append_line_durable(
                 self.index_path,
@@ -390,7 +450,15 @@ class EvidenceStore:
 
     # ── retention ────────────────────────────────────────────────────────
     def blob_digests(self) -> list[str]:
-        """Every digest present on disk, whether or not the index knows it."""
+        """Every digest present on disk, whether or not the index knows it.
+
+        Non-digest names are skipped rather than returned: retention walks the
+        directory to find what the index no longer needs, and a foreign file
+        (``foo.bin.bin`` has the stem ``foo.bin``) is neither evidence to keep
+        nor garbage to collect -- returning it made :meth:`collect` raise
+        ``EvidenceIntegrityError`` out of ``_blob_path`` on a file the store
+        never wrote.
+        """
         if not self.blobs_dir.exists():
             return []
         digests: list[str] = []
@@ -398,7 +466,9 @@ class EvidenceStore:
             if not prefix.is_dir():
                 continue
             for blob in sorted(prefix.iterdir()):
-                if blob.suffix == _BLOB_SUFFIX:
+                if blob.suffix != _BLOB_SUFFIX:
+                    continue
+                if is_valid_blob_digest(blob.stem):
                     digests.append(blob.stem)
         return digests
 
@@ -445,16 +515,24 @@ class EvidenceStore:
 
     # ── export ───────────────────────────────────────────────────────────
     def export(self, snapshot_id: str, dest_dir: str | Path) -> Path:
-        """Write a self-contained, byte-for-byte evidence bundle.
+        """Write a self-contained evidence bundle a reviewer can replay by hand.
 
-        Layout mirrors what a reviewer can replay by hand:
+        Layout:
 
             <dest_dir>/
               manifest.json     identity, hashes, lengths, heads
-              request.http      request head + body, as captured
-              response.http     response head + body, as captured
-              request.bin       exact stored bytes
-              response.bin      exact stored bytes (when a response was captured)
+              request.bin       the exact stored bytes (authoritative)
+              response.bin      the exact stored bytes (when a response was captured)
+              request.http      the same message, byte for byte
+              response.http     the same message, byte for byte
+
+        ``.bin`` and ``.http`` hold identical bytes; the second name exists only
+        because a reviewer (or a tool that opens text) looks for an ``.http``
+        file, and the stored message -- head, blank line, body -- is already
+        readable. It used to be written as a *reconstruction*, which on Windows
+        both duplicated the head (the whole message was passed as the body) and
+        doubled every CRLF the head already contained. Copying the verified blob
+        makes that class of drift impossible: there is nothing to reconstruct.
 
         Bodies are read through the verifying accessors, so exporting corrupted
         evidence fails rather than shipping it.
@@ -473,10 +551,8 @@ class EvidenceStore:
         else:
             response_body = b""
 
-        atomic_write_text(dest / "request.http", _http_text(snapshot.request_head, request_body))
-        atomic_write_text(
-            dest / "response.http", _http_text(snapshot.response_head, response_body)
-        )
+        self._atomic_write_bytes(dest / "request.http", request_body)
+        self._atomic_write_bytes(dest / "response.http", response_body)
         atomic_write_text(
             dest / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
         )
@@ -490,11 +566,3 @@ def _content_type_from_head(head: str) -> str:
         if sep and name.strip().lower() == "content-type":
             return value.strip()
     return ""
-
-
-def _http_text(head: str, body: bytes) -> str:
-    """Head + body as one text file, delimiters preserved where possible."""
-    if not body:
-        return head
-    decoded = body.decode("utf-8", "replace")
-    return f"{head}\r\n\r\n{decoded}"

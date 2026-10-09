@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -506,6 +507,10 @@ def generate_report(
 
     template = Template(REPORT_TEMPLATE_EN if current_lang() == "en" else REPORT_TEMPLATE)
     report_content = template.render(**context)
+    # Resolved once: the same store reads evidence into the body below, names any
+    # index rows that could not be read, and exports the cited snapshots at the end.
+    traffic_store = _resolve_traffic_store(run_dir or output.parent)
+    evidence_store = _resolve_evidence_store(run_dir or output.parent)
     if verified_findings:
         report_content += "\n\n" + _render_verified_finding_details_clean(
             verified_findings,
@@ -513,9 +518,12 @@ def generate_report(
                 "## 6. 已验证漏洞定位与复现信息",
                 "## 6. Verified Findings — Location & Reproduction",
             ),
-            traffic_store=_resolve_traffic_store(run_dir or output.parent),
-            evidence_store=_resolve_evidence_store(run_dir or output.parent),
+            traffic_store=traffic_store,
+            evidence_store=evidence_store,
         )
+    index_notice = _evidence_index_notice(evidence_store)
+    if index_notice:
+        report_content += "\n\n" + index_notice
     if target_state_context:
         report_content += "\n\n" + _render_target_state_context(target_state_context)
 
@@ -533,6 +541,13 @@ def generate_report(
     # draw from the same verified feed as the report — no divergent finding lists.
 
     write_findings_artifacts(session, output.parent / "findings")
+
+    # ★ A replayable bundle per cited snapshot, so the report's proof can be
+    # checked without the run tree. Only cited snapshots are exported, so the
+    # deliverable tracks the findings rather than the capture log.
+    _write_evidence_bundles(
+        verified_findings, evidence_store, output.parent / "evidence_bundles"
+    )
 
     return output
 
@@ -1072,6 +1087,10 @@ def generate_persistent_cycle_report(
         CYCLE_REPORT_TEMPLATE_EN if current_lang() == "en" else CYCLE_REPORT_TEMPLATE
     )
     report_content = template.render(**context)
+    # Same store seam as generate_report: evidence is read from, and bundles are
+    # exported beside, the run the report belongs to.
+    traffic_store = _resolve_traffic_store(run_dir or output.parent)
+    evidence_store = _resolve_evidence_store(run_dir or output.parent)
     if verified_findings:
         report_content += "\n\n" + _render_verified_finding_details_clean(
             verified_findings,
@@ -1079,9 +1098,12 @@ def generate_persistent_cycle_report(
                 "## 已验证漏洞定位与复现信息",
                 "## Verified Findings — Location & Reproduction",
             ),
-            traffic_store=_resolve_traffic_store(run_dir or output.parent),
-            evidence_store=_resolve_evidence_store(run_dir or output.parent),
+            traffic_store=traffic_store,
+            evidence_store=evidence_store,
         )
+    index_notice = _evidence_index_notice(evidence_store)
+    if index_notice:
+        report_content += "\n\n" + index_notice
     output.write_text(report_content, encoding="utf-8")
 
     # ★ Emit the same machine-consumable findings artifacts as generate_report, so a
@@ -1089,6 +1111,10 @@ def generate_persistent_cycle_report(
     # findings/findings.sarif.
 
     write_findings_artifacts(session, output.parent / "findings")
+
+    _write_evidence_bundles(
+        verified_findings, evidence_store, output.parent / "evidence_bundles"
+    )
 
     return output
 
@@ -1253,8 +1279,18 @@ def _role_label(role: str) -> str:
 
 def _resolve_capture_evidence(
     ref: Any, traffic_store: Any, evidence_store: Any
-) -> tuple[str, str, str, Any]:
-    """Resolve one ``http_capture`` ref to ``(request_text, response_text, source, snapshot)``.
+) -> tuple[str, str, str, Any, str]:
+    """Resolve one ``http_capture`` ref to ``(request_text, response_text, source, snapshot, problem)``.
+
+    ``source`` is one of ``pinned`` / ``capture-log`` / ``missing`` /
+    ``unreadable`` / ``integrity``. ``integrity`` exists to split out the one
+    case that used to be flattened into ``unreadable``: the snapshot is there,
+    but the stored bytes no longer match the hash and length recorded when it
+    was pinned. "We cannot read it right now" and "what we have is not the
+    evidence we verified" are different claims, and only the second one is
+    alarming -- a reader who is told the first will assume a retry would help.
+    ``problem`` carries the underlying message for the failure sources and is
+    empty otherwise.
 
     A pinned snapshot wins: it is immutable and content-verified, and it survives
     the capture log being reclaimed -- which is the entire reason the snapshot
@@ -1266,8 +1302,11 @@ def _resolve_capture_evidence(
     Raises nothing: the caller needs to distinguish "no evidence bound" from
     "bound but unresolvable", and only a return value can express that.
     """
+    from vulnclaw.traffic.evidence import EvidenceIntegrityError
+
     snapshot_id = str(getattr(ref, "snapshot_id", "") or "")
     if snapshot_id and evidence_store is not None:
+        snapshot = None
         try:
             snapshot = evidence_store.get(snapshot_id)
             if snapshot is not None:
@@ -1276,11 +1315,16 @@ def _resolve_capture_evidence(
                     evidence_store.response_text(snapshot_id),
                     "pinned",
                     snapshot,
+                    "",
                 )
             # Pinned but absent from the index: fall through to the live store if
             # the ref also names a capture id; otherwise report it as missing.
+        except EvidenceIntegrityError as exc:
+            # Verified at pin time, so a missing or mismatching body here is
+            # corruption or tampering -- not a transient read failure.
+            return "", "", "integrity", snapshot, str(exc)
         except Exception:
-            return "", "", "unreadable", None
+            return "", "", "unreadable", None, ""
 
     request_id = str(getattr(ref, "request_id", "") or "")
     if request_id and traffic_store is not None:
@@ -1291,8 +1335,9 @@ def _resolve_capture_evidence(
                 str(view.get("response_text") or ""),
                 "capture-log",
                 None,
+                "",
             )
-    return "", "", "missing", None
+    return "", "", "missing", None, ""
 
 
 def _render_http_captures(
@@ -1325,14 +1370,30 @@ def _render_http_captures(
         role = _role_label(getattr(ref, "role", "") or "supporting")
         note = str(getattr(ref, "note", "") or "").strip()
 
-        request_text, response_text, source, snapshot = _resolve_capture_evidence(
+        request_text, response_text, source, snapshot, problem = _resolve_capture_evidence(
             ref, traffic_store, evidence_store
         )
 
+        if source == "integrity":
+            # The evidence *was* pinned and verified, so this is not "missing".
+            # Naming it as tampering/corruption -- and refusing to print the
+            # bytes -- is the whole point: a plausible-looking body that is not
+            # the one that was verified is worse than no body at all.
+            lines.append(
+                _rl(
+                    f"  - ⛔ 证据 `{handle}`（{role}）— 完整性校验失败：正文缺失，或与固化时"
+                    f"记录的哈希/长度不一致（疑似被篡改或损坏），已拒绝展示。{problem}",
+                    f"  - ⛔ Evidence `{handle}` ({role}) — INTEGRITY CHECK FAILED: the stored "
+                    f"body is missing or no longer matches the hash/length recorded at pin "
+                    f"time (tampering or corruption); refusing to display it. {problem}",
+                )
+            )
+            continue
+
         if source in ("missing", "unreadable"):
             reason = _rl(
-                "已绑定但正文不可读取（快照缺失或校验失败）",
-                "bound but the body is unreadable (snapshot missing or failed verification)",
+                "已绑定但正文不可读取（快照已不在索引中）",
+                "bound but the body is unreadable (the snapshot is no longer in the index)",
             )
             lines.append(
                 _rl(
@@ -1374,6 +1435,94 @@ def _render_http_captures(
             lines.append(response_text.strip())
             lines.append("```")
     return lines
+
+
+def _cited_snapshot_ids(findings: list[VulnerabilityFinding]) -> list[str]:
+    """Snapshot ids the rendered findings actually cite, in first-seen order."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for finding in findings:
+        for ref in getattr(finding, "evidence_refs", None) or []:
+            if getattr(ref, "kind", "") != "http_capture":
+                continue
+            snapshot_id = str(getattr(ref, "snapshot_id", "") or "")
+            if snapshot_id and snapshot_id not in seen:
+                seen.add(snapshot_id)
+                ids.append(snapshot_id)
+    return ids
+
+
+def _evidence_index_notice(evidence_store: Any | None) -> str:
+    """Name index rows that could not be read, so dropped evidence is visible.
+
+    The store skips an unparseable row rather than failing the whole index; on
+    its own that makes a row lost to corruption look exactly like a row that was
+    never written. Silent on a healthy store, which is the normal case.
+    """
+    if evidence_store is None:
+        return ""
+    try:
+        problems = evidence_store.index_problems()
+    except Exception:  # a store that cannot be read at all is reported elsewhere
+        return ""
+    if not problems:
+        return ""
+    lines = [
+        _rl(
+            "> ⚠ 证据索引存在无法解析的行，以下已固化的快照未进入本报告，需人工核查：",
+            "> ⚠ The evidence index has unreadable rows; the pinned snapshots below are "
+            "missing from this report and need manual review:",
+        )
+    ]
+    for problem in problems:
+        lines.append(
+            _rl(
+                f"> - 第 {problem.get('line')} 行解析失败：{problem.get('error')}"
+                f"（片段：`{problem.get('snippet')}`）",
+                f"> - line {problem.get('line')} failed to parse: {problem.get('error')}"
+                f" (snippet: `{problem.get('snippet')}`)",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _write_evidence_bundles(
+    findings: list[VulnerabilityFinding], evidence_store: Any | None, dest_root: Path
+) -> list[str]:
+    """Export a replayable bundle per cited snapshot; return the ids written.
+
+    A report is a claim; the bundle is what lets a reviewer check it without the
+    run tree. Only snapshots the report actually cites are exported, so the
+    deliverable grows with the findings rather than with the capture log.
+
+    ``manifest.json`` is written last by :meth:`EvidenceStore.export`, so a
+    bundle that has one is complete and is left alone -- snapshot ids are
+    content-derived, so the bytes behind one cannot change. A bundle without one
+    (an interrupted export) is retried on the next report.
+
+    A snapshot that fails its integrity check is skipped rather than raising: the
+    report body already says so loudly (see :func:`_render_http_captures`), and
+    losing the whole write-up over one rotted blob would be the worse failure.
+    """
+    if evidence_store is None:
+        return []
+    written: list[str] = []
+    for snapshot_id in _cited_snapshot_ids(findings):
+        dest = dest_root / snapshot_id
+        if (dest / "manifest.json").exists():
+            continue
+        try:
+            evidence_store.export(snapshot_id, dest)
+        except Exception as exc:
+            # export() creates the directory before it reads the bodies, so a
+            # failure can leave a partial bundle behind. Drop it: a directory
+            # named after a snapshot but holding no manifest still looks like
+            # evidence to a reviewer, and would block the retry above.
+            shutil.rmtree(dest, ignore_errors=True)
+            logger.warning("evidence bundle for %s not exported: %s", snapshot_id, exc)
+            continue
+        written.append(snapshot_id)
+    return written
 
 
 def _evidence_staleness_notice(
