@@ -1283,9 +1283,9 @@ python .ir-tools\verify-ir.py
 | 问题 | 修法 | 验证 |
 |---|---|---|
 | ② CLI 报告拿不到 run 证据 | `generate_report_from_file()` 先按 `session.run_id` 反查 run 目录；`vulnclaw report` 加 `--run-dir`（显式优先）。**根因比表面更深**：`vulnclaw solve` 从前根本没把 run 写进会话（`session.run_id` 为空，只有 subagent 那条路会生成）→ 一并修在 `orchestrator` 注入 `agent.run_dir` 的地方 | `tests/traffic/test_evidence_report.py` 新增 4 例（正文内联 / 显式优先 / 反查 best-effort / 无 run 不崩）；**真实 run 复核**：新会话 `session.run_id` == `run.json.run_id`，`find_run_dir_by_run_id` 反查命中 run 目录 |
-| ① WP 要人肉抄答案卡 | 新增 **`vulnclaw wp <session.json> [--out] [--template] [--pdf]`**：把答案卡（问题 / 答案 / **证据原文**）+ 人工待补清单渲成 WP，模板骨架按需附在文末。报告本身**照旧跳过答案卡**（那是设计，已有回归用例钉住不许改） | **真实 drill 会话实测**：218 行 / 12,153 字节，6 个答案（`203.0.113.47`、`09:22:31`、`a7f3c1`、`sysupdate`、`demo-persistence` …）与证据原文全部在内；`--pdf` 同时出 PDF |
+| ① WP 要人肉抄答案卡 | **未修 —— 同日撤回工具方案**：把答案卡渲成交付物的 `vulnclaw wp` 已删除（命令 / `vulnclaw/report/ir_wp.py` / 其测试一并移除；`test_the_report_itself_still_omits_answer_cards` 已迁到 `tests/report/test_report.py`）。报告跳过答案卡的设计**不变**（round-10 finding #1） | — |
 
-⇒ 15:00–15:20 那段从"人肉抄 6 条结论 + 证据"变成**一条命令**。
+⇒ 15:00–15:20 那段仍是**人肉抄 6 条结论 + 证据**（落到分工里的人头上），WP 走 `IR-WP-TEMPLATE.md`。
 
 ---
 
@@ -1303,14 +1303,16 @@ python .ir-tools\verify-ir.py
 
 **⭐ 交付链实测（跑这半的真正目的）**
 
-| | `vulnclaw report` | `vulnclaw wp` |
-|---|---|---|
-| Verified Findings | **0**（"No valid vulnerabilities were found"） | — |
-| flag 在里面？ | ✅ 但只在 **§4 攻击路径摘要**里（LLM 摘要救的场） | ✅ 在答案卡里（结构化） |
-| 利用链 / 证据 | 摘要里带 `GET /?file=/flag` | 答案卡证据原文 + 人工待补清单 |
-| 体量 | 77 行 / 2,478 B | 148 行 / 5,117 B |
+| | `vulnclaw report` |
+|---|---|
+| Verified Findings | **0**（"No valid vulnerabilities were found"） |
+| flag 在里面？ | ✅ 但只在 **§4 攻击路径摘要**里（LLM 摘要救的场） |
+| 利用链 / 证据 | 摘要里带 `GET /?file=/flag` |
+| 体量 | 77 行 / 2,478 B |
 
-⇒ **flag 型渗透题与 IR 一样，优先用 `vulnclaw wp`** —— 它不依赖"摘要恰好被生成"这个运气。`report` 只在该 run 真有 verified findings + 绑定证据时才是正确交付物（评估型 run）。
+> 同日曾用 **已删除**的 `vulnclaw wp` 渲过一版（**148 行 / 5,117 B**，flag 落在结构化答案卡里）—— 数字留作复盘记录，命令与代码已移除。
+>
+> ⇒ **flag 型渗透题**：`report` 只在该 run 真有 verified findings + 绑定证据时才是正确交付物（评估型 run）；答案卡型交付物回到 `IR-WP-TEMPLATE.md` 人肉填。
 
 ⚠️ **`evidence_bundles` 本次没生成，而且不是 bug**：agent 全程**没调 `traffic_bind_evidence`**（工具序列 = `fetch`×3 / `dir_enum` / `http_probe_batch` / `blackboard_record_answer` / `save_playbook`）⇒ run 里既无 `snapshots.jsonl` 也无 http_capture 引用，所以第 6 条那条线不启用。**只有 agent 真去固化证据才会有包** —— 这是纪律/prompt 问题，不是代码问题。
 
@@ -1339,7 +1341,7 @@ python .ir-tools\verify-ir.py
 |---|---|---|
 | 12:20–12:35 | **分诊**：数题 / 分值 / 解锁顺序；判每题是"网页终端手打"还是"agent 打" | 同样 15 分钟不许开打 |
 | 12:35–15:00 | **主攻**：按 `flag-landing-spots.md` 的**五步**走（内容搜 → 时间圈定 → 进程/环境 → 服务侧 → 变形解码）；优先 `remote_collect` 一键固化现场 | 每题 **30 分钟硬盒**；到点写 3 行状态跳走。**不要一进题就全盘搜索**（实测 271 秒起） |
-| 15:00–15:20 | **回收 + 出 WP**：**IR 题与 flag 型渗透题都用 `vulnclaw wp <session.json> --pdf`**（答案卡 = 结论 + 证据原文**自动填入**，人只需补时间线/影响/建议；实测 `report` 对这两类都出 0 findings，flag 只是碰运气落在 LLM 摘要里）。评估型 run（真有 verified findings + 绑定证据）才用 `vulnclaw report <session.json> --pdf`（按 `run_id` 自动找回本 run 证据；拿不准加 `--run-dir`） | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
+| 15:00–15:20 | **回收 + 出 WP**：**IR 题用 `IR-WP-TEMPLATE.md` 骨架**（`vulnclaw report` 生成的只有渗透类报告，不含 IR 结构）；渗透题用 `vulnclaw report <session.json> --pdf`（会按 `run_id` 自动找回本 run 证据；拿不准就加 `--run-dir`）。把截图/命令输出补进报告 | 报告按题给分，**结论比过程重要**；先把 flag 交了再写 |
 | 15:20–15:30 | 最终提交核对（**链式：逐题确认都交了**）+ 交付物落盘 | 漏交一个可能少解锁一整题 | 
 
 ### 9.3 角色分工（**4 人定稿** · 单人 / 双人两档已按原规则删除）

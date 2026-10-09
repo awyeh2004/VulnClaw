@@ -1068,3 +1068,37 @@ def test_generate_pocs_skips_answer_cards(tmp_path):
     generated = generate_pocs(session, tmp_path / "pocs")
     assert len(generated) == 1
     assert not card.poc_script
+
+
+def test_report_body_omits_answer_cards(tmp_path):
+    """Round-10 #1: an IR answer card must never be rendered as a vulnerability.
+
+    Moved here on 2026-10-09 from the deleted ``tests/report/test_ir_wp.py``:
+    the guard belongs to the *report*, not to the removed ``vulnclaw wp``
+    renderer. ``blackboard_record_answer`` records each answer as a finding with
+    ``vuln_type="ir-answer"`` and the question as its title, so rendering it would
+    promote a question that merely names a class ("漏洞名称") into a verified
+    vulnerability.
+    """
+    from vulnclaw.agent.context import SessionState, VulnerabilityFinding
+    from vulnclaw.report.generator import generate_report
+
+    session = SessionState(target="ir-drill")
+    cards = [
+        VulnerabilityFinding(
+            title="Q2: 攻击者 IP 是什么？",
+            severity="Info",
+            vuln_type="ir-answer",
+            description="203.0.113.47",
+            evidence='203.0.113.47 - - [14/Mar/2026:09:22:51 +0800] "POST /upload.php" 200',
+        )
+    ]
+    for card in cards:
+        session.add_finding(card)
+
+    report_path = generate_report(session, output_path=str(tmp_path / "report.md"))
+    report_text = report_path.read_text(encoding="utf-8")
+
+    for card in cards:
+        assert card.title not in report_text
+        assert card.description not in report_text

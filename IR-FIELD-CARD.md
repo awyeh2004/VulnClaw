@@ -135,7 +135,7 @@ VULNCLAW_HTTP_PROXY=socks5://127.0.0.1:1080 vulnclaw solve --only-host 10.20.0.0
 ## 5. 收工（15:00 起）
 
 - [ ] 每题结果落台账：**flag 原文**、出处（命令/路径）、是否已提交、未验收的强候选写清楚
-- [ ] **出 WP**：**`vulnclaw wp <session.json> --pdf`** —— IR 与 flag 型渗透题都用它（答案卡=结论+证据原文自动填入）；只有评估型 run 才用 `vulnclaw report`
+- [ ] **出 WP**：IR 题按 **`IR-WP-TEMPLATE.md` 人肉填**（`vulnclaw report` 对 IR 出 0 findings 是设计，不含 IR 结构）；渗透题 **`vulnclaw report <session.json> --pdf`**（按 `run_id` 自动找回本 run 证据）
 - [ ] `log.txt` + Solve Report 保全（赛后可能抽查 System 日志与答题思路 —— 这两样正好自证）
 - [ ] **逐题确认 flag 都已提交**（链式解锁：漏交一个可能少解锁一整题）
 - [ ] 顺手记下"强候选未验收/大写未试"的题，复盘要用
