@@ -39,6 +39,7 @@ from vulnclaw.config.domain_models import (  # noqa: F401 — re-export
     validate_action_constraints,
 )
 from vulnclaw.i18n import _
+from vulnclaw.utils.fs_names import safe_name_component
 
 logger = logging.getLogger(__name__)
 
@@ -1010,7 +1011,13 @@ class SessionState(BaseModel):
         if path is None:
             from vulnclaw.config.settings import SESSIONS_DIR
 
-            safe_target = (self.target or "unknown").replace("/", "_").replace(":", "_")
+            # Shared rule (vulnclaw.utils.fs_names), the same one the report
+            # generators and the web service use. It used to be a bare
+            # replace("/", "_") chain here, which left a backslash alone -- so on
+            # Windows a target that is a path made this file name split into a
+            # directory tree under SESSIONS_DIR, where a flat session listing
+            # never sees it.
+            safe_target = safe_name_component(self.target)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = SESSIONS_DIR / f"{timestamp}_{safe_target}.json"
         else:
