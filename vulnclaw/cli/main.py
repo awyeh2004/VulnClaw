@@ -1409,6 +1409,11 @@ from vulnclaw.cli.retest_cmd import retest_command  # noqa: E402
 
 app.command("retest", help="复测一条已上报的 finding（A1）")(retest_command)
 
+# ── Evidence maintenance sub-command group（缺口 1/2：GC 调度 + 解绑/重排暴露面）──
+from vulnclaw.cli.evidence_cmd import evidence_app  # noqa: E402
+
+app.add_typer(evidence_app, name="evidence")
+
 
 @app.command()
 def run(

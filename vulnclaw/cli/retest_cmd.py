@@ -7,14 +7,12 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
 
-from vulnclaw.config.domain_models import VulnerabilityFinding
+from vulnclaw.cli.findings_io import FindingsFileError, load_finding
 from vulnclaw.retest import service
 from vulnclaw.retest.store import (
     RetestConflictError,
@@ -24,31 +22,6 @@ from vulnclaw.retest.store import (
 )
 
 console = Console()
-
-
-def _resolve_findings_file(raw: str) -> Path:
-    """Accept either a ``findings.json`` or the run directory that holds one."""
-
-    path = Path(raw)
-    if path.is_dir():
-        candidate = path / "findings.json"
-        if not candidate.exists():
-            raise typer.BadParameter(f"no findings.json under {path}")
-        return candidate
-    if not path.exists():
-        raise typer.BadParameter(f"findings file not found: {path}")
-    return path
-
-
-def _load_finding(findings_path: str, finding_id: str) -> VulnerabilityFinding:
-    document = json.loads(_resolve_findings_file(findings_path).read_text(encoding="utf-8"))
-    entries = document.get("findings") if isinstance(document, dict) else None
-    if not isinstance(entries, list):
-        raise typer.BadParameter("findings file has no 'findings' list")
-    for entry in entries:
-        if str(entry.get("finding_id", "")) == finding_id:
-            return VulnerabilityFinding.model_validate(entry)
-    raise typer.BadParameter(f"finding {finding_id!r} not present in {findings_path}")
 
 
 def _parse_constraints(raw: str) -> dict[str, str]:
@@ -113,7 +86,7 @@ def retest_command(
             console.print("[red]需要 --findings <findings.json|run 目录> 才能定位这条 finding[/red]")
             raise typer.Exit(2)
 
-        finding = _load_finding(findings, finding_id)
+        finding = load_finding(findings, finding_id)
         parsed_constraints = _parse_constraints(constraints)
 
         if verdict:
@@ -138,6 +111,9 @@ def retest_command(
         console.print(f"[green]复测会话[/green] {record.retest_id}（round {record.round}，status {record.status.value}）")
         console.print(service.build_retest_brief(finding, constraints=parsed_constraints))
         console.print("[dim]结论落地：vulnclaw retest <findings-id> --findings … --verdict fixed|reproduced|inconclusive[/dim]")
+    except FindingsFileError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
     except (RetestConflictError, RetestNotFoundError, RetestStoreError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

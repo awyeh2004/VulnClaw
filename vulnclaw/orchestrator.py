@@ -181,6 +181,7 @@ async def run_agent_task(
         checkpoint("run_complete")
         if run_context is not None:
             mark_run_status(run_context, "completed", exit_code=0)
+            _collect_run_evidence(run_context)
             _schedule_completed_run_distillation(agent, run_context, primary_target)
     except KeyboardInterrupt:
         status = "interrupted"
@@ -218,6 +219,27 @@ async def run_agent_task(
         status=status,
         exit_code=exit_code,
     )
+
+
+def _collect_run_evidence(run_context: RunContext) -> None:
+    """Best-effort evidence GC at run teardown; never affects run completion.
+
+    ``EvidenceStore.collect()`` had no production caller (缺口 1): unreferenced
+    blobs (a finding re-bound / dropped) accumulated forever. This is the
+    schedule — one run's store, after the run is durably marked ``completed``,
+    with the default 24h grace so a report rendered right after the run still
+    finds its proof. It cannot touch the global store: the helper refuses
+    ``run_dir is None``.
+    """
+
+    try:
+        from vulnclaw.traffic.maintenance import collect_run_evidence
+
+        removed = collect_run_evidence(run_context.run_dir)
+        if removed:
+            run_context.append_event("evidence_gc", {"removed": len(removed)})
+    except Exception:
+        pass
 
 
 def _schedule_completed_run_distillation(

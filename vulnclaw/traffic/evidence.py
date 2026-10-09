@@ -497,6 +497,33 @@ class EvidenceStore:
         needed.discard("")
         return needed
 
+    def stale_digests(
+        self,
+        *,
+        now: float | None = None,
+        grace_seconds: float = DEFAULT_GRACE_SECONDS,
+    ) -> list[str]:
+        """Unreferenced blobs past the grace window — i.e. what ``collect()`` deletes.
+
+        Split out (Round-3, 2026-10-09) so a caller can *ask* what would go before
+        anything does: ``vulnclaw evidence gc --dry-run`` and the audit path need the
+        same predicate as :meth:`collect`, not a second copy that can drift.
+        """
+        referenced = self.referenced_digests()
+        cutoff = (time.time() if now is None else now) - grace_seconds
+        stale: list[str] = []
+        for digest in self.blob_digests():
+            if digest in referenced:
+                continue
+            path = self._blob_path(digest)
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+            except OSError:
+                continue
+            stale.append(digest)
+        return stale
+
     def collect(
         self,
         *,
@@ -509,20 +536,10 @@ class EvidenceStore:
         after a finding is re-bound or deleted. The grace window is what keeps a
         report generated moments after an edit from losing its evidence.
         """
-        referenced = self.referenced_digests()
-        cutoff = (time.time() if now is None else now) - grace_seconds
         removed: list[str] = []
-        for digest in self.blob_digests():
-            if digest in referenced:
-                continue
-            path = self._blob_path(digest)
+        for digest in self.stale_digests(now=now, grace_seconds=grace_seconds):
             try:
-                if path.stat().st_mtime > cutoff:
-                    continue
-            except OSError:
-                continue
-            try:
-                path.unlink()
+                self._blob_path(digest).unlink()
             except OSError:
                 continue
             removed.append(digest)
