@@ -121,6 +121,7 @@ routing:
 | 攻击者 IP | `40-log-analysis.md` §Web 日志；反代场景用**浏览器指纹** |
 | 打进来的漏洞点 | `40-log-analysis.md` §Web 日志 → 定位可疑接口/POST |
 | 首次入侵时间 | `40-log-analysis.md`；注意日志保留期，只能给下界时要说明 |
+| ⭐ **只能贴短命令**（平台网页终端，可能不支持长粘贴） | `paste-cards-linux.md` / `paste-cards-windows.md` —— 逐行可粘贴的排查短命令，按"先圈定、后深入"排序 |
 | 隐藏 / 克隆账号 | `20-accounts.md` |
 | 持久化位置 | `25-process-service.md` + `30-file-artifacts.md`（cron/systemd/Run 键/WMI） |
 | 恶意进程 PID | `25-process-service.md` |
@@ -169,6 +170,12 @@ routing:
     进程/环境 → 服务侧 → 变形解码）+ Linux/Windows 落点表（含已删除文件、磁盘块、
     数据库、日志、ADS 等），以及"搜不到时怎么体面收尾"。与痕迹排查共用知识、
     但检索策略不同（痕迹按面扫，flag 按内容+时间+进程扫）。
+- `paste-cards-linux.md` / `paste-cards-windows.md` — **逐行可粘贴的短命令卡**
+  - ⭐ **只能通过网页终端手打/短粘贴时用这篇**（平台右键控制台那种）：每条都是
+    单行可粘贴、只读的排查命令，按 0 固定现场 → 1 进程网络 → 2 持久化 → 3 账号 →
+    4 文件时间线 → 5 日志 → 6 找 flag 排序。Windows 那份按 **cmd.exe** 语法写，
+    并在 Win11 23H2 上逐条实跑过；多词过滤一律用引号无关的 `/C:词` 形式。
+    要注意：递归搜索很慢（实测 `gci -Recurse` 扫 `%TEMP%` 271 秒），别一进题就跑。
 
 **远程实操（SSH）**
 

@@ -1112,3 +1112,49 @@ python .ir-tools\verify-ir.py
 **回归验证**：`python -m pytest tests/skills -q` → 137 passed；
 `python -m pytest tests/security/test_command_classifier_ir.py -q` → 113 passed；
 `python .ir-tools/verify-ir.py` → `PASS=66 FAIL=0 WARN=0`。
+
+---
+
+## 八、10/9 复核：缺口清单的当前状态（实测更新）
+
+> 对"五点五"那 13 条**逐条核当前机器状态**，不是复述。本节只记**变化与证据**；
+> 五点五那些行原样不动（那份是 10/08 的快照，本节的日期更近）。
+
+| # | 项 | 10/9 实测 | 状态 |
+|---|---|---|---|
+| P0-1 | AI 辅助合规性 | ✅ **已确认合规**（用户 2026-10-09 确认）。若群里/通知里有书面依据，把那句话抄到设备上备用 | **解除** |
+| P0-2 | 录屏落地 | ⚠️ 仍待定：C: 只剩 **14.6 GB**（比 10/08 又少 1 GB）、D: 17.9、**E: 164.0、G: 576.5 GB** | 数字已更新；**录屏落 E:/G:**，是否上交待问 |
+| P0-3 | LLM 凭据/预算 | ✅ `llm.api_keys` 实测 **2 条**；✅ `competition.stall_turns` 已是 **6**；`solve_max_model_tokens` 保持不动 | 余额数字仍需你查/充 |
+| P1-4 | 短命令卡 | ✅ **已补**：`references/paste-cards-linux.md` + `paste-cards-windows.md`（逐行可粘贴；Windows 那份在本机 Win11 23H2 逐条实跑） | **关闭** |
+| P1-5 | chrome-devtools 驱动终端 | ❌ `_npx` 缓存目录**不存在**（从未下载过） | 建议**不做** |
+| P1-6 | WP / PDF 交付 | ✅ **已打通**。拦路虎只是缺 extra，且**正确包名是 `reportlab`（不是 weasyprint）**。实测两条腿都出 PDF：`pdf_exporter.export_pdf()` → 10.1 KB、`%PDF-1.4`、5 个页对象；CLI `vulnclaw report <session.json> --pdf --pdf-out ...` → **rc=0** 且打印 "PDF exported" → 5.2 KB PDF | **关闭**（`pip install 'vulnclaw[pdf]'`） |
+| P1-7 | 端到端彩排 | ❌ 仍未做（单题能力有历史报告为证，但"按现场流程走一遍"没有） | 待做（约 1–2 小时） |
+| P1-8 | 时间盒/分工 | ❌ 未定 | 待拍板（我可起草） |
+| P2-9 | paramiko / `remote_*` 真机验证 | ✅ **已升级 + 已验证**。2.8.1 → **5.0.0**（+invoke 3.0.3）。证据见下 | **关闭** |
+| P2-11 | `permission_mode: full_access` | 确认仍在（无人值守时风险自担） | 不变 |
+| P2-12/13 | `uvx`/`uv` 缺失、burp/ctf2 placeholder | 确认缺失/placeholder；本赛用不上 | 不变 |
+
+### P2-9 的证据（为什么这条必须升）
+
+* **升级前**客户端主机键算法表：`('ssh-ed25519','ecdsa-sha2-nistp256','ecdsa-sha2-nistp384','ecdsa-sha2-nistp521','ssh-rsa','ssh-dss')` —— **没有 `rsa-sha2-*`**。
+* **升级后**：`('ssh-ed25519','ecdsa-*×3','rsa-sha2-512','rsa-sha2-256')`。
+* 现代 OpenSSH（8.8+）默认**不再提供 `ssh-rsa`（SHA-1）**，只给 `rsa-sha2-*`。用本机
+  真 **OpenSSH 9.5** 起了一个**只挂 RSA 主机键**的 sshd：服务端日志
+  `debug1: list_hostkey_types: rsa-sha2-512,rsa-sha2-256` → 协商
+  `debug1: kex: host key algorithm: rsa-sha2-512` ✅ 连接成功。
+  旧版在这种服务器上**无从协商** → 现场"只挂 RSA 主机键"的跳板机/靶机会直接握手失败。
+* **repo 自己的代码也验了**：用 `vulnclaw.agent.remote` 打这个真 sshd ——
+  `list_hosts()` 正常；`run_command("echo ...; hostname; whoami")` → **exit 0** + 真实
+  stdout + 主机键指纹；`run_command("exit 42")` → **exit_code 42**。
+  所以"`remote_*` 从未真机验证"这条同时关闭。
+* 顺带实测：Windows 目标的默认 shell 是 **cmd.exe** —— `;` 不是分隔符、`1>&2` 无效
+  （`echo x 1>&2; exit 7` 在远端被 cmd 解析成别的东西 → 返回 exit 0）。给 Windows 目标
+  下命令要按 cmd 语法写（见 `paste-cards-windows.md`）。
+* 仍然是**未验证**的：真实跳板机上的密码/密钥认证与网络路径 —— 那条只有到现场才能验。
+
+### 仍未变的两条
+
+1. **"能否搭隧道" / "是否必须有线"仍是待答复**（五点五待确认表 1/2）。本次只确认了
+   **AI 辅助合规**这一条；隧道合规没被放宽，客户端支持虽已就绪（`network.http_proxy`，
+   commit `d5df744`），但**合规没松就别当主路径**。
+2. **录屏是否需上交** + 用什么软件仍待问。
