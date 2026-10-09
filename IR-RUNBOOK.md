@@ -707,11 +707,13 @@ vulnclaw solve $u --goal $goal --prompt $prompt --max-steps 40 --run-name myrun
    再从笔记本试隧道，看两者能否并存**（能并存就皆大欢喜）。
 2. **内建 HTTP 工具对私网/回环目标刻意绕过代理**（[http_client.py](vulnclaw/utils/http_client.py)：
    `loopback / private / link-local -> trust_env=False`）。于是：
-   - `ssh -D 1080`（SOCKS）→ `fetch` / `http_probe_batch` **不会自动走 SOCKS**（需要显式代理配置，当前没有）。
+   - `ssh -D 1080`（SOCKS）→ `fetch` / `http_probe_batch` **不会自动走 SOCKS**
+     → **2026-10-10 已补**：见下面「✅ 已落地：显式出口代理」。
    - `ssh -L 8080:target:80`（端口转发）→ agent 只能请求 `http://127.0.0.1:8080`，
      而**作用域闸看到的 host 是 `127.0.0.1`**：`--only-host <网段>` 与 `tp.qianxin.com`
      黑名单**全部失效**（闸门看不出真实目标是谁）。
-   - 想走隧道就得二选一：**(a)** 给 HTTP 工具加显式代理配置（SOCKS/HTTP，需改代码）；
+   - 想走隧道就得二选一：**(a)** 给 HTTP 工具加显式代理配置（SOCKS/HTTP，需改代码）
+     —— **2026-10-10 已实现**；
      **(b)** 绕开内建 HTTP 工具，用 `shell_command` + `curl --socks5` / `proxychains`。
 3. **合规未知**：培训明确"严禁 C2 类非有效登录或远程操作"+ 抽查日志，而**"能否搭隧道"赛方
    尚未答复**（已列入群内待办）。在得到肯定答复前，别把它当主路径。
@@ -732,6 +734,38 @@ vulnclaw solve $u --goal $goal --prompt $prompt --max-steps 40 --run-name myrun
   ④误点（提交 / 停止 / 删除）不可逆；⑤全程录屏会完整拍下这些操作。
 - **中间路线（推荐）**：人负责粘贴，agent 只负责**生成**命令；长 payload 用两步法
   （`echo <base64> | base64 -d > x`）绕开长粘贴限制。
+
+### ✅ 已落地：显式出口代理（2026-10-10）—— 让靶场流量走自建隧道
+
+补齐上面 Q1 第 2 条那个"当前没有"的缺口（commit `d5df744`）。
+
+```yaml
+# ~/.vulnclaw/config.yaml
+network:
+  http_proxy: "socks5://127.0.0.1:1080"   # 或 VULNCLAW_HTTP_PROXY=socks5://127.0.0.1:1080
+```
+
+```bash
+ssh -D 1080 <跳板机>            # SOCKS，**不是** -L（理由见下）
+pip install 'vulnclaw[socks]'   # SOCKS 需要 socksio
+```
+
+- **生效范围**：`fetch`、`http_probe_batch`、`brute_force_login`、`traffic_repeat`
+  （target-facing 工具）。**LLM 网关 / 情报 API / 远端 MCP 不走**这个代理 ——
+  免得把评测与情报流量误送进靶场隧道。
+- **语义**：显式代理对**私网目标照样生效**；**回环目标仍直连**（隧道对端会把
+  `127.0.0.1` 读成它自己）；强制 `trust_env=False`，实测可盖过
+  `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY=*`。
+- **为什么必须 `-D` 而不是 `-L`**：实测 httpx 交给 SOCKS 代理的是**主机名**
+  （SOCKS5 `ATYP=3`），DNS 在跳板机侧解析 → URL 里保留真实 host，
+  `--only-host <网段>` 与 `tp.qianxin.com` 黑名单**继续有判别力**。
+  `-L` 下 agent 只能请求 `http://127.0.0.1:8080`，闸门看到的 host 就是
+  `127.0.0.1`，**作用域闸失效** —— 这是隧道形态的唯一可信选法。
+- **坑（实测）**：`socks5h://` 在 httpcore <1.0.9 是裸 `KeyError: b'socks5h'`
+  （本机 1.0.2 复现、临时 venv 1.0.9 通过）→ 已统一改写成 `socks5://`。
+- **现场用同一份操作卡**：[`IR-FIELD-CARD.md`](IR-FIELD-CARD.md)。
+- ⚠️ **合规未变**：赛方"能否搭隧道"**尚未答复**，别把隧道当主路径
+  （守"人打字 + agent 出命令"）。
 
 ### ✅ 赛前培训提到的两件新交付物
 
