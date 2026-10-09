@@ -1164,12 +1164,12 @@ python .ir-tools\verify-ir.py
 |---|---|---|---|
 | P0-1 | AI 辅助合规性 | ✅ **已确认合规**（用户 2026-10-09 确认）。若群里/通知里有书面依据，把那句话抄到设备上备用 | **解除** |
 | P0-2 | ~~录屏落地~~ **已关闭（10/9）** | 用户拍板：**不用录屏、不用交** → 不再占分析机与磁盘；C: 14.6 GB 仍紧，工具箱/采集文件写 E:/G: | ✅ 无需动作 |
-| P0-3 | LLM 凭据/预算 | ✅ `llm.api_keys` 实测 **2 条**；✅ `competition.stall_turns` 已是 **6**；`solve_max_model_tokens` 保持不动 | 余额数字仍需你查/充 |
+| P0-3 | LLM 凭据/预算 | ✅ `llm.api_keys` 实测 **2 条**；✅ `competition.stall_turns` 已是 **6**；`solve_max_model_tokens` 保持不动。⚠️ **2026-10-09 实测用量把这条升成硬需求**：当天 5 个 run 共 **7.33M token**（本地 IR 彩排 0.43M / BUU LFI 0.09M / **CTF2 WEB2 3.38M（未解出、中途叫停）** / **CTF2 鸡公煲 3.41M（解出）**）—— **两道 CTF2 占 93%**；按这个量，¥49.91+¥47.22 打不了几道题，而**现场余额耗尽无法补** | ⚠️ **待充**（建议 ¥100–200 打底） |
 | P1-4 | 短命令卡 | ✅ **已补**：`references/paste-cards-linux.md` + `paste-cards-windows.md`（逐行可粘贴；Windows 那份在本机 Win11 23H2 逐条实跑） | **关闭** |
 | P1-5 | chrome-devtools 驱动终端 | ❌ `_npx` 缓存目录**不存在**（从未下载过） | 建议**不做** |
-| P1-6 | WP / PDF 交付 | ✅ **已打通**。拦路虎只是缺 extra，且**正确包名是 `reportlab`（不是 weasyprint）**。实测两条腿都出 PDF：`pdf_exporter.export_pdf()` → 10.1 KB、`%PDF-1.4`、5 个页对象；CLI `vulnclaw report <session.json> --pdf --pdf-out ...` → **rc=0** 且打印 "PDF exported" → 5.2 KB PDF | **关闭**（`pip install 'vulnclaw[pdf]'`） |
-| P1-7 | 端到端彩排 | ⚠️ **A 半已完成（2026-10-09）** —— 5/6 分、105 秒，但**暴露出 IR 交付链是断的**（见下）；B 半（副驾交接）待做 | A 半完成；待做 B 半 |
-| P1-8 | 时间盒/分工 | ✅ 人数已定 = **4 人** → §9.3 已按 4 人定稿（单/双人两档已删；顺带修掉草案里"统一由他人提交"与"一人一个账号"的矛盾；新增一条现场待确认：4 个账号的题集 / 能否共用单账号） | **关闭** |
+| P1-6 | WP / PDF 交付 | ✅ **已打通**。拦路虎只是缺 extra，且**正确包名是 `reportlab`（不是 weasyprint）**。实测两条腿都出 PDF：`pdf_exporter.export_pdf()` → 10.1 KB、`%PDF-1.4`、5 个页对象；CLI `vulnclaw report <session.json> --pdf --pdf-out ...` → **rc=0** 且打印 "PDF exported" → 5.2 KB PDF。⚠️ 补（10/9 晚）：**IR 题的 WP 仍走 `IR-WP-TEMPLATE.md` 人肉填** —— 同日曾加过 `vulnclaw wp`（自动把答案卡渲成 WP），**当晚经评估撤销**，理由与现实见 §9.2 与 §八 彩排小节 | **关闭**（`pip install 'vulnclaw[pdf]'`；IR 交付仍靠模板） |
+| P1-7 | 端到端彩排 | ⚠️ **agent 侧两半都已完成（2026-10-09）**：① **IR 半** —— 本地容器，105 秒 / 5-6 分，并**暴露出 IR 交付链是断的**（见下）；② **渗透半** —— CTF2 真靶机 BUU LFI COURSE 1，1 轮拿到 flag（注：那次复用了 3 天前的 playbook，**不算冷解**）。**B 半（副驾交接：你打字、我出命令）仍未做** —— 那是现场主路径，也是彩排唯一没验的一半 | ⚠️ **待做 B 半**（20–30 分钟） |
+| P1-8 | 时间盒/分工 | ✅ 人数已定 = **4 人** → §9.3 已按 4 人定稿（单/双人两档已删；顺带修掉草案里"统一由他人提交"与"一人一个账号"的矛盾；新增一条现场待确认：4 个账号的题集 / 能否共用单账号） | ⚠️ **角色已定稿，但名字还没落到人**（现场 3 分钟补：主攻 / 记录+计时+提交核对 / 素材+WP / 复核） |
 | P2-9 | paramiko / `remote_*` 真机验证 | ✅ **已升级 + 已验证**。2.8.1 → **5.0.0**（+invoke 3.0.3）。证据见下 | **关闭** |
 | P2-11 | `permission_mode: full_access` | 确认仍在（无人值守时风险自担） | 不变 |
 | P2-12/13 | `uvx`/`uv` 缺失、burp/ctf2 placeholder | 确认缺失/placeholder；本赛用不上 | 不变 |
@@ -1321,6 +1321,8 @@ python .ir-tools\verify-ir.py
 > ⇒ **flag 型渗透题**：`report` 只在该 run 真有 verified findings + 绑定证据时才是正确交付物（评估型 run）；答案卡型交付物回到 `IR-WP-TEMPLATE.md` 人肉填。
 
 ⚠️ **`evidence_bundles` 本次没生成，而且不是 bug**：agent 全程**没调 `traffic_bind_evidence`**（工具序列 = `fetch`×3 / `dir_enum` / `http_probe_batch` / `blackboard_record_answer` / `save_playbook`）⇒ run 里既无 `snapshots.jsonl` 也无 http_capture 引用，所以第 6 条那条线不启用。**只有 agent 真去固化证据才会有包** —— 这是纪律/prompt 问题，不是代码问题。
+
+**另记一道未解出（留卡点，避免盲目重跑）** —— CTF2 **WEB2**（Medium，带 `www_4.zip` 源码包）：**11 轮 / 117 次工具调用 / 3.38M token，中途叫停，未解出**（也**没有** playbook）。卡在**部署脏**上：① `config.inc.php` 的 DB 凭据是发布时的占位符 ⇒ `/search/` 直接 500，**DB 整条链是死的**；② `/.git` 是基础镜像 `hello-world-lamp` 的残留，**不是 CMS 的仓库**（顺着走是死胡同）；③ 但**目录列举开着**（`/controller/` 能列到 `Action.class.php`），agent 当时已转向源码审计，找**不依赖 DB** 的路径（上传 RCE / 源码泄露 / 模板注入），没走完就被停。**下次重跑**：把"DB 死 ⇒ 立刻换非 DB 链"写进 prompt，并先花 1 分钟确认目录列举到底能列出哪些控制器。
 
 ---
 
