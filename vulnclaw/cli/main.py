@@ -1001,8 +1001,9 @@ def _run_repl() -> None:
                 # Route to agent and detect whether this should be an autonomous loop
                 is_auto_mode = _should_auto_pentest(user_input, current_target)
 
-            # Detect target switch and reset context if the user mentions a new target
-            new_target = _extract_target_from_input(user_input)
+            # Detect target switch and reset context if the user mentions a new target.
+            # Copilot mode (VULNCLAW_REPL_NO_AUTO) mines nothing — see the helper.
+            new_target = _mined_target_for_session(user_input)
             if _should_switch_target(user_input, new_target, current_target):
                 console.print(_("cli.target_switch", from_target=current_target, to_target=new_target))
                 current_target = new_target
@@ -1159,8 +1160,11 @@ def _run_repl() -> None:
                         async def after_result(result):
                             nonlocal current_target, current_phase
                             if result:
-                                if result.target:
-                                    current_target = result.target
+                                # Copilot mode keeps the operator's target: the agent
+                                # reports what it mined from the paste (see helper).
+                                current_target = _target_after_agent_result(
+                                    current_target, result.target
+                                )
                                 if result.phase:
                                     current_phase = result.phase
                                 # 流式输出已由 TerminalStreamSink 实时显示；仅补印 sink 未显示的错误
@@ -3677,13 +3681,22 @@ def config_set(
 def config_get(
     key: str = typer.Argument(..., help="Config key in dot notation"),
 ) -> None:
-    """Get a config value."""
-    config = load_config()
-    parts = key.split(".")
-    obj = config
-    for part in parts:
-        obj = getattr(obj, part)
-    value = obj if not hasattr(obj, "model_dump") else obj.model_dump()
+    """Get a config value.
+
+    The traversal lives in :func:`get_config_value`, because ``config get`` is not the
+    only reader and the shapes differ: ``platforms.ctf2.enabled`` and
+    ``mcp.servers.chrome-devtools.enabled`` sit in dicts / ``extra="allow"`` sections,
+    which a bare ``getattr`` chain cannot reach. A missing key is an operator error,
+    not a crash: report it and exit non-zero.
+    """
+    from vulnclaw.config.settings import get_config_value
+
+    try:
+        value = get_config_value(key)
+    except KeyError:
+        err_console.print(f"[red]未知配置键：{key}[/red]")
+        raise typer.Exit(2) from None
+    value = value if not hasattr(value, "model_dump") else value.model_dump()
     if isinstance(value, str) and ("key" in key.lower() or "pass" in key.lower()):
         value = value[:8] + "..." if len(value) > 8 else "***"
     console.print(f"{key} = {value}")
@@ -4543,6 +4556,56 @@ def target_state_clear_cmd(
 # 鈹€鈹€ Auto-pentest detection 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 
+def _repl_no_auto() -> bool:
+    """True when the operator pinned the REPL to single-turn chat.
+
+    ``VULNCLAW_REPL_NO_AUTO=1`` (also true/yes/on) is the **copilot-mode** switch: a
+    human drives the target console and pastes command output back, so the REPL must
+    answer in one turn instead of starting the autonomous loop.
+
+    Field motivation (2026-10-09 rehearsal): an incident-response paste always carries
+    paths such as ``/usr/sbin/cron`` or ``/tmp/.x/.kworker``, and the local-path branch
+    at the end of :func:`_should_auto_pentest` extracts a "target" from them (a cron
+    line ``*/3 * * * *`` yields ``/3``), so *every* pasted message re-entered the
+    autonomous loop. Unset keeps the previous behaviour byte-for-byte.
+    """
+    return os.environ.get("VULNCLAW_REPL_NO_AUTO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _mined_target_for_session(user_input: str) -> Optional[str]:
+    """Session target mined from the operator's message, if any.
+
+    In copilot mode (:func:`_repl_no_auto`) **nothing is mined**: the operator drives
+    the target console and pastes its output back, and such a paste would otherwise
+    set the session target to a path taken from the dump (measured 2026-10-09:
+    ``/usr/sbin/cron``, plus ``/3`` from a ``*/3 * * * *`` cron line). Mine nothing and
+    let the operator set a target deliberately with the ``target`` command when one is
+    actually wanted — a pasted terminal dump never is one.
+    """
+    if _repl_no_auto():
+        return None
+    return _extract_target_from_input(user_input)
+
+
+def _target_after_agent_result(current: Optional[str], reported: Optional[str]) -> Optional[str]:
+    """Session target after one single-turn chat.
+
+    Copilot mode keeps the operator's target untouched: the agent reports back whatever
+    *it* mined out of the pasted dump (measured 2026-10-09: ``access.log`` and
+    ``/usr/sbin/cron``), and adopting that would silently retarget the session off a
+    log line. Outside copilot mode this is the previous behaviour, ``reported or
+    current`` -- the same "only overwrite when the agent reported one" rule as before.
+    """
+    if _repl_no_auto():
+        return current
+    return reported or current
+
+
 def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool:
     """Determine if user input should trigger autonomous pentest loop.
 
@@ -4554,6 +4617,11 @@ def _should_auto_pentest(user_input: str, current_target: Optional[str]) -> bool
     - A target is present + multi-step task indicators
     """
     from vulnclaw.cli.user_intent import is_conversational_checkin
+
+    # Operator opt-out (copilot mode): never take the autonomous path. Checked before
+    # every other branch so a pasted terminal dump cannot re-enter the solve loop.
+    if _repl_no_auto():
+        return False
 
     # Readiness / meta questions (e.g. "ready to begin bug hunting?") get a
     # spoken answer first — never jump straight into the solve tool loop.

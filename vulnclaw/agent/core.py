@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,45 @@ try:
 except Exception:
     KnowledgeRetriever = None
     RetrieverStatus = None
+
+
+def _chat_playbook_enabled() -> bool:
+    """``VULNCLAW_CHAT_PLAYBOOKS=1`` -> single-turn chat also receives prior-run notes.
+
+    Gated so the default (and the noise-free copilot contract) is untouched. Needed
+    because copilot mode tells the agent not to call tools, and the solve loop's own
+    comment records that model initiative never invoked ``lookup_playbook`` on its own
+    -- so without this the 300+ notes on a prepared machine are unreachable in exactly
+    the mode an operator uses at a console-only event.
+    """
+    return os.environ.get("VULNCLAW_CHAT_PLAYBOOKS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _copilot_pins_target() -> bool:
+    """True when the operator pinned the session target (copilot mode).
+
+    ``VULNCLAW_REPL_NO_AUTO=1`` means a human drives the target console and pastes its
+    output back. The REPL already refuses to *mine* a target from such a paste
+    (``cli.main._mined_target_for_session``), but ``chat`` has a second adoption point
+    of its own -- :meth:`AgentCore._detect_target` on the raw message -- and it writes
+    the result into ``context.state.target``, which then reaches the system prompt
+    ("当前渗透测试目标: …") and the on-disk target state. Measured 2026-10-09 on a
+    trimmed IR paste: the prompt carried ``当前渗透测试目标: access.log`` and
+    ``~/.vulnclaw/targets/<key>/state.json`` was rewritten with ``target: access.log``.
+    A pasted terminal dump is never a target, so in this mode chat keeps the explicit
+    one (or none). Unset keeps the previous behaviour byte-for-byte.
+    """
+    return os.environ.get("VULNCLAW_REPL_NO_AUTO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 class AgentCore:
@@ -593,6 +633,47 @@ class AgentCore:
 
     # ── Single-turn chat (for manual REPL interaction) ──────────────
 
+    def _chat_playbook_brief(self, origin: str, goal: str) -> tuple[str, list[dict]]:
+        """Prior-run note block for one chat turn. ``("", [])`` when nothing matches.
+
+        Mirrors the solve loop's code-guaranteed reuse (``solver._inject_prior_playbooks``,
+        which exists precisely because "past runs skipped ``lookup_playbook`` entirely").
+        Copilot mode is the same problem from the other side: the operator wants the notes,
+        and the agent is instructed not to call tools — so relying on model initiative
+        would mean never seeing them. Best-effort: any failure returns no block.
+        """
+        try:
+            from vulnclaw.agent.playbook import (
+                challenge_class_signature,
+                target_fingerprint,
+            )
+            from vulnclaw.agent.solver import (
+                _format_prior_playbook_brief,
+                _lookup_prior_playbooks,
+            )
+        except Exception:
+            return "", []
+
+        queries: list[tuple[str, str]] = []
+        try:
+            fingerprint = target_fingerprint(origin, goal)
+            if fingerprint:
+                queries.append(("target", fingerprint))
+            signature = challenge_class_signature(goal)
+            if signature:
+                queries.append(("class", signature))
+            if not queries:
+                return "", []
+            matches, _gated = _lookup_prior_playbooks(queries)
+        except Exception:
+            return "", []
+        if not matches:
+            return "", []
+        try:
+            return _format_prior_playbook_brief(matches), matches
+        except Exception:
+            return "", []
+
     async def chat(
         self,
         user_input: str,
@@ -616,8 +697,15 @@ class AgentCore:
         # Honor an explicit language directive (e.g. "用中文回答") and persist it.
         self._apply_user_language_directive(user_input)
 
-        # Detect target and phase from input
-        detected_target = target or self._detect_target(user_input)
+        # Detect target and phase from input. In copilot mode a target is never mined
+        # from the message: the operator drives the console and pastes its output back,
+        # and such a paste is full of filenames/paths that ``_detect_target`` reads as a
+        # target (see :func:`_copilot_pins_target`). An explicitly passed ``target``
+        # still wins -- that is the operator stating one.
+        if _copilot_pins_target():
+            detected_target = target or self.context.state.target
+        else:
+            detected_target = target or self._detect_target(user_input)
         detected_phase = self._detect_phase(user_input)
 
         # Update session state
@@ -636,6 +724,29 @@ class AgentCore:
         system_prompt = self._build_system_prompt(
             detected_target, auto_mode=False, user_input=user_input
         )
+
+        # Optional: prior-run notes for single-turn chat (VULNCLAW_CHAT_PLAYBOOKS=1).
+        # Code-guaranteed rather than left to model initiative, for the same reason the
+        # solve loop does it (see _chat_playbook_brief).
+        if _chat_playbook_enabled():
+            playbook_brief, playbook_matches = self._chat_playbook_brief(
+                str(detected_target or ""), user_input
+            )
+            if playbook_brief:
+                system_prompt = f"{system_prompt}\n\n{playbook_brief}"
+                try:
+                    from vulnclaw.agent.solver import (
+                        _notify_operator,
+                        _playbook_stat_line,
+                    )
+
+                    _notify_operator(
+                        stream_sink,
+                        "[playbook] injected "
+                        + "; ".join(_playbook_stat_line(m) for m in playbook_matches),
+                    )
+                except Exception:
+                    pass
 
         # Call LLM
         try:

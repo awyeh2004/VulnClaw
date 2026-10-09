@@ -330,6 +330,17 @@ class ProbeMixin:
 
     async def _preinit_chrome_devtools(self) -> None:
         """预初始化 chrome-devtools: 提前建 session + 发现工具."""
+        # 关掉的 server 不该每轮都被探一次：实测（2026-10-09）即使
+        # `mcp.servers.chrome-devtools.enabled=false`，单轮 chat 仍会每轮调到这里，
+        # 每次都白起一个 npx 子进程并打一行 "persistent session died"。调用点
+        # （`cli/main.py` 的单轮 chat）不查开关，只有 `start_enabled_servers` 查 ——
+        # 所以守卫必须放在这里才盖得住所有调用方。
+        try:
+            entry = self.config.mcp.servers.get("chrome-devtools")
+        except AttributeError:
+            entry = None
+        if entry is None or not getattr(entry, "enabled", False):
+            return
         try:
             await self._get_or_create_persistent_stdio_session("chrome-devtools")
         except BaseException:
