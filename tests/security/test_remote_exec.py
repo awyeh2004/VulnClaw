@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import io
 import tarfile
+import types
 
 import pytest
 
+import vulnclaw.agent.remote as remote_module
 from vulnclaw.agent.exec_gate import ExecutionGate, GateRequest
 from vulnclaw.agent.remote import (
     COLLECT_MARKER,
@@ -39,10 +41,12 @@ from vulnclaw.agent.remote import (
     _target_desc,
     collect_plan,
     collector_commands,
+    execute_remote_tool,
     list_hosts,
     remote_tool_schemas,
     resolve_host,
 )
+from vulnclaw.config.domain_models import TaskConstraints
 from vulnclaw.config.schema import SSHHostConfig, VulnClawConfig
 
 
@@ -472,3 +476,91 @@ class TestGateAppliesToRemote:
         gate = ExecutionGate(mode="auto_review")
         outcome = await gate.authorize(GateRequest(kind="python", display="print(1)"))
         assert outcome.approved is False
+
+
+# ── the hard denylist covers SSH too ──────────────────────────────────────
+#
+# Added 2026-10-09 with the fix. `remote_*` was the one egress path that never
+# consulted `blocked_hosts`: fetch / traffic_repeat / http_probe_batch / recon /
+# nmap all run through `enforce_host_path_constraints`, so the operator's hard
+# denylist (`safety.denied_hosts`, e.g. the scoring platform) had a hole exactly
+# the size of this module. Found reviewing the 2026-10-09 commits: c6929e5 added
+# the denylist, 4b4eba4 added the SSH-adjacent evidence tooling, and neither
+# looked at the other.
+
+
+class _FakeRemoteResult:
+    """Stands in for `RemoteResult` so a leak past the gate cannot open SSH."""
+
+    def render(self, max_chars=None):  # noqa: ARG002 - signature parity
+        return "fake-transport-ran"
+
+
+def _record_transport(calls: list):
+    def _fn(*args, **kwargs):
+        calls.append(args)
+        return _FakeRemoteResult()
+
+    return _fn
+
+
+class _AgentStub:
+    """Only what `execute_remote_tool` reads: config, session_state, runtime."""
+
+    def __init__(self, constraints=None):
+        self.config = _cfg_with_hosts(jump={"hostname": "bastion.internal", "user": "ops"})
+        self.session_state = types.SimpleNamespace(task_constraints=constraints)
+        self.runtime = types.SimpleNamespace(run_id="rid-1")
+
+
+class TestBlockedHostsCoverSsh:
+    async def test_alias_in_blocked_hosts_is_refused(self, monkeypatch):
+        agent = _AgentStub(TaskConstraints(blocked_hosts=["jump"]))
+        calls: list = []
+        monkeypatch.setattr(remote_module, "run_command", _record_transport(calls))
+
+        out = await execute_remote_tool(agent, "remote_exec", {"host": "jump", "command": "id"})
+
+        assert "constraint_violation" in out
+        assert "jump" in out
+        assert calls == [], "a blocked host must never reach the transport"
+
+    async def test_resolved_hostname_is_matched_too(self, monkeypatch):
+        """The denylist may name the machine, not the alias we gave it."""
+        agent = _AgentStub(TaskConstraints(blocked_hosts=["bastion.internal"]))
+        monkeypatch.setattr(remote_module, "run_command", _record_transport([]))
+
+        out = await execute_remote_tool(agent, "remote_exec", {"host": "jump", "command": "id"})
+
+        assert "constraint_violation" in out
+
+    async def test_collect_and_fetch_go_through_the_same_gate(self):
+        agent = _AgentStub(TaskConstraints(blocked_hosts=["jump"]))
+
+        collect = await execute_remote_tool(agent, "remote_collect", {"host": "jump"})
+        fetch = await execute_remote_tool(
+            agent,
+            "remote_fetch",
+            {"host": "jump", "remote_path": "/etc/passwd", "local_path": "collected.txt"},
+        )
+
+        assert "constraint_violation" in collect
+        assert "constraint_violation" in fetch
+
+    async def test_an_unblocked_host_is_not_refused(self, monkeypatch):
+        """Regression guard: the gate must not veto the rest of the inventory."""
+        agent = _AgentStub(TaskConstraints(blocked_hosts=["tp.qianxin.com"]))
+        monkeypatch.setattr(remote_module, "run_command", _record_transport([]))
+
+        out = await execute_remote_tool(agent, "remote_exec", {"host": "jump", "command": "id"})
+
+        assert "constraint_violation" not in out
+
+    async def test_no_configured_scope_keeps_previous_behaviour(self, monkeypatch):
+        """No task scope at all -> unchanged: the approval gate decides."""
+        agent = _AgentStub(None)
+        monkeypatch.setattr(remote_module, "run_command", _record_transport([]))
+
+        out = await execute_remote_tool(agent, "remote_exec", {"host": "jump", "command": "id"})
+
+        assert "constraint_violation" not in out

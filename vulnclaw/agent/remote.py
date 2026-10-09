@@ -1150,6 +1150,51 @@ async def _authorize(agent: Any, config: Any, host: Any, alias: str, display: st
     )
 
 
+def _blocked_host_violation(agent: Any, host: Any, alias: str) -> str | None:
+    """Refusal text when the run's constraints block this SSH target, else None.
+
+    Every other target-facing path (``fetch`` / ``traffic_repeat`` /
+    ``http_probe_batch`` / recon / nmap) is gated by
+    ``builtin_tools.enforce_host_path_constraints``; the SSH tools never were, so
+    the operator's hard denylist (``safety.denied_hosts``, merged into a run's
+    constraints by ``AgentCore._harden_constraints``) had a hole exactly the size
+    of this module: a host declared off-limits for HTTP was still reachable over
+    SSH.
+
+    Only the **blocked** side is enforced here, deliberately. ``allowed_hosts``
+    is the engagement's *target* scope, and an SSH inventory legitimately holds
+    infrastructure outside it (a jumpbox/bastion). "Never touch this" is the
+    operator's absolute and must hold on every transport; "only these" was never
+    meant to constrain the inventory.
+
+    Both spellings are checked -- the alias and the resolved hostname -- because
+    the denylist may name either one, and an alias is free to differ from it.
+    """
+    constraints = getattr(getattr(agent, "session_state", None), "task_constraints", None)
+    if constraints is None:
+        return None
+    patterns = getattr(constraints, "blocked_hosts", None) or []
+    if not patterns:
+        return None
+
+    # Lazy, like the other vulnclaw imports in this module: url_utils is a leaf.
+    from vulnclaw.config.url_utils import host_in_scope
+
+    candidates = (
+        str(alias or "").strip().lower(),
+        str(_hv(host, "hostname", "") or "").strip().lower(),
+    )
+    for candidate in candidates:
+        if candidate and host_in_scope(candidate, patterns):
+            return (
+                f"[!] [constraint_violation] Host {candidate} is blocked by task constraints "
+                f"for SSH target {alias}; remote_exec/remote_collect/remote_fetch will not "
+                "connect. Remove it from safety.denied_hosts (or the task's blocked hosts) "
+                "to allow SSH."
+            )
+    return None
+
+
 async def execute_remote_tool(agent: Any, tool_name: str, args: dict[str, Any]) -> str:
     """Dispatch remote_* tools. Called from builtin_tools."""
     config = getattr(agent, "config", None)
@@ -1161,6 +1206,14 @@ async def execute_remote_tool(agent: Any, tool_name: str, args: dict[str, Any]) 
         host, alias = resolve_host(config, str(args.get("host") or args.get("alias") or ""))
     except ValueError as exc:
         return f"[!] {exc}"
+
+    # SSH is an egress path too, so the hard denylist has to hold here as well
+    # (see _blocked_host_violation). Placed after resolution -- both the alias and
+    # the real hostname get matched -- and before every tool branch, so
+    # remote_exec / remote_collect / remote_fetch are all covered.
+    blocked = _blocked_host_violation(agent, host, alias)
+    if blocked is not None:
+        return blocked
 
     connect_timeout = float(_cfg_value(config, "connect_timeout_s", 15.0))
 
