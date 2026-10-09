@@ -3,6 +3,24 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 复测（A1）：<code>vulnclaw retest</code> —— 已上报的结论可以被复核，但改处置状态只有一个入口</summary>
+
+- **新：复测工作流（A1，借鉴 ARTEX 的 `finding_retests` / `retester` 语义，不抄代码）** — 2026-10-09。此前 finding 一旦上报就是单向的：报告上写着"已验证 / 待验证"，**没有任何机制回答"打补丁之后这条还成立吗"**，处置状态也没有第二个来源能改。新增 `vulnclaw/retest/`（`store.py` 文件式会话存储、`service.py` 语义内核）、`vulnclaw retest` 子命令、`retester` 叶子角色。四条不变量照 ARTEX 的设计意图（而非它的 Go+PostgreSQL 实现）：
+  ① **一个 finding 只有一条复测会话** —— 重复发起返回既有记录，不新开、不覆盖已冻结的快照；进程重启遗留的 `running` 由 `--sweep` 封成 `stopped`，**不自动重放**（对齐 ARTEX 的 orphan sweep）。
+  ② **结论三选一 `reproduced` / `fixed` / `inconclusive`，只有第一轮能写结论** —— 后续追问轮只追加记录，`RetestConflictError` 拒绝覆盖第一轮结论；**只有 `completed + fixed` 才把 `lifecycle_status` 翻成 `fixed`**，`reproduced` / `inconclusive` 只留痕、不改状态。
+  ③ **发起即冻结快照** —— finding 指纹 + `evidence_version` + 原任务约束（scope / methods），复测期间 finding 被改写也不改变本轮的判定依据。
+  ④ **报告门槛不动** —— `is_report_included` 仍只看 `verification_status`：复测改变的是**处置状态**，不是验证状态。`retest_history` 随 finding 进 `findings.json`，`summary` 新增 `fixed` 桶（`intel/findings.py` 早已把 `fixed` 当终态，词表本就对齐）。
+- **`retester` 角色**（叶子代理）—— 只读 + 探测工具面（无 `shell_command` / `python_execute` / `agent_run` / 提权），prompt 明令"不重跑原任务、不扩大 scope、不碰其他 finding"；`build_retest_brief()` 把约束、三选一结论与"最小定向复测"写进交给它的话术里。
+- **CLI 默认不写回 run 目录** —— `vulnclaw retest <finding-id> --findings <findings.json|run 目录> [--verdict V] [--note …] [--constraints k=v,…]`、`--list`、`--sweep`；状态权威在复测存储里，CLI 只读已发布的 `findings.json` 定位 finding，**避免把运行产物改成另一种样子**。
+- **测试** — `tests/retest/` **33 passed**（store 不变量 10 / service 语义 8 / CLI 接线 5 / 角色 5 / 报告纯增量 4，含 1 参数化）；连带 `tests/report` + `tests/cli` + `tests/config` + `tests/agent/test_roles.py` + `tests/agent/test_spawn_role_mapping.py` 实测 **731 passed**（0 failed）。
+- **文档** — `docs/project-map.md` 补 `retest/` 模块表与 CLI 命令表。
+- **未做（下一步）** — Web 端点（`/api/findings/{id}/retest`）与报告正文的"历次复测"段落；两者都需要一个 findings 注册表，留到 A1 第二轮。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — flag 完整性：开括号必须在真实输出里找到配对的闭括号（不许自己补 <code>}</code>）</summary>
 
 - **完成闸新增 flag 完整性判据：开括号必须观测到闭括号** — 2026-10-09 彩排真实事故：一道六段碎片题只拼出五段，模型**自己把缺的 `}` 补上**，候选于是既匹配 flag 正则、又"看起来有证据支撑" —— 它已把那个串写进黑板，而黑板的 tool result 本身落入证据面（`_flag_token_grounded` 的 `flag in evidence_text`），**等于自己给自己担保** —— 结果被当作答案报出，**平台判错**。新增 `agent/ctf_mode.flag_completeness_issues()`，两条刻意收窄的判据：① 答案里出现已知前缀的开括号 token、而全文找不到 `}`（`_FLAG_RE` 本就要求闭括号，所以缺尾段的候选根本不会被提取 —— 缺的是"把这件事说出来"）；② 完整候选的 UUID body 末段不足 12 位（8-4-4-4-6 不可能是完整 UUID）。`_completion_gate` 在 grounding 比对**之前**用它拒绝，理由写明"尾段从未被观测到，不要自己补括号"。⚠️ 判据**不能**写成"整串必须在工具输出里逐字符出现过"：正解本身就是拼装出来的，从不在任何单次输出里完整出现 —— 这条边界写在函数注释里。**测试**：`tests/agent/test_completion_gate.py` 新增 4 例（五段拼装即使"有证据"也被拒 / 完整 UUID 仍放行 / 无闭括号的措辞 / 6 个反例证明判据收窄 + 脱敏指纹形不误伤）；`tests/agent` **1425 passed**（+1 既有环境性失败）。**文档**：`IR-RUNBOOK.md` §五"提交前自查"补"括号必须配对 + 自我接地"两条，并注明拼装是允许的。
