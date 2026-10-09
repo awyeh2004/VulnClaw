@@ -1283,7 +1283,7 @@ python .ir-tools\verify-ir.py
 | 问题 | 修法 | 验证 |
 |---|---|---|
 | ② CLI 报告拿不到 run 证据 | `generate_report_from_file()` 先按 `session.run_id` 反查 run 目录；`vulnclaw report` 加 `--run-dir`（显式优先）。**根因比表面更深**：`vulnclaw solve` 从前根本没把 run 写进会话（`session.run_id` 为空，只有 subagent 那条路会生成）→ 一并修在 `orchestrator` 注入 `agent.run_dir` 的地方 | `tests/traffic/test_evidence_report.py` 新增 4 例（正文内联 / 显式优先 / 反查 best-effort / 无 run 不崩）；**真实 run 复核**：新会话 `session.run_id` == `run.json.run_id`，`find_run_dir_by_run_id` 反查命中 run 目录 |
-| ① WP 要人肉抄答案卡 | **未修 —— 同日撤回工具方案**：把答案卡渲成交付物的 `vulnclaw wp` 已删除（命令 / `vulnclaw/report/ir_wp.py` / 其测试一并移除；`test_the_report_itself_still_omits_answer_cards` 已迁到 `tests/report/test_report.py`）。报告跳过答案卡的设计**不变**（round-10 finding #1） | — |
+| ① WP 要人肉抄答案卡 | **关闭 —— 不做这个工具（同日撤回 `wp` 方案）**：把答案卡渲成交付物的 `vulnclaw wp` 已删除（命令 / `vulnclaw/report/ir_wp.py` / 其测试一并移除；`test_the_report_itself_still_omits_answer_cards` 已迁到 `tests/report/test_report.py`）。报告跳过答案卡的设计**不变**（round-10 finding #1）；WP 走 `IR-WP-TEMPLATE.md` 人肉填 | — |
 
 ⇒ 15:00–15:20 那段仍是**人肉抄 6 条结论 + 证据**（落到分工里的人头上），WP 走 `IR-WP-TEMPLATE.md`。
 
