@@ -238,11 +238,26 @@ class EvidenceStore:
 
         Mirrors ``atomic_write_text``; duplicated here only because that helper
         takes ``str`` and evidence bodies are bytes.
+
+        Round-1 (2026-10-09) postmortem: ``os.fdopen`` used to be called inside
+        the ``with``, so when the open itself failed (fd exhaustion, MemoryError)
+        nothing closed the descriptor ``mkdtemp_sibling`` had just handed over --
+        it leaked until process exit. Only the temp *file* was cleaned up, which
+        is why the leak was invisible. The descriptor is now released on that one
+        path; ``fdopen`` owns it as soon as it returns.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         handle_fd, tmp_name = mkdtemp_sibling(path)
         try:
-            with os.fdopen(handle_fd, "wb") as handle:
+            try:
+                handle = os.fdopen(handle_fd, "wb")
+            except BaseException:
+                try:
+                    os.close(handle_fd)
+                except OSError:  # pragma: no cover - descriptor already gone
+                    pass
+                raise
+            with handle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())

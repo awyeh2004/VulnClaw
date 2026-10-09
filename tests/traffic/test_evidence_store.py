@@ -464,3 +464,49 @@ def test_blob_digests_ignores_names_the_store_never_wrote(tmp_path):
     assert upper.exists()
     # and the referenced evidence survived
     assert evidence.response_body(snapshot.snapshot_id) == _raw_response(_exchange())
+
+
+# ── the descriptor is released when the temp file cannot be opened ───────────
+
+
+class _OsWithoutFdopen:
+    """``os`` proxy whose ``fdopen`` always fails; everything else delegates.
+
+    Patching the real ``os`` module would hit pytest's own I/O, and the leak is
+    only reachable on the failure path of ``fdopen`` -- so the failure is injected
+    at *this module's* reference to ``os`` instead.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def fdopen(self, *args, **kwargs):
+        raise MemoryError("simulated fdopen failure")
+
+
+def test_a_failed_fdopen_does_not_leak_the_descriptor(tmp_path, monkeypatch):
+    """Round-1 (2026-10-09): the fd from ``mkdtemp_sibling`` leaked on that path.
+
+    ``os.fdopen`` used to be called *inside* the ``with``, so a failure in the open
+    itself (fd exhaustion, MemoryError) left the descriptor open until process
+    exit. The temp *file* was still cleaned up, which is exactly what made the leak
+    invisible: the failure looked fully handled.
+    """
+    import vulnclaw.traffic.evidence as evidence_module
+
+    _, evidence, _ = _stores(tmp_path)
+    target = evidence.base_dir / "blobs" / "ab" / "abc.bin"
+    fd, tmp_name = evidence_module.mkdtemp_sibling(target)
+
+    monkeypatch.setattr(evidence_module, "mkdtemp_sibling", lambda path: (fd, tmp_name))
+    monkeypatch.setattr(evidence_module, "os", _OsWithoutFdopen(os))
+
+    with pytest.raises(MemoryError):
+        evidence._atomic_write_bytes(target, b"payload")
+
+    with pytest.raises(OSError):
+        os.fstat(fd)  # closed -> EBADF; leaked -> still open and this passes
+    assert not os.path.exists(tmp_name), "the temp file must still be cleaned up"
