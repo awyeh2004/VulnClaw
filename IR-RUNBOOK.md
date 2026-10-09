@@ -1158,3 +1158,26 @@ python .ir-tools\verify-ir.py
    **AI 辅助合规**这一条；隧道合规没被放宽，客户端支持虽已就绪（`network.http_proxy`，
    commit `d5df744`），但**合规没松就别当主路径**。
 2. **录屏是否需上交** + 用什么软件仍待问。
+
+### ⚠️ 10/9 新发现：`.ir-tools` 的 vol 自检 FAIL=2（不是本次改动引起）
+
+`.ir-tools/verify-ir.py` 现报 `PASS=97 FAIL=2 WARN=0`（此前记录是 FAIL=0），两条失败
+都在 volatility3：
+
+```
+[FAIL] vol 调用未输出版本号
+[FAIL] vol 真分析无预期输出（banners 未提取到 PDB 横幅）
+```
+
+复查到**两个独立问题**（都不是代码改动引起的，我没碰 `.ir-tools`）：
+
+1. **`bin/vol.cmd` 用的是裸 `python`** —— `python "%HERE%_vol_entry.py" %*`。在这个 App
+   注入 PATH 的 shell 里，`python` 解析到了 **Windows Store 的 stub**
+   （`…\AppData\Local\Microsoft\WindowsApps\python`）→ 什么都不输出、静默失败。
+   现场 shell 里 `python` 到底是谁，开赛前必须确认一次。
+2. **即使用绝对路径的 Anaconda python 跑，`bin/_vol_entry.py --help` 也是
+   `rc=139`（SIGSEGV）、stdout/stderr 全空** —— 这是崩溃，不是"找不到解释器"。
+   四点八那次 `python -S` 隔离修的是 pyOpenSSL 冲突；现在换成了段错误，需要再查。
+
+**影响**：内存取证（volatility3）目前**在本机不可用**。两条路二选一：现场把它修好，
+或改用**平台内置工具库**（培训确认平台自带免费工具可下载）。**别等到要用的时候才发现**。
