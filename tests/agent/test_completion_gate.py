@@ -68,7 +68,9 @@ def test_missing_flag_in_flag_goal_rejected():
 
 
 def test_five_of_six_fragments_is_refused_even_though_it_looks_grounded():
-    flag = "CTF2{515ef9f2-eac9-4cf3-9808-eac092}"
+    # Same SHAPE as the real incident (8-4-4-4-6) but a synthetic body: the real value is
+    # a per-instance flag and has no business being stored in the repo.
+    flag = "CTF2{01234567-89ab-cdef-0123-456789}"
     st = _make_flag_state(f"note: Full flag = {flag}\n")
     ok, reason, _ = _completion_gate(st, f"FINAL: {flag} (evidence e008)")
     assert not ok
@@ -85,9 +87,9 @@ def test_complete_uuid_flag_still_completes():
 
 def test_unclosed_candidate_says_not_to_supply_the_brace():
     """No complete flag, only an opening-brace fragment: name the missing brace."""
-    st = _make_flag_state("evidence so far: CTF2{515ef9f2-eac9-4c")
+    st = _make_flag_state("evidence so far: CTF2{01234567-89ab-cdef-0123")
     ok, reason, _ = _completion_gate(
-        st, "FINAL: assembled so far CTF2{515ef9f2-eac9-4c (缺尾段)"
+        st, "FINAL: assembled so far CTF2{01234567-89ab-cdef-0123 (缺尾段)"
     )
     assert not ok
     assert "UNCLOSED" in reason
@@ -110,7 +112,7 @@ def test_completeness_check_is_narrow():
         assert flag_completeness_issues(f"answer says {flag}", [flag]) == [], flag
 
     # a masked fingerprint is not an unclosed candidate
-    assert flag_completeness_issues("note: CTF2{515e…3680}", []) == []
-    # ...but these two shapes are
-    assert flag_completeness_issues("x", ["CTF2{515ef9f2-eac9-4cf3-9808-eac092}"])
-    assert flag_completeness_issues("只有 CTF2{515ef9f2-eac9-4c 这一段", [])
+    assert flag_completeness_issues("note: CTF2{0123…6789}", []) == []
+    # ...but these two shapes are (synthetic bodies, same shapes as the real incident)
+    assert flag_completeness_issues("x", ["CTF2{01234567-89ab-cdef-0123-456789}"])
+    assert flag_completeness_issues("只有 CTF2{01234567-89ab-cdef-0123 这一段", [])
