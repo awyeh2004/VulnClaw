@@ -128,6 +128,48 @@ class TestIntakeQuarantine:
         assert finding.verification_status == "verified"
         assert finding.lifecycle_status == "verified"
 
+    def test_promoting_later_matches_being_constructed_verified(self):
+        # The quarantine is stamped at CONSTRUCTION time, so a finding built bare
+        # and promoted afterwards must end up byte-identical to one constructed
+        # already-verified. It used to keep "[未验证]" in the title and the
+        # "缺少验证证据" advisory in the description while its status said
+        # verified -- so the report printed a ✅ 已验证 row that contradicted
+        # itself twice (2026-10-09 audit finding #1).
+        finding = VulnerabilityFinding(
+            title="Promoted later", description="found by hand", severity="High"
+        )
+        assert finding.title.startswith("[未验证]")
+        assert "缺少验证证据" in finding.description
+
+        finding.mark_verified(note="reproduced")
+        assert finding.title == "Promoted later"
+        assert finding.description == "found by hand"
+        assert finding.verification_status == "verified"
+        assert finding.lifecycle_status == "verified"
+
+        constructed = VulnerabilityFinding(
+            title="Promoted later", description="found by hand", severity="High", verified=True
+        )
+        assert (finding.title, finding.description) == (constructed.title, constructed.description)
+
+    def test_rejecting_later_also_lifts_the_quarantine_stamp(self):
+        # Rejected is terminal too: a ruled-out report must not stay titled
+        # "[未验证]" and keep the "please supply evidence" advice.
+        finding = VulnerabilityFinding(title="Bogus", description="guess", severity="High")
+        finding.mark_rejected("control request disproved it")
+        assert finding.title == "Bogus"
+        assert "缺少验证证据" not in finding.description
+        assert finding.lifecycle_status == "rejected"
+
+    def test_clear_intake_quarantine_undoes_the_lifecycle_demotion(self):
+        # Lifting the marks WITHOUT promoting must also undo the demotion, or a
+        # now-substantiated finding stays stuck in needs_manual_review.
+        finding = VulnerabilityFinding(title="Bare", severity="Low")
+        assert finding.lifecycle_status == "needs_manual_review"
+        assert finding.clear_intake_quarantine() is True
+        assert finding.lifecycle_status == "candidate"
+        assert finding.clear_intake_quarantine() is False  # idempotent
+
     def test_constructed_verified_bare_finding_keeps_terminal_status(self):
         # A finding constructed already-verified must not be re-stamped "[未验证]"
         # nor demoted to needs_manual_review, even with empty evidence/vuln_type.

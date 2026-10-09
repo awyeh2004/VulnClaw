@@ -212,6 +212,166 @@ class TestAgentCanActuallyDriveIt:
         assert session.findings == [], "a rejected report must not create a finding"
 
 
+class TestReportFindingRecordsTheTruth:
+    """Re-reporting is how a finding gets promoted; it must not lie, or duplicate.
+
+    Measured on the tree that introduced ``report_finding`` (2026-10-09 audit),
+    the natural live order -- report the bug when you find it, report again once
+    you have exploited it -- could not promote anything:
+
+    * ``add_finding``'s exact finding_id dedup returns False *without* applying
+      its keep-the-stronger-evidence rule, so the second report was silently
+      dropped while the tool still answered "已记为已验证漏洞";
+    * when the second report carried a URL its generated id changed, so the same
+      bug was filed a SECOND time instead;
+    * and a bare ``verified=true`` report put a row marked ✅ 已验证 into the
+      report whose own title said "[未验证]" and whose body said it had no
+      evidence at all.
+    """
+
+    #: A finding with real substance -- the shape a model reports after exploiting.
+    CANDIDATE = {
+        "title": "SQL Injection",
+        "severity": "High",
+        "vuln_type": "SQLi",
+        "description": "the id parameter is concatenated into the SQL query",
+        "remediation": "use parameterized queries",
+    }
+
+    def _agent(self, run_dir=None):
+        session = SessionState(target="http://app.test")
+        return session, _AgentStub(session, run_dir)
+
+    def test_a_bare_verified_report_is_recorded_as_a_candidate(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        session, agent = self._agent()
+        out = execute_report_finding_tool(
+            agent, {"title": "SQL Injection in /user", "verified": True}
+        )
+
+        assert len(session.findings) == 1
+        assert session.findings[0].verified is False
+        assert session.findings[0].lifecycle_status == "needs_manual_review"
+        assert session.get_verified_findings() == [], (
+            "a verified claim with nothing to check against must not reach the report"
+        )
+        assert "未被采纳" in out, out
+
+    def test_re_reporting_promotes_the_existing_finding_instead_of_dropping_it(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        session, agent = self._agent()
+        execute_report_finding_tool(agent, dict(self.CANDIDATE))
+
+        upgraded = dict(self.CANDIDATE)
+        upgraded["verified"] = True
+        upgraded["evidence"] = "error-based proof: the payload dumped the users table"
+        out = execute_report_finding_tool(agent, upgraded)
+
+        assert len(session.findings) == 1, f"the re-report filed a second finding: {out}"
+        assert session.findings[0].verified is True, out
+        assert [f.title for f in session.get_verified_findings()] == ["SQL Injection"]
+        assert not session.findings[0].title.startswith("[未验证]"), (
+            "a promoted finding must not stay labelled 未验证"
+        )
+        assert "已更新" in out and "未新增重复记录" in out, out
+
+    def test_re_reporting_with_a_url_in_the_evidence_does_not_file_a_second_finding(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        session, agent = self._agent()
+        execute_report_finding_tool(agent, dict(self.CANDIDATE))
+
+        # The second report cites a URL, so its generated finding_id changes from
+        # "SQLi" to "SQLi_/user?id=1": identity cannot rest on the id alone.
+        upgraded = dict(self.CANDIDATE)
+        upgraded["verified"] = True
+        upgraded["evidence"] = "GET /user?id=1 -> 500 SQL syntax error near ''1''"
+        execute_report_finding_tool(agent, upgraded)
+
+        assert len(session.findings) == 1, "the same bug was filed twice"
+        assert session.findings[0].verified is True
+
+    def test_a_promoted_finding_renders_as_verified_without_contradicting_itself(self, tmp_path):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        run_dir = _run_layout(tmp_path)
+        session, agent = self._agent(run_dir)
+        execute_report_finding_tool(agent, dict(self.CANDIDATE))
+        upgraded = dict(self.CANDIDATE)
+        upgraded["verified"] = True
+        upgraded["evidence"] = "error-based proof"
+        execute_report_finding_tool(agent, upgraded)
+
+        report = generate_report(
+            session, output_path=str(run_dir / "report.md"), run_dir=str(run_dir)
+        )
+        text = report.read_text(encoding="utf-8")
+
+        assert "SQL Injection" in text
+        assert "[未验证]" not in text, "the report showed a ✅ 已验证 row titled 未验证"
+        assert "缺少验证证据" not in text, "the verified section carried the no-evidence advisory"
+
+    def test_re_reporting_without_a_severity_does_not_downgrade(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        session, agent = self._agent()
+        execute_report_finding_tool(
+            agent,
+            {
+                "title": "RCE in upload",
+                "severity": "Critical",
+                "vuln_type": "RCE",
+                "evidence": "whoami returned www-data",
+            },
+        )
+
+        # `severity` defaults to Medium, so "only move up" has to mean it: a
+        # re-report that never names a severity must not knock Critical down.
+        execute_report_finding_tool(
+            agent, {"title": "RCE in upload", "vuln_type": "RCE", "evidence": "id"}
+        )
+        assert session.findings[0].severity == "Critical"
+
+    def test_a_bare_re_report_does_not_deny_a_finding_that_is_already_verified(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+
+        session, agent = self._agent()
+        upgraded = dict(self.CANDIDATE)
+        upgraded["verified"] = True
+        upgraded["evidence"] = "error-based proof"
+        execute_report_finding_tool(agent, upgraded)
+
+        # The refusal note is about THIS report's substance; the answer must not
+        # contradict its own "当前已标记为已验证" state line.
+        out = execute_report_finding_tool(agent, {"title": "SQL Injection", "verified": True})
+
+        assert session.findings[0].verified is True
+        assert "已标记为已验证" in out
+        assert "未被采纳" not in out, out
+
+    def test_an_ir_answer_card_is_never_merged_into(self):
+        from vulnclaw.agent.builtin_tools import execute_report_finding_tool
+        from vulnclaw.config.domain_models import ANSWER_CARD_VULN_TYPE
+
+        session, agent = self._agent()
+        card = VulnerabilityFinding(
+            title="Q1 attacker IP", severity="Info", vuln_type=ANSWER_CARD_VULN_TYPE
+        )
+        session.add_finding(card, skip_dedup=True)
+
+        # Same title as the card: a report must never rewrite the answer sheet.
+        execute_report_finding_tool(
+            agent,
+            {"title": "Q1 attacker IP", "vuln_type": "SQLi", "evidence": "x", "verified": True},
+        )
+
+        assert card.vuln_type == ANSWER_CARD_VULN_TYPE
+        assert card.verified is False, "a vulnerability report promoted an answer card"
+        assert card.evidence == ""
+
+
 class _AgentStub:
     """Minimal agent surface the traffic/report tools read: run_dir + session."""
 

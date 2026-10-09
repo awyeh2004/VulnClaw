@@ -542,6 +542,86 @@ def execute_traffic_bind_tool(agent: AgentContext, args: dict[str, Any]) -> str:
 REPORT_FINDING_TOOL_NAME = "report_finding"
 
 _SEVERITIES = ("Critical", "High", "Medium", "Low", "Info")
+#: Most severe first, so the rank has to count DOWN the tuple: rank 5 = Critical.
+#: (Enumerating from 1 the other way round makes "only move up" move down.)
+_SEVERITY_RANK = {name: len(_SEVERITIES) - index for index, name in enumerate(_SEVERITIES)}
+
+#: Fields a re-report may fill on an existing finding. Only ever fills what is
+#: EMPTY there: re-reporting is the model saying more about a bug it already
+#: filed, not a licence to overwrite a conclusion that is already written down.
+_REPORT_MERGE_FIELDS = (
+    "vuln_type",
+    "description",
+    "impact",
+    "evidence",
+    "remediation",
+    "endpoint",
+    "method",
+    "code_location",
+)
+
+
+def _finding_title_key(title: str) -> str:
+    """Case/whitespace-insensitive title identity, ignoring the quarantine prefix.
+
+    Two reports of one bug rarely repeat the title byte-for-byte, and a bare
+    finding carries a ``[未验证]`` prefix that the promoted one does not — so the
+    key has to normalise both away or the same bug is filed twice.
+    """
+    from vulnclaw.config.domain_models import UNVERIFIED_TITLE_PREFIX
+
+    cleaned = re.sub(rf"^{re.escape(UNVERIFIED_TITLE_PREFIX)}\s*", "", str(title or ""))
+    return " ".join(cleaned.split()).casefold()
+
+
+def _finding_for_report(session: Any, finding: Any, raw_title: str) -> Any | None:
+    """The already-recorded finding this report refers to, else ``None``.
+
+    Identity, in order: the generated ``finding_id`` (which is vuln_type + the
+    location found in the text), then the normalised title. The title key matters
+    because adding evidence to a report changes its generated id — the model
+    walks report_finding → exploit → report_finding, and the second call carries
+    a URL the first one did not.
+
+    IR answer cards are never a match: they live in the same finding store but
+    they are question answers, not vulnerabilities, so merging a report into one
+    would rewrite the answer sheet.
+    """
+    from vulnclaw.config.domain_models import is_answer_card
+
+    identity = str(getattr(finding, "finding_id", "") or "")
+    key = _finding_title_key(raw_title)
+    for existing in getattr(session, "findings", None) or []:
+        if is_answer_card(existing):
+            continue
+        if identity and str(getattr(existing, "finding_id", "") or "") == identity:
+            return existing
+        if key and _finding_title_key(getattr(existing, "title", "")) == key:
+            return existing
+    return None
+
+
+def _merge_report_into(existing: Any, finding: Any) -> list[str]:
+    """Fill ``existing``'s empty fields from a newer report; returns what changed."""
+    filled: list[str] = []
+    for field in _REPORT_MERGE_FIELDS:
+        new_value = getattr(finding, field, None)
+        if new_value and not getattr(existing, field, None):
+            setattr(existing, field, new_value)
+            filled.append(field)
+
+    # Severity only moves up: re-reporting without naming a severity must not
+    # quietly downgrade a Critical that was already recorded.
+    if _SEVERITY_RANK.get(finding.severity, 0) > _SEVERITY_RANK.get(existing.severity, 0):
+        existing.severity = finding.severity
+        filled.append("severity")
+
+    from vulnclaw.config.domain_models import is_unsubstantiated
+
+    if filled and not is_unsubstantiated(existing):
+        # It is no longer the bare thing the intake quarantine was written for.
+        existing.clear_intake_quarantine()
+    return filled
 
 
 def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> str:
@@ -552,8 +632,16 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
     is stored as a candidate, which is the honest shape for "I think this is
     exploitable but have not proven it". Binding captured proof is a SEPARATE
     step (``traffic_bind_evidence``) so a model cannot claim proof it never saw.
+
+    Reporting a bug that is ALREADY recorded updates that record instead of
+    filing a second one. Without this the natural live order -- report when you
+    find it, report again once you have exploited it -- hit ``add_finding``'s
+    exact-id dedup, which returns False *without* applying its
+    keep-the-stronger-evidence rule: the verification claim was dropped, the tool
+    still answered "已记为已验证漏洞", and the finding stayed out of the report
+    (2026-10-09 audit finding #2/#3).
     """
-    from vulnclaw.config.domain_models import VulnerabilityFinding
+    from vulnclaw.config.domain_models import VulnerabilityFinding, is_unsubstantiated
 
     title = str(args.get("title") or "").strip()
     if not title:
@@ -579,9 +667,45 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
         method=str(args.get("method") or "").strip().upper() or None,
         code_location=str(args.get("code_location") or "").strip() or None,
     )
-    verified = bool(args.get("verified", False))
-    if verified:
+
+    # "verified" gates the report/SARIF output, so it has to rest on something a
+    # reader can check. Ask for the same substantiating signal the intake
+    # quarantine asks for; otherwise record the honest shape (a candidate) and
+    # say why, so the model can re-report with the missing field in one turn.
+    wants_verified = bool(args.get("verified", False))
+    refused_verification = wants_verified and is_unsubstantiated(finding)
+    if refused_verification:
+        wants_verified = False
+    if wants_verified:
         finding.mark_verified(note=str(args.get("verification_note") or "").strip())
+
+    next_step = (
+        "  下一步：用 traffic_list 拿到请求 request_id，再用 traffic_bind_evidence "
+        "把这个漏洞的复现证据绑定进报告。"
+    )
+
+    def _tail(recorded_as_verified: bool) -> str:
+        """The refusal note belongs in the answer only when it actually took effect."""
+        if not refused_verification or recorded_as_verified:
+            return ""
+        return (
+            "  ⚠️ verified=true 未被采纳：报告里没有任何可核查的依据（evidence / vuln_type / "
+            "remediation 至少给一项），已按候选记录。补上依据后再报一次即可升级。"
+        )
+
+    existing = _finding_for_report(session, finding, title)
+    if existing is not None:
+        filled = _merge_report_into(existing, finding)
+        if wants_verified and not existing.verified:
+            existing.mark_verified(note=str(args.get("verification_note") or "").strip())
+        handle = str(getattr(existing, "finding_id", "") or "")
+        state = "已标记为已验证" if existing.verified else "仍为候选（未验证）"
+        changed = f"，补全字段：{', '.join(filled)}" if filled else ""
+        return (
+            f"[report_finding] 「{title}」已更新本次运行中已有的发现（finding_id={handle}），"
+            f"未新增重复记录；当前{state}{changed}。\n"
+            f"{next_step}{_tail(existing.verified)}"
+        )
 
     try:
         stored = session.add_finding(finding)
@@ -589,16 +713,28 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
         return f"[report_finding] 记录失败：{type(exc).__name__}: {exc}"
 
     handle = str(getattr(finding, "finding_id", "") or "")
-    state = "已记为已验证漏洞" if verified else "已记为候选漏洞（未验证）"
     if not stored:
+        # add_finding refused it. Two very different reasons, and the message must
+        # not confuse them: the new report superseded a weaker record (it IS in
+        # state now), or it was dropped as a semantic duplicate.
+        superseded = any(item is finding for item in (getattr(session, "findings", None) or []))
+        if superseded:
+            state = "已记为已验证漏洞" if finding.verified else "已记为候选漏洞（未验证）"
+            return (
+                f"[report_finding] 「{title}」{state}，并替换了本次运行中证据较弱的那条同名记录"
+                f"（finding_id={handle}）。\n{next_step}{_tail(finding.verified)}"
+            )
         return (
-            f"[report_finding] 「{title}」{state}，但与已有发现重复（finding_id={handle}）。"
-            "如需为它补充证据，请用 traffic_bind_evidence 指定该标题或 finding_id。"
+            f"[report_finding] 「{title}」未新增：与本次运行中已有的发现语义重复，"
+            "且已有那条的证据不弱于本次上报，按既有规则保留原记录。"
+            "如需为它补充证据或提升验证状态，请用它的标题或 finding_id 重新上报"
+            "（report_finding），绑定报文仍用 traffic_bind_evidence。"
         )
+
+    state = "已记为已验证漏洞" if finding.verified else "已记为候选漏洞（未验证）"
     return (
         f"[report_finding] 「{title}」{state}（severity={severity}，finding_id={handle}）。\n"
-        "  下一步：用 traffic_list 拿到请求 request_id，再用 traffic_bind_evidence "
-        "把这个漏洞的复现证据绑定进报告。"
+        f"{next_step}{_tail(finding.verified)}"
     )
 
 
@@ -2692,6 +2828,9 @@ def build_openai_tools(
                     "报告只统计经此上报的发现，blackboard_record_answer 记的是答题卡，不进漏洞报告。"
                     "上报后请用 traffic_list 拿到 request_id，再用 traffic_bind_evidence "
                     "把复现报文绑定为该漏洞的证据。"
+                    "同一个漏洞可以多次上报：会更新已有记录而不是新增第二条，"
+                    "所以先报发现、实弹打通后再报一次（带 verified=true 与证据）即可把它升级为"
+                    "「已验证」——报告只收录已验证的发现，没升级的不会出现在报告里。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -2727,7 +2866,11 @@ def build_openai_tools(
                         },
                         "verified": {
                             "type": "boolean",
-                            "description": "你是否已实弹验证该漏洞（默认 false=仅候选项）",
+                            "description": (
+                                "你是否已实弹验证该漏洞（默认 false=仅候选项）。"
+                                "只有报告里给出可核查依据（evidence/vuln_type/remediation 至少一项）"
+                                "才会被采纳，否则按候选记录并在返回值里说明。"
+                            ),
                             "default": False,
                         },
                         "verification_note": {

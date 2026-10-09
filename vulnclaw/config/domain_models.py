@@ -386,6 +386,36 @@ def _now_iso(now: datetime | None = None) -> str:
     return (now or datetime.now()).isoformat()
 
 
+#: The two marks ``model_post_init``'s intake quarantine leaves on an
+#: unsubstantiated finding. They are named here (not inlined) because they are
+#: *reversible*: a finding that is later promoted to a terminal status must end
+#: up byte-identical to one constructed terminal in the first place, and
+#: ``clear_intake_quarantine`` is what guarantees that.
+UNVERIFIED_TITLE_PREFIX = "[未验证]"
+UNVERIFIED_DESCRIPTION_MARKER = "缺少验证证据"
+#: The injected advisory, minus its leading space, so it can be removed exactly.
+UNVERIFIED_DESCRIPTION_NOTICE = (
+    "(⚠️ 此漏洞缺少验证证据/vuln_type/修复建议三字段，"
+    "LLM 上报时未附实际测试结果。请补充证据后再作为正式漏洞。)"
+)
+
+
+def is_unsubstantiated(finding: Any) -> bool:
+    """Whether a finding carries none of the signals the intake quarantine keys on.
+
+    ONE definition, because two consumers must agree: ``model_post_init`` decides
+    whether to quarantine with it, and ``report_finding`` decides whether a
+    ``verified`` claim rests on anything checkable. A bare "title + verified=true"
+    report must not pass the report/SARIF gate that the quarantine exists to guard
+    (2026-10-09 audit finding #1).
+    """
+    return not (
+        getattr(finding, "evidence", "")
+        or getattr(finding, "vuln_type", "")
+        or getattr(finding, "remediation", "")
+    )
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 
@@ -464,20 +494,62 @@ class VulnerabilityFinding(BaseModel):
         # only and did not set a lifecycle status.) The whole unit is skipped for a
         # finding that is already verified/rejected — an explicitly promoted finding
         # keeps its terminal status and is never re-stamped "[未验证]".
-        is_bare = not self.evidence and not self.vuln_type and not self.remediation
+        is_bare = is_unsubstantiated(self)
         is_terminal = self.verified or self.verification_status in ("verified", "rejected")
         if is_bare and not is_terminal:
-            if not self.title.startswith("[未验证]"):
-                self.title = f"[未验证] {self.title}"
-            if "缺少验证证据" not in self.description:
+            if not self.title.startswith(UNVERIFIED_TITLE_PREFIX):
+                self.title = f"{UNVERIFIED_TITLE_PREFIX} {self.title}"
+            if UNVERIFIED_DESCRIPTION_MARKER not in self.description:
                 self.description = (
-                    "(⚠️ 此漏洞缺少验证证据/vuln_type/修复建议三字段，"
-                    "LLM 上报时未附实际测试结果。请补充证据后再作为正式漏洞。)"
+                    UNVERIFIED_DESCRIPTION_NOTICE
                     + (f" {self.description}" if self.description else "")
                 )
             self.lifecycle_status = "needs_manual_review"
 
         self._sync_status_fields()
+
+    def clear_intake_quarantine(self) -> bool:
+        """Lift the intake-quarantine marks once the finding no longer warrants them.
+
+        The quarantine is stamped at *construction* time and its own docstring
+        promises that an explicitly promoted finding "keeps its terminal status
+        and is never re-stamped [未验证]" — but a finding built bare and promoted
+        *afterwards* (``report_finding(verified=true)``, the verifier, a
+        sub-agent FINAL) used to keep the ``[未验证]`` title and the "缺少验证证据"
+        advisory while its status fields said ``verified``. The report then
+        printed a row marked ✅ 已验证 whose own title contradicted it, and the
+        advisory contradicted it again in the body.
+
+        Returns whether anything was removed, so callers can log it. Only the
+        *marks* are undone: the caller has already decided the status, so
+        ``lifecycle_status`` is left alone when the finding is terminal.
+        """
+        stripped = False
+
+        if self.title.startswith(UNVERIFIED_TITLE_PREFIX):
+            bare = self.title[len(UNVERIFIED_TITLE_PREFIX) :].strip()
+            if bare:
+                self.title = bare
+                stripped = True
+
+        if UNVERIFIED_DESCRIPTION_MARKER in self.description:
+            cleaned = self.description.replace(UNVERIFIED_DESCRIPTION_NOTICE, "").strip()
+            # Guard against a half-matching variant (the notice was edited after
+            # the finding was written): drop the whole leading parenthetical.
+            if UNVERIFIED_DESCRIPTION_MARKER in cleaned and cleaned.startswith("("):
+                end = cleaned.find(")")
+                if end != -1:
+                    cleaned = cleaned[end + 1 :].strip()
+            self.description = cleaned
+            stripped = True
+
+        if stripped and not (self.verified or self.verification_status in ("verified", "rejected")):
+            # The quarantine also demoted the lifecycle; recompute it from the
+            # fields the finding now carries.
+            self.lifecycle_status = "candidate"
+            self._sync_status_fields()
+
+        return stripped
 
     def _sync_status_fields(self) -> None:
         """Keep lifecycle and evidence metadata consistent with verification state."""
@@ -548,7 +620,7 @@ class VulnerabilityFinding(BaseModel):
             return self.vuln_type[:50]
         # Bare finding (no vuln_type, no location): fall back to a title-derived key
         # so distinct placeholders stay distinct in state / findings.json audit.
-        base_title = re.sub(r"^\[未验证\]\s*", "", self.title).strip()
+        base_title = re.sub(rf"^{re.escape(UNVERIFIED_TITLE_PREFIX)}\s*", "", self.title).strip()
         return base_title[:50]
 
     def mark_verified(self, note: str = "", evidence_level: str = "L4") -> None:
@@ -559,6 +631,10 @@ class VulnerabilityFinding(BaseModel):
         self.evidence_level = evidence_level
         self.verified_at = datetime.now().isoformat()
         self.verification_note = note
+        # Promotion is terminal, so the "[未验证]" stamp the intake quarantine put
+        # on the title/description must go: leaving it made the report print a
+        # ✅ 已验证 row whose own title said 未验证 (2026-10-09 audit finding #1).
+        self.clear_intake_quarantine()
 
     def mark_rejected(self, reason: str, evidence_level: str = "L3") -> None:
         """标记漏洞为已拒绝（误报）."""
@@ -568,6 +644,9 @@ class VulnerabilityFinding(BaseModel):
         self.evidence_level = evidence_level
         self.verified_at = datetime.now().isoformat()
         self.verification_note = reason
+        # Rejected is terminal too: a bogus report should not stay titled
+        # "[未验证]" once it has been explicitly ruled out.
+        self.clear_intake_quarantine()
 
 
 class TaskConstraints(BaseModel):
