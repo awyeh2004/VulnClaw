@@ -922,6 +922,35 @@ def _collector_script(out_dir: str, *, keep_remote: bool = False) -> str:
 
 COLLECT_MARKER = "=== COLLECTED ==="
 
+#: Shell diagnostics that can only come from a Windows target's cmd.exe. The
+#: competition hands out attack machines whose OS is not published (2026-10-08:
+#: "跳板机的系统不确定"), and ``remote_collect`` ships a POSIX ``sh`` script — on a
+#: Windows host every step fails and the operator only sees "no archive produced".
+#: Naming the cause turns a dead end into the right next action.
+_WINDOWS_SHELL_MARKERS = (
+    "is not recognized as an internal or external command",
+    "the system cannot find the path specified",
+    "was unexpected at this time",
+    "not recognized as an internal or external",
+)
+
+
+def _windows_target_hint(stderr: str) -> str:
+    """A Windows-specific next step when the collector's stderr proves the OS.
+
+    Empty when the evidence does not say Windows: guessing here would send the
+    operator down the wrong path on a POSIX host with an unrelated failure.
+    """
+    lowered = (stderr or "").lower()
+    if not any(marker in lowered for marker in _WINDOWS_SHELL_MARKERS):
+        return ""
+    return (
+        " The remote shell looks like Windows cmd.exe: remote_collect ships a POSIX "
+        "sh script, so it cannot run there. Use remote_exec with cmd/PowerShell "
+        "commands (e.g. `ver`, `whoami /all`, `tasklist`) and remote_fetch for "
+        "individual files instead."
+    )
+
 
 def _parse_collector_stdout(text: str) -> list[str]:
     """Pull the section list out of the collector's stdout.
@@ -1349,7 +1378,7 @@ async def _do_collect(
     if not b64 or b"__NO_ARCHIVE__" in b64:
         result.errors.append(
             "no archive produced on the target (see the collector log in "
-            f"{out_dir}; tar may be missing)"
+            f"{out_dir}; tar may be missing)" + _windows_target_hint(stderr)
         )
         result.duration_s = time.perf_counter() - started
         return result.render()

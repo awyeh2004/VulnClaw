@@ -39,9 +39,46 @@ import pytest
 from vulnclaw.agent import remote
 from vulnclaw.agent.remote import (
     _collector_script,
+    _windows_target_hint,
     collector_commands,
     validate_collector_commands,
 )
+
+
+class TestWindowsTargetHint:
+    """The attack machine's OS is not published (2026-10-08).
+
+    ``remote_collect`` ships a POSIX ``sh`` script: on a Windows host every step
+    fails and the only symptom used to be "no archive produced". The hint must
+    fire on cmd.exe's own diagnostics and stay silent otherwise — a guess here
+    would send the operator down the wrong path on a POSIX host.
+    """
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "'cat' is not recognized as an internal or external command,\r\n"
+            "operable program or batch file.",
+            "The system cannot find the path specified.",
+            "sh was unexpected at this time.",
+        ],
+    )
+    def test_cmd_diagnostics_produce_the_windows_next_step(self, stderr):
+        hint = _windows_target_hint(stderr)
+        assert "Windows" in hint
+        assert "remote_exec" in hint and "remote_fetch" in hint
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "",
+            "tar: not found",
+            "Permission denied",
+            "sh: 1: base64: not found",
+        ],
+    )
+    def test_a_posix_failure_gets_no_windows_hint(self, stderr):
+        assert _windows_target_hint(stderr) == ""
 
 
 class TestGeneratedScriptIsParseable:

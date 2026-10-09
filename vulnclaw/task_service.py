@@ -196,7 +196,16 @@ def build_task_constraints(request: TaskCreateRequest) -> TaskConstraints:
 
 
 def build_scope_constraints(target: str, scope: dict[str, Any]) -> TaskConstraints:
-    """Build authoritative constraints from structured scope fields."""
+    """Build authoritative constraints from structured scope fields.
+
+    Deliberately pure: the operator's hard denylist (``safety.denied_hosts``)
+    and every other config-derived constraint are merged where a run *installs*
+    its constraints (``AgentCore.apply_task_constraints`` /
+    ``_reset_runtime_state``), not here. Reading the config in this function
+    would make it environment-dependent — the same task payload would produce
+    different constraints on different machines, and every caller/test would
+    silently inherit whatever is in the user's config file.
+    """
 
     host = _target_host(target)
     constraints = TaskConstraints(

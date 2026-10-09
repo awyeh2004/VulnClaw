@@ -263,6 +263,10 @@ class AgentCore:
             parsed_constraints = existing_constraints
         elif parsed_constraints.is_empty():
             parsed_constraints = self.context.state.task_constraints
+        # The operator's hard denylist rides on every run, including the ones
+        # whose scope was parsed out of prose: a pasted description must not be
+        # able to authorise the scoring platform.
+        self._harden_constraints(parsed_constraints)
         self.runtime = RuntimeState(
             auto_skill_input=user_input,
             user_vuln_hint=self._extract_user_vuln_hint(user_input) if user_input else "",
@@ -760,10 +764,37 @@ class AgentCore:
     def apply_task_constraints(self, constraints: TaskConstraints) -> None:
         """Install one authoritative constraint object across the runtime."""
 
+        self._harden_constraints(constraints)
         self.context.state.task_constraints = constraints
         self.runtime.task_constraints = constraints
         if self.mcp_manager and hasattr(self.mcp_manager, "set_task_constraints"):
             self.mcp_manager.set_task_constraints(constraints)
+
+    def _hard_denied_hosts(self) -> list[str]:
+        """The operator's hard denylist (``safety.denied_hosts``).
+
+        Read from the live config on every call rather than cached: the config
+        object is shared with the CLI/TUI, where the operator can add a host
+        mid-session, and a cached copy would keep testing a platform that was
+        just declared off-limits.
+        """
+        safety = getattr(self.config, "safety", None)
+        raw = getattr(safety, "denied_hosts", None) or []
+        return [str(host).strip() for host in raw if str(host or "").strip()]
+
+    def _harden_constraints(self, constraints: TaskConstraints) -> TaskConstraints:
+        """Merge the hard denylist into a run's constraints (idempotent).
+
+        Applied on every path that installs constraints -- the run reset and
+        ``apply_task_constraints`` -- because the task scope arrives from
+        several directions (CLI flags, the Web task API, natural-language scope
+        parsing, platform hand-offs) and a denylist that only covers one of
+        them is not a denylist.
+        """
+        denied = self._hard_denied_hosts()
+        if denied:
+            constraints.add_blocked_hosts(denied)
+        return constraints
 
     # ── Persistent pentest loop ──────────────────────────────────────
 

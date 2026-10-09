@@ -4593,8 +4593,13 @@ def _apply_local_path_constraints(agent: Any, target: str) -> None:
     rest of the machine (no full-disk traversal, no local network scanning).
 
     Sets ``allowed_paths`` to the target (plus its parent when the target is a
-    directory) and blocks obvious local/loopback hosts so a local-file task never
+    directory) and blocks loopback/private ranges so a local-file task never
     turns into an outbound network recon against the operator's own network.
+
+    The private-range entries are **CIDR**: the earlier spellings (``"10."``,
+    ``"192.168."``) were inert, because ``host_in_scope`` matches a bare IP
+    pattern exactly and has no prefix form — measured 2026-10-08, the guard
+    blocked nothing while reading as if it blocked three ranges.
     """
     if not _is_local_path_target(target):
         return
@@ -4605,7 +4610,15 @@ def _apply_local_path_constraints(agent: Any, target: str) -> None:
         tc.strict_mode = True
         if target and target not in tc.allowed_paths:
             tc.allowed_paths.append(target)
-        for host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."):
+        for host in (
+            "localhost",
+            "127.0.0.0/8",
+            "::1",
+            "0.0.0.0",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ):
             if host not in tc.blocked_hosts:
                 tc.blocked_hosts.append(host)
     except Exception:

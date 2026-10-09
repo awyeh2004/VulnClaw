@@ -505,6 +505,15 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
         config.safety.trusted_commands = [
             item.strip() for item in v.split(",") if item.strip()
         ]
+    # Hard denylist: hosts no run may test (scoring platform, event systems).
+    # Comma- or newline-separated, so a pasted host list works either way.
+    if v := os.environ.get("VULNCLAW_SAFETY_DENIED_HOSTS"):
+        config.safety.denied_hosts = [
+            item.strip()
+            for chunk in v.replace("\r", "\n").split("\n")
+            for item in chunk.split(",")
+            if item.strip()
+        ]
 
     # ── Model-driven sub-agents ──────────────────────────────────────
     if v := os.environ.get("VULNCLAW_SUBAGENT_ENABLED"):

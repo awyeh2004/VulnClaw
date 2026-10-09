@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Iterable
 from urllib.parse import urlparse
 
@@ -40,7 +41,11 @@ def host_in_scope(host: str, patterns: Iterable[str]) -> bool:
     be fooled by a lookalike: ``evil-dasctf.com`` does not end with
     ``.dasctf.com``, so it stays out of scope.
 
-    An IP pattern stays exact-only: nothing may be "inside" an address.
+    An IP pattern stays exact-only: nothing may be "inside" an address. A venue
+    hands out a *network*, though, so **CIDR is accepted as a separate, explicit
+    form**: ``10.20.0.0/16`` covers every address in that block, and an address
+    literal is never treated as a CIDR. Matching only works address-to-network,
+    so a hostname can never fall inside a CIDR.
     """
     candidate = str(host or "").strip().lower().rstrip(".")
     if not candidate:
@@ -53,6 +58,12 @@ def host_in_scope(host: str, patterns: Iterable[str]) -> bool:
             pattern = pattern[2:]
         if not pattern:
             continue
+        if "/" in pattern:
+            # CIDR only: an address literal is matched exactly below, so a
+            # malformed or hostname-based pattern never silently widens scope.
+            if _address_in_network(candidate, pattern):
+                return True
+            continue
         if candidate == pattern:
             return True
         if is_ip_address(pattern):
@@ -60,6 +71,23 @@ def host_in_scope(host: str, patterns: Iterable[str]) -> bool:
         if candidate.endswith("." + pattern):
             return True
     return False
+
+
+def _address_in_network(candidate: str, pattern: str) -> bool:
+    """Whether the address literal ``candidate`` sits inside CIDR ``pattern``.
+
+    Both sides must be address literals of the same family: a hostname candidate
+    returns False rather than raising, and a hostname pattern is refused instead
+    of being resolved (resolving would let a DNS answer widen scope).
+    """
+    if not is_ip_address(candidate):
+        return False
+    try:
+        network = ipaddress.ip_network(pattern, strict=False)
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address in network
 
 
 def infer_port_from_url(url: str) -> int | None:

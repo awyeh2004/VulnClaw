@@ -119,3 +119,38 @@ class TestDoubleEncodingAndRawLeg:
         agent = _agent(allowed_paths=["/storage"])
         assert enforce_host_path_constraints(agent, path="/storage/") is None
 
+
+class TestHostSegmentScope:
+    """``--only-host`` is a single value, so a venue LAN is expressed as CIDR.
+
+    Measured need (2026-10-08): the competition hands out a *cabled* range, not a
+    per-challenge URL, so the scope fence has to admit "this segment" and refuse
+    everything else -- including a hostname, which must not be resolved to see
+    whether it lands inside.
+    """
+
+    def _segment_agent(self, *allowed_hosts):
+        constraints = SimpleNamespace(
+            allowed_hosts=list(allowed_hosts),
+            blocked_hosts=[],
+            allowed_paths=[],
+            blocked_paths=[],
+            allowed_ports=[],
+            blocked_ports=[],
+            is_empty=lambda: False,
+        )
+        return SimpleNamespace(session_state=SimpleNamespace(task_constraints=constraints))
+
+    def test_an_address_inside_the_segment_is_admitted(self):
+        agent = self._segment_agent("10.20.0.0/16")
+        assert enforce_host_path_constraints(agent, host="10.20.7.7") is None
+
+    def test_an_address_outside_the_segment_is_refused(self):
+        agent = self._segment_agent("10.20.0.0/16")
+        violation = enforce_host_path_constraints(agent, host="10.21.0.9")
+        assert violation is not None and "outside allowed scope" in violation
+
+    def test_a_hostname_is_refused_when_only_a_segment_is_allowed(self):
+        agent = self._segment_agent("10.20.0.0/16")
+        assert enforce_host_path_constraints(agent, host="example.com") is not None
+

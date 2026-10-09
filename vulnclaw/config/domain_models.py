@@ -454,6 +454,27 @@ class TaskConstraints(BaseModel):
             ]
         )
 
+    def add_blocked_hosts(self, hosts: Any) -> list[str]:
+        """Merge hosts into ``blocked_hosts``, de-duplicating and keeping order.
+
+        Used for the operator's hard denylist (``safety.denied_hosts``): every
+        run must carry it, so the merge has to be idempotent — the same
+        constraints object is re-hardened on each context reset and each
+        ``apply_task_constraints`` call, and a duplicated entry would otherwise
+        grow the prompt block round after round.
+
+        Returns the entries that were actually added, so a caller can log or
+        assert on the delta. Entries are normalized (lower-cased, trailing dot
+        stripped) to match how ``host_in_scope`` compares them.
+        """
+        added: list[str] = []
+        for raw in hosts or ():
+            host = str(raw or "").strip().lower().rstrip(".")
+            if host and host not in self.blocked_hosts:
+                self.blocked_hosts.append(host)
+                added.append(host)
+        return added
+
     def to_prompt_block(self) -> str:
         """Render constraints into a stable prompt block for every round."""
         if self.is_empty():

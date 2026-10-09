@@ -84,3 +84,46 @@ class TestIpPatterns:
     )
     def test_is_ip_address(self, text, expected):
         assert is_ip_address(text) is expected
+
+
+class TestCidrScope:
+    """A venue hands out a *network* (靶场网段), not a list of addresses.
+
+    Measured 2026-10-08: the prefix spellings the code already used for private
+    ranges (``"10."``, ``"192.168."``) matched nothing, because a bare IP pattern
+    is an exact match and there was no segment form at all. CIDR is that form.
+    """
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("10.20.1.5", True),
+            ("10.20.255.254", True),
+            ("10.21.0.1", False),
+            ("11.20.1.5", False),
+        ],
+    )
+    def test_addresses_inside_the_segment_match(self, host, expected):
+        assert host_in_scope(host, ["10.20.0.0/16"]) is expected
+
+    def test_a_hostname_is_never_inside_a_segment(self):
+        """No resolution: a DNS answer must not be able to widen scope."""
+        assert host_in_scope("target.example.com", ["10.0.0.0/8"]) is False
+
+    def test_a_hostname_pattern_is_not_a_segment(self):
+        assert host_in_scope("10.0.0.5", ["example.com/8"]) is False
+
+    def test_malformed_segments_are_skipped_not_raised(self):
+        assert host_in_scope("10.0.0.5", ["10.0.0.0/99", "not-a-cidr/8"]) is False
+
+    def test_mixed_families_do_not_match(self):
+        assert host_in_scope("10.0.0.5", ["::/0"]) is False
+        assert host_in_scope("::1", ["10.0.0.0/8"]) is False
+
+    def test_segments_work_in_blocked_lists_too(self):
+        """Denying a range is the same matcher (private ranges, venue ban)."""
+        assert host_in_scope("192.168.1.9", ["192.168.0.0/16"]) is True
+
+    def test_host_bits_are_accepted(self):
+        """A pasted network with host bits set still means its segment."""
+        assert host_in_scope("10.20.1.5", ["10.20.1.7/24"]) is True

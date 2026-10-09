@@ -105,6 +105,15 @@ pnpm-debug.log*
 skills-lock.json
 CLAUDE.md
 
+# RouterCode 桌面端的本地草稿区（会话附件 / 计划草稿）。
+# 根锚定：`.routercode/` 只指仓库根这一处，别吞掉将来某个 skill 自带的同名目录。
+# 为什么必须忽略：会话附件是**整包 zip**，里面可能带着真实凭据（实测一份 DSH
+# 会话包就含平台 token），一次 `git add -A` 就会把 key 写进历史 —— 与 .ir-tools/
+# 同一条教训。注意 gitignore **不挡** tests/security/test_no_committed_secrets.py：
+# 它用 os.walk 扫整棵树（只跳 .test-tmp/.venv/.git 等），所以**解包出来的文本
+# 请落在仓库外**（如 D:\GitClone\VulnClaw\.dsh-scratch\）；zip 因后缀被跳过。
+/.routercode/
+
 # Local docs / local-only artifacts
 docs/
 .test-tmp/

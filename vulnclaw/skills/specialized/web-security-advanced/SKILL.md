@@ -48,6 +48,7 @@ routing:
 | SSTI 注入链 | `ctf-web` | `references/ssti-injection-chains.md` |
 | 反序列化利用链 | `ctf-web` | `references/deserialization-playbook.md` |
 | 文件上传 → RCE | 本 Skill | `references/web-playbook-08-file-vulnerabilities.md` |
+| ⭐ **OA / 产品化 Web 系统 → webshell** | 本 Skill | `references/web-oa-webshell.md`（产品指纹表 → 漏洞族 → 上传落地与解析细节 → 无回显验证 → 找 flag 顺序） |
 
 **本 Skill 侧重渗透测试方法论**，CTF 实战绕过值和 payload 模板请参考 `ctf-web`。
 
@@ -59,6 +60,7 @@ routing:
 | 协议安全（CORS/GraphQL/WebSocket/OAuth/请求走私） | `references/web-modern-protocols.md` |
 | 认证与逻辑（IDOR/越权/支付/密码重置/鉴权绕过） | `references/web-logic-auth.md` |
 | 文件与基础设施（上传/遍历/包含/部署/缓存/CDN/云） | `references/web-file-infra.md` |
+| **OA / 产品化系统拿 shell（含 webshell 植入）** | `references/web-oa-webshell.md` |
 | 部署安全 | `references/web-deployment-security.md` |
 
 ## 测试流程
@@ -105,6 +107,9 @@ routing:
 - `references/web-modern-protocols.md` — 现代协议安全
 - `references/web-logic-auth.md` — 认证与逻辑漏洞
 - `references/web-file-infra.md` — 文件与基础设施安全
+- `references/web-oa-webshell.md` — ⭐ **OA / 产品化 Web 系统拿漏洞 → 植入 webshell**
+  （产品指纹表、能出 shell 的漏洞族、上传后缀与解析差异、上传目录可访问性、
+  无回显验证、落马后取证与找 flag 顺序、7 个高频坑）
 - `references/web-deployment-security.md` — 部署安全
 - `references/web-ai-attack-map.md` — Web 与 AI 攻击映射
 - `references/web-playbook-*.md` — 各专项 Playbook（23 个）

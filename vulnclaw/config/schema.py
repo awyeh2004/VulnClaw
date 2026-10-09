@@ -431,6 +431,33 @@ class SafetyConfig(BaseModel):
             "'git diff'). Entries starting with a banned name are refused."
         ),
     )
+    # Hosts that are NEVER tested, in any run, whatever the task scope says.
+    # This is the place for "attacking this counts as an invalid operation":
+    # a competition scoring platform, an event system, a third-party service.
+    #
+    # It must be a HARD deny rather than another scope flag, because the task
+    # prompt is not the only source of scope: an input_analysis pass can widen
+    # allowed_hosts from a pasted description, and a task may legitimately name
+    # the platform's own domain (the target range and the scoring platform often
+    # share one registrable domain). Blocked entries are merged into every run's
+    # TaskConstraints.blocked_hosts, and enforce_host_path_constraints checks
+    # blocked_hosts AFTER allowed_hosts -- so re-adding a denied host to the
+    # allowed list cannot re-authorise it.
+    #
+    # Matching is domain scope, exactly like allowed_hosts (see host_in_scope):
+    # `tp.qianxin.com` covers `tp.qianxin.com` and its subdomains. Prefer the
+    # most specific host that is genuinely off-limits: denying `qianxin.com`
+    # would also deny a target range hosted under that domain.
+    denied_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hosts never tested in any run (e.g. the competition scoring "
+            "platform). Domain-scoped like allowed_hosts: 'tp.example.com' "
+            "covers its subdomains; a bare registrable domain denies everything "
+            "under it. Merged into every run's blocked hosts and not "
+            "re-authorisable from the task scope."
+        ),
+    )
 
     @model_validator(mode="after")
     def _warn_deprecated_python_sandbox_fields(self) -> "SafetyConfig":
