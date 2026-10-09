@@ -88,6 +88,36 @@ def test_retest_verdict_fixed_is_recorded_and_flips_disposition(tmp_path):
     assert record.verdict == "fixed"
     assert record.status.value == "completed"
     assert "翻转为 fixed" in result.output
+    # The wording must not read as "written back": the command deliberately keeps
+    # findings.json untouched (module docstring), so say where the flip lives.
+    # Compare with whitespace stripped — the console wraps long lines.
+    assert "未写回findings.json" in "".join(result.output.split())
+
+
+def test_retest_verdict_does_not_rewrite_the_findings_file(tmp_path):
+    finding = _finding()
+    store_dir = tmp_path / "store"
+    findings = _write_findings(tmp_path, finding)
+    before = open(findings, encoding="utf-8").read()
+    runner = CliRunner()
+    runner.invoke(app, ["retest", finding.finding_id, "--findings", findings, "--store", str(store_dir)])
+
+    result = runner.invoke(
+        app,
+        [
+            "retest",
+            finding.finding_id,
+            "--findings",
+            findings,
+            "--store",
+            str(store_dir),
+            "--verdict",
+            "fixed",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert open(findings, encoding="utf-8").read() == before
 
 
 def test_retest_list_reports_recorded_sessions(tmp_path):

@@ -101,7 +101,8 @@ def retest_command(
                 f"（{record.retest_id}）"
             )
             console.print(
-                "处置状态已翻转为 fixed（仅 completed+fixed）"
+                "处置状态已翻转为 fixed（仅 completed+fixed；"
+                "已记入复测记录，未写回 findings.json）"
                 if flipped
                 else "处置状态未变（复测只留痕；报告门槛不受影响）"
             )

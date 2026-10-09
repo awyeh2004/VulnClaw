@@ -3,6 +3,104 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 第五轮审计：副驾 target 第四道来源、<code>config set</code> 的 fail-open、<code>config get</code> 的 dict 键</summary>
+
+- **修（中）：copilot 下 `chat` 不再从粘贴里认领 target** — 前三道门（`_repl_no_auto` / `_mined_target_for_session` / `_target_after_agent_result`）只治了 REPL 的 `current_target` 变量，而 `AgentCore.chat` 另有一条**独立**认领路径（`core.py:684` 的 `target or self._detect_target(user_input)`）。实测：`VULNCLAW_REPL_NO_AUTO=1` 下同一段抹了地址的 IR 粘贴，提示词仍出现 `当前渗透测试目标: access.log`，且 `~/.vulnclaw/targets/<key>/state.json` 被重写。新增 `_copilot_pins_target()`（同一 env 门）把 `chat` 的认领也钉住——**显式传入的 target 仍生效、已设 target 保留，未设 env 时逐字节不变**。
+- **修（中·fail-open）：`config set platforms.<name>.enabled false` 不再把开关打开** — 第四轮记的"`config set platforms.*` 抛 traceback"只修了一半：遍历仍用 `getattr`，而 `platforms` 是 Pydantic `extra="allow"` 模型、段名在配置里尚不存在时照样 `AttributeError`。修好遍历后新暴露更糟的一半：新建段无既有值可推断类型，`"false"` 以**字符串**落盘，而读端 `registry._config_enabled` 是 `bool(entry.get("enabled"))` —— `bool("false") == True`，**把"关掉平台工具面"反着打开**。`settings.py` 现新增 `_config_child()` / `_config_extra_allowed()` / `_coerce_scalar_literal()`，`set_config_value` 覆盖"新建 extra 段"这条路径并落布尔。
+- **修（低）：`vulnclaw config get` 支持 dict/extra 键** — 原本是裸 `getattr` 链，`config get platforms.ctf2.enabled`、`mcp.servers.chrome-devtools.enabled` 直接 traceback 穿出 CLI（而 `config/schema.py:1048` 的注释恰恰推荐这些键）。新增 `settings.get_config_value()`（与 `set` 共用遍历），未知键 → 干净报错 + 退出码 2。
+- **修（低）：`vulnclaw retest --verdict fixed` 的提示不再像落盘** — 第四轮第 8 条按选项 ② 收口：提示改为「已记入复测记录，未写回 findings.json」。**行为不变**（不写回是模块 docstring 声明的有意设计），只纠正表述。
+- **文档** — `AUDIT-2026-10-08.md` 新增《第五轮》，含三条发现的证据、探针实测与"未改的行为（有意）"说明；本仓库根新增 [`PLAYBOOK-SHORTLIST.md`](PLAYBOOK-SHORTLIST.md)（赛前 playbook 手贴短清单，311 篇 → 精选 ~45 篇）。
+- **测试** — `tests/cli/test_user_intent.py::TestCopilotPinsChatTarget` 5 例、`tests/cli/test_config_get.py` 5 例、`tests/retest/test_retest_cli.py` +2 例。`tests/cli + tests/config + tests/mcp + tests/agent` → **2150 passed / 7 skipped**。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — <code>copilot.cmd</code> 第三层：<code>COPILOT_DENY</code> 硬黑名单（日志证明）<code>fetch</code> 不在审批闸内</summary>
+
+- **新：`copilot.cmd` 支持 `set COPILOT_DENY=<host>`** — 该主机进**硬黑名单**（`VULNCLAW_SAFETY_DENIED_HOSTS`）。起因是一次渗透副驾演练的终端日志（`E:\vulnclaw\log.txt`，5616 行）被逐条拆开：同一句"不要调用任何工具"，IR 演练 **0 次**工具调用、渗透演练 **10 次**（`blackboard_add_fact`×1 / `python_execute`×1 / `shell_command`×1 / **`fetch`×6**）。其中 `python_execute`（它想自己 curl 目标）**被审批闸弹窗拒掉** ✅、`shell_command`（在本机写马）**被人放行** ⚠️、而 **6 次 `fetch` 全部无提示通过** ❌ —— **审批闸不覆盖 `fetch`/`http_probe_batch`**，模型又会从粘贴文本里挖出主机进 allowed，所以提示词是唯一挡它的东西。硬黑名单是唯一能挡住 `fetch` 的一层。
+- **坑（顺带修）**：`VULNCLAW_SAFETY_DENIED_HOSTS` 是**覆盖**语义而非追加 —— 直接用它设目标会**顶掉 `tp.qianxin.com`**（计分平台黑名单）。`copilot.cmd` 因此把 `tp.qianxin.com` 追回列表。实测：未设 → `['tp.qianxin.com']`；设 `127.0.0.1` → `['127.0.0.1', 'tp.qianxin.com']`。启动器仍为**纯 ASCII**（非 ASCII 字节数 0），`--version` 透传正常。
+- **文档** — `IR-PROMPTS.md` 新增 §0.1「机制层：提示词不是唯一防线」，把上表（提示词 / auto_review / 硬黑名单三层各自的实测效果）与标准启动写法写进去。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 新增 <code>IR-PROMPTS.md</code>：现场提示词卡（四个槽 + 四种场景模板 + 八句纠偏）</summary>
+
+- **新增 [`IR-PROMPTS.md`](IR-PROMPTS.md)：现场提示词卡** — 把散落在 runbook §五、现场卡 §2、`copilot.cmd` 横幅与彩排结论里的"消息该怎么写"收成一张照抄卡。核心是**四个槽**：① 执行点/环境（不写 → 它按 bash 给多行命令，cmd 逐行报错）② 角色+目标（不写 → 切 AUTO 自跑或答成报告）③ 范围（副驾模式下作用域闸完全失效，边界只剩这句话）④ 输出契约（"不要调用任何工具"这一句实测把 16 次工具调用压到 0 次）。另含：IR 副驾模板（含 Windows 目标变体）、渗透副驾模板（含"先抄工具清单"与"当前上下文"行）、**渗透 agent 直连**的 `--goal`/`--prompt` 写法与 `ssh -D` 隧道版、强制技能路由表（`/incident-response` 等，confidence 1.0 vs 隐式 0.11–0.2）、**八句纠偏短句**、WP 提示词、**反面清单**（"随便看看"/"帮我提交 flag"/贴答案卡/裸启动粘大段输出/在副驾里做爆破…）、以及 30 秒开场清单。
+- **文档** — `IR-FIELD-CARD.md` 头部加指针。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 新 <code>VULNCLAW_REPL_NO_AUTO=1</code>：副驾模式有了机制级开关（粘贴不再把 REPL 拖进自主循环，也不再认领 target）</summary>
+
+- **新：`VULNCLAW_REPL_NO_AUTO=1` 把 REPL 钉在单轮 chat（copilot 模式）** — 2026-10-09 彩排暴露的**代码级**根因：`_should_auto_pentest` 的末段是"只要输入里能抽出**本地路径型 target** 就直接 `return True`"（`_extract_target_from_input` + `_is_local_path_target`），而 IR 的粘贴内容里全是 `/usr/sbin/cron`、`/var/www/html/uploads`、`/tmp/.x/.kworker`，甚至一行 cron `*/3 * * * *` 都会被抽成 target `/3`（实测）⇒ **每一次粘贴都重新进 AUTO 自主循环**，抹 IP 与事后打 `chat`（要求整条输入恰好等于 `chat`/`manual`/`单轮`/`手动`，且须在 AUTO 激活后单独发送）都拦不住它自跑。修法是在函数最前面加一道 env 门 `_repl_no_auto()`：命中时**在任何分支之前** `return False`。副驾会话统一 `$env:VULNCLAW_REPL_NO_AUTO='1'; vulnclaw`；**env 未设时行为逐字节不变**。实测：同一段 IR 粘贴，未设 → `should_auto(None)=True`，设了 → `False`。
+- **同一道门也关掉"从粘贴内容里认领 target"** — 第三轮彩排发现即使不进 AUTO，REPL 仍从粘贴里抽出 `/usr/sbin/cron` 当会话目标（提示符 `vulnclaw /usr/sbin/cron | Recon>`）。新增 `_mined_target_for_session()`：copilot 模式下**不挖目标**（`return None`），调用点由 `_extract_target_from_input(user_input)` 改为它（`cli/main.py` 的 target 切换/首次认领分支之前）。要指定目标时**显式**用 `target` 命令即可（flag-skill 那条路径不受影响）。实测：同一段粘贴，未设 → `mined='/3'`，设了 → `None`。
+- **第三个来源（第四轮彩排暴露）：agent 回合回报的 target 也要挡** — 前两道门都生效（无 AUTO、无 Turn 计数、`Tools: none`），但提示符仍是 **`vulnclaw access.log \| Recon>`**：单轮 chat 的 `after_result()` 里原本是 `if result.target: current_target = result.target`，而 agent 会把自己从粘贴里挖到的 `access.log` / `/usr/sbin/cron` 当作 target 报回来。新增 `_target_after_agent_result(current, reported)`：copilot 模式**保持操作者的 target 不变**（`return current`），非 copilot 仍是原来的 `reported or current`（"只在 agent 报了才覆盖"）。
+- **新：仓库根 [`copilot.cmd`](copilot.cmd) —— 副驾模式一行启动器** — 把三道防线钉在一个双击即用的脚本里：`VULNCLAW_REPL_NO_AUTO=1`（单轮 chat + 不认领 target）、`VULNCLAW_SAFETY_PERMISSION_MODE=auto_review`（只读免批；`python_execute` / `shell_command` 弹窗，副驾模式下直接拒 —— 提示词失效时的兜底）、以及把三条现场规则打在屏幕上（抹地址 / 模板必带"不要调用任何工具" / 提示符应为 `vulnclaw Ready>`）。参数透传（`copilot.cmd --version` → `0.3.9`，退出码 0）。
+  ⚠️ **踩过的坑**：初版把中文说明写在 `.cmd` 里 —— cmd 按 GBK 读 UTF-8 无 BOM，注释与 `echo` 全被当成命令执行（`'CLAW_REPL_NO_AUTO' is not recognized` …）。**`.cmd` 一律纯 ASCII**，中文只放 `.md` 文档。实测两条 env 覆盖均生效：`VULNCLAW_SAFETY_PERMISSION_MODE` 未设 → `full_access`、设了 → `auto_review`（`load_config().safety.permission_mode`）。
+- **测试** — `tests/cli/test_user_intent.py::TestReplNoAutoOptOut` 现 **9 例**：① **先钉住前提**——未设 env 时该粘贴确实触发 AUTO 且抽出的 target 是 `/3`（这条就是本特性存在的理由，防止以后有人改回默认静默失效）；② 设了 env 后粘贴/带 target/`start recon`/ctf2 平台句一律 `False`；③ truthy 拼写 `1/true/TRUE/True/yes/on/" 1 "` 全部生效；④ `""/0/false/no/off/maybe/2` 一律保持默认行为；⑤ copilot 下粘贴与普通 URL 都不再被认领为目标；⑥ 未设 env 时普通挖掘路径（URL → target、闲聊 → None）不变；⑦⑧ copilot 下 agent 回报的 `access.log` 不被采纳，未设 env 时仍按原规则采纳（`reported or current`）。`tests/cli` 全量 **458 passed**（0 failed）。
+- **文档** — `IR-RUNBOOK.md` §五 彩排小节把"两条出路"改成"① 已实现（一张表说明关掉的两件事 + 启动器三层 + 第三轮实测）+ ② 兜底用法"；`IR-FIELD-CARD.md` §2 开场动作第 ③ 条改为"一律用 `copilot.cmd` 启动"（含手敲等价物与 Ctrl+C→`chat` 兜底）。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 副驾模式彩排（10/9 夜）：默认 REPL 会自己动手，四条前置纪律写进 runbook</summary>
+
+- **文档（实测教训）** — 一次真人彩排（裸启动 `vulnclaw`，粘一段**假**的"网页终端输出"，其中含测试 IP）暴露四件在赛场算事故的行为，已写进 `IR-RUNBOOK.md` §五「主路径 = 副驾模式」下的新小节「副驾模式彩排结果」：① ⭐ **它从粘贴内容里抓出 URL 当 target 并切进 AUTO 自主模式**（提示符 `vulnclaw Ready>` → `vulnclaw http://203.0.113.7 | Ready | AUTO>`，日志 `[*] Entering autonomous pentest mode`，随后真发了三条 HTTP 探测、18.7 s 超时）——**贴原文等于把目标 IP 交给它自己去打**；② **主动去连 `remote.hosts` 里配置的三台演练容器**（victim/victim-crypto/victim-ransom，逐个 `remote_exec`）——赛前若把跳板机填进清单，它会直接 SSH 上去，正是红线"远程操控"的灰区；③ **乱调平台工具**（`platform_list` 列出 7 个 CTF2 练习场，`platform_list {"ref":"ctf2:daily"}` → `403 agent_scope_forbidden`）；④ **在笔记本上全盘搜索**（`Get-ChildItem C:\ -Recurse` → 60 s 超时 + 工具降级标记）。它给出的"命令 + 判据"（`cat -A` 看马 / `ls -laR /tmp/.x` / `grep -rIn 'flag{'`）是对的，但同时把**自己加载的技能文档内容**当成未解决的 pinned fact，与 ASK/证据闸门来回较劲两轮，最终 `Not achieved — steps=2`。
+- **文档（由此定的四条前置纪律）** — ① 贴之前把输出里的 IP / URL / 域名一律抹成 `<target>`；② 粘完立刻打 `chat`（也认 `单轮`/`手动`/`exit auto`）退出 AUTO；③ `vulnclaw config set platforms.ctf2.enabled false`（必要时 `platforms.gcs.enabled false`）关掉平台工具面；④ 副驾会话用会话级 `VULNCLAW_SAFETY_PERMISSION_MODE=auto_review`（弹窗可拒），全局 `full_access` 只留给"agent 驱动打跳板机"。比赛当天另需清理 `remote.hosts`（现为三台本地演练容器）。
+- **落地（同日）** — ①②已写进 `IR-RUNBOOK.md` §五 的副驾 prompt 模板（模板本体改成 `<target>` 占位 + "只输出命令、不要调用任何工具"）与 `IR-FIELD-CARD.md` §2 的开场动作；③已实际关闭并**用项目自己的加载器验证**：`platforms.ctf2.enabled=false` / `platforms.gcs.enabled=false` → `_config_enabled` 双双 `False`、`configured_adapters()` 返回 `[]`（平台工具面消失），备份 `~/.vulnclaw/config.yaml.bak-20261009-platforms`。
+- **发现（未修，待你决定）** — **`vulnclaw config set` / `config get` 对 `platforms.*` 这类嵌套键会直接抛 traceback**（`set_config_value` 走 `getattr(config.platforms, 'ctf2')` 时炸，`settings.py:243`；`config get` 同因报错，`cli/main.py:3670` / `:3685`），而 `config/schema.py:1048` 的注释恰恰说 `extra="allow"` 就是为了让 `platforms.gcs.enabled: true` 生效 —— **文档指的路走不通，只能手改 YAML**。本次即手改（先备份、改完用加载器校验、失败自动回滚）。
+- **第二轮彩排（同日，抹掉 IP + 模板加"不要调用任何工具"）** — 结果一半一半：✅ **工具调用 0 次**（第一轮 16 次）、✅ 平台工具不再出现、✅ 五轮都明确拒绝编造 flag、✅ 第 3 轮给出最优命令（`cp /proc/9137/exe` + `/proc/9137/{cmdline,environ,fd}` + `strings` —— 对"已删除的存活进程"正解）；❌ 但 `chat` 没能退出 AUTO（识别要求整条输入**恰好等于** `chat`/`manual`/`exit auto`/`单轮`/`手动` 且在 AUTO 激活后单独发送，`cli/main.py:977-983`），且它把 target 认成了 **`/usr/sbin/cron`**。**根因（代码级）**：让它进 AUTO 的不是 IP 而是**路径** —— `_should_auto_pentest` 末段只要从输入里抽出**本地路径型 target** 就 `return True`（`cli/main.py:4651-4655`），而 IR 输出里全是 `/usr/sbin/cron`、`/var/www/html/uploads`、`/tmp/.x/.kworker` ⇒ **每次粘贴都会重新进 AUTO**，"抹 IP + 事后打 chat"只能压住它动手、压不住它自跑。⇒ 两条出路已写进 `IR-RUNBOOK.md`：①（推荐）加 env 门 `VULNCLAW_REPL_NO_AUTO=1` 让 `_should_auto_pentest` 直接 `return False`（默认零影响 + 补回归测试）；②不改代码就用"粘 → Ctrl+C → 单独发 `chat`"兜底。`IR-FIELD-CARD.md` §2 同步更正开场动作（并把"不要调用任何工具"列为必带句）。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 赛前命令更正：<code>--only-host</code> 不在 <code>solve</code> 上（文档里那条"主路径命令"会直接报错）</summary>
+
+- **修（文档，实测发现）** — `IR-RUNBOOK.md` §五「插上网线后的 30 秒动作」与 §五 任务 prompt 模板、`IR-FIELD-CARD.md` §3 模式 B、`IR-PENTEST-CARD.md` §0 都写着 `vulnclaw solve <target> --only-host <CIDR>`，**实测直接报 `No such option: --only-host`**（`vulnclaw solve --help` 无此开关、`vulnclaw run --help` 有）。带 `--only-host` 的命令只有 **`run` / `recon` / `scan` / `network-scan` / `exploit` / `persistent` / `tui`**（`cli/main.py` 各命令签名；`solve` 与 `go` 都没有）。四处文档改为 `vulnclaw run … --only-host …` 并加实测注记。
+- **顺带记下的一条边界** — 别指望把网段写进题面绕过去：核心从任务文本解析 `Only test host X` 用的正则是 `[a-z0-9.-]+`（`agent/input_analysis.py:408-414`），**`10.20.0.0/16` 会被截断成 `10.20.0.0`**（退化成单主机精确匹配，网段失效）。要在 `solve` 上带作用域，只能走 **TUI `/scope`**（存进 `session.tui_scope_only_host`，TUI 起任务时会带 `--only-host`）或 **Web 任务台**（`only_host` 字段 → `task_service` 的 `allowed_hosts`）。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 新增 <code>IR-PENTEST-CARD.md</code>（渗透段粘贴即用命令卡），补上赛前缺口 P1-4 的一半</summary>
+
+- **新增 `IR-PENTEST-CARD.md`：渗透段现场命令卡** — 补 §五点五 **P1-4「没有可直接粘贴的短命令卡」**的渗透一半（应急一半仍待出）。设计约束就是现场约束：**每条 ≤120 字符**（网页终端可能不支持长粘贴，超长的给 base64 两步法 `echo <b64> | base64 -d > x.sh`），每条命令标**来源**（`[原生]` 攻击机必有 / `[工具库]` 平台内置工具库下载后可用、**现场照抄实际清单** / `[本机]` 只在笔记本离线用），并按"现场会不会踩"写坑（`-sS` 要 root 故一律 `-sT`、`sqlmap` 太吵先手工三连、`linpeas` 别一上来全量、mimikatz 会留日志、Windows 上 `curl` 是 alias 必须写 `curl.exe`）。章节顺序=现场顺序：§1 60 秒侦察 → §2 Web 打点（目录/`.git`/备份/注入三连/弱口令）→ §3 反弹与传文件 → §4 Linux 提权 → §5 Windows 提权与凭据 → §6 横向与隧道 → §7 本机破解 → §8 判读解码与找 flag 落点 → §9 攻击机是 Windows 的对照表 → §10 五条纪律（只碰下发靶机 / flag 本人提交 / 输出原文贴回 / 11:30 停开新题 / 留证据）。
+- **文档** — `IR-RUNBOOK.md` §五点五 P1-4 标记为**渗透段已交付、应急段待出**；`IR-FIELD-CARD.md` 头部加一行指向新卡。
+- **更正（同日）：P1-4 的判据本身是错的** — 该条写"IR references 里全是分面长文档，没有任何'粘贴即用'的短清单"，但**两张应急段粘贴卡早就在技能 references 里**：`incident-response/references/paste-cards-linux.md`（100 行 / 45 条命令）与 `paste-cards-windows.md`（107 行 / 40 条）—— 卡自己的开头就写着"为什么有这张卡：IR references 里全是分面长文档，而平台网页终端可能不支持长粘贴"。**教训：写缺口前先搜一遍 references。** 现在两边都齐了（应急=技能里的两张卡，渗透=`IR-PENTEST-CARD.md`），P1-4 标为已闭合；`IR-FIELD-CARD.md` 与 `IR-PENTEST-CARD.md` 各加一行互指。
+- **修（技能文档）：Windows 粘贴卡最后一条 140 字符命令超标** — 原 `powershell -c "gci C:\ -Recurse … -Include *.txt,*.log,*.bak …"` 140 字符，且正是卡里自己实测过的"递归扫全盘 271 秒"陷阱。改成两条窄范围等价命令（`$env:TEMP` 与 `C:\inetpub`，用 `-R`/`-Inc`/`% FullName` 缩写），各自 **≤120 字符**。实测三张粘贴卡现在**超 120 字符的行数均为 0**。
+- **补（同日）：卡里加 §0「先定执行点与 OS」** —— 初版默认"命令在 Linux 攻击机上敲"，但现场有三个执行点（**你的 Windows 笔记本** / 平台攻击机 / 跳板机，后两者 **OS 未确认**，朱禹只说不保证是 Windows）。§0 给判定表（控制台里 `uname -a` vs `ver`/`whoami`）+ **30 秒可达性判定**（`Test-NetConnection` / `curl.exe`：通 → 侦察在笔记本上由 agent 驱动、闸门有效；不通 → 控制台里人打字、闸门失效）+ **边界一句**：从笔记本发包是本机操作（默认可用），**agent SSH 登进跳板机替你操作才是红线灰区**（`remote_exec`，别当主路径）。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 10/9 赛前培训纪要（元宝纪要）并入 runbook / 作业卡：分值差异、非线性解锁、平台入口与两处待澄清</summary>
+
+- **文档** — `IR-RUNBOOK.md` §五 表补 10/9 培训纪要里此前**没记**的赛事事实：**不同 flag 分值不同**（分诊时把分值写进状态表，按"分值 ÷ 预计耗时"排序）、**工位随机分配 + 各队伍独立环境 + 严禁跨组交流**、入口是**点【进入演练】**且规则文档**自行查阅**（官方后续另发详细说明）、**上午只开渗透场景**（应急段之前别去找 IR 题）、界面**右上角倒计时**（= 现场唯一可信时钟）；**应急场景**补 **高校网站故障背景（运维视角）/ 任务附件给拓扑与登录方式 / 初始只开放部分节点控制台权限 / 非线性解锁（高亮·灰度）/ 官方适时发提示**。
+- **文档** — 同节新增「⚠️ 10/9 培训纪要带来的三点待澄清」，并写明**该纪要是腾讯会议"元宝纪要"的 AI 提炼、不是逐字稿**，三条按待确认处理：① 纪要称"本地大模型对跳板机的调用能力至关重要"，与红线"禁止远程操控 / 非有效操作视为弃赛"**表述张力** → 必须问清 **agent 经 SSH（`remote_exec`/`remote_collect`/`remote_fetch`）驱动跳板机算不算被禁的"远程操作"**，答复前主路径仍是副驾模式（同时记下 `IR-FIELD-CARD.md`"AI 辅助已确认合规"与 §五点五 P0-1"没人问过"这处**文档内部矛盾**，以群内答复为准一起改）；② 纪要演示渗透拓扑时把**攻击机**称为跳板机 → 现场确认与 IR 跳板机**是不是同一台**；③ **非线性解锁** → §九"顺序解锁 ⇒ 到点必跳"收敛为"**线性链到点必跳、非线性节点可与主链并行**"。
+- **文档** — 待确认表第 8 条（账号题集）补纪要信号：**各队伍独立环境** ⇒ 队内更像"一套环境 + 多账号"，§9.3 **B 档（双线 2+2）能否用仍待现场验证**。
+- **文档** — `IR-FIELD-CARD.md`：开场清单加"**进入演练 → 先读规则文档 → 下载任务附件 → 记分值 → 留意高亮/灰度 → 工位随机禁跨组**"，倒计时写成唯一可信时钟；解锁一条改为**线性/非线性两分**；合规现状加一行"**纪要口径待核**"；现场待验证表加**第 7 行**（攻击机 vs 跳板机、SSH 驱动是否属"远程操作"），第 6 行补纪要信号。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 证据维护落地：GC 终于有人调（run 收尾 + <code>vulnclaw evidence gc</code>），解绑/重排有了暴露面</summary>
 
 - **修（缺口 1）：`EvidenceStore.collect()` 在生产代码里**没有**任何调用方 —— 孤立 blob 只增不减** — 2026-10-09 复核。实现本身一直是对的（只删「没有任何索引行引用 + 超过 grace」的 blob），缺的是**调度**和**边界**：`run_dir=None` 会落到 `CONFIG_DIR/evidence` 这个跨 run 的全局根，一次误删就是别人的证据。新增 `vulnclaw/traffic/maintenance.py`：`collect_run_evidence(run_dir)` 只作用于**显式给定的单个 run**、best-effort 永不抛、**拒绝 `run_dir=None`**；索引不存在或**有坏行**时直接返回 `[]`（引用集不完整时"无人引用"的判断不可信，宁可少删 —— blob 只是占磁盘，删错就是证据丢失）。调度点：`orchestrator` 在 `mark_run_status(..., "completed")` 的**同一分支**调用（紧邻既有的 distillation 调度），默认 24h 宽限（报告刚渲完还能读到证据），回收条数写进 run 事件 `evidence_gc`。

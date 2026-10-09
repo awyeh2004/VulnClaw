@@ -228,30 +228,111 @@ def save_config(config: VulnClawConfig) -> None:
         yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
 
 
+_MISSING = object()
+
+
+def _coerce_scalar_literal(value: str) -> Any:
+    """Type a value written into a dict node that has no existing entry to copy from.
+
+    ``bool("false")`` is True, and ``_config_enabled`` reads a mapping entry as
+    ``bool(entry.get("enabled"))`` — so writing the string ``"false"`` into a freshly
+    created ``platforms.<name>`` section used to turn the switch ON. Coerce the
+    obvious literals here instead of letting "false" mean true.
+    """
+    lowered = value.strip().lower()
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _config_extra_allowed(obj: Any) -> bool:
+    """Whether an unknown child name may be created under ``obj``.
+
+    True for plain dicts and for Pydantic models declared ``extra="allow"`` (e.g.
+    ``PlatformsConfig``, whose docstring says the free-form shape is what lets
+    ``platforms.gcs.enabled: true`` survive parsing).
+    """
+    if isinstance(obj, dict):
+        return True
+    model_config = getattr(type(obj), "model_config", None) or {}
+    return model_config.get("extra") == "allow"
+
+
+def _config_child(obj: Any, part: str) -> Any:
+    """The child at ``part`` (dict key, Pydantic field, or allowed extra), else ``_MISSING``."""
+    if isinstance(obj, dict):
+        return obj[part] if part in obj else _MISSING
+    if hasattr(obj, part):
+        return getattr(obj, part)
+    extras = getattr(obj, "model_extra", None)
+    if isinstance(extras, dict) and part in extras:
+        return extras[part]
+    return _MISSING
+
+
+def get_config_value(key: str) -> Any:
+    """Read a nested config value using dot notation, or raise ``KeyError``.
+
+    Traverses plain dicts, Pydantic fields, and ``extra="allow"`` sections alike —
+    ``platforms.ctf2.enabled`` and ``mcp.servers.chrome-devtools.enabled`` live in
+    dicts/extras, and a bare ``getattr`` chain raised
+    ``AttributeError: 'dict' object has no attribute 'ctf2'`` on exactly the keys the
+    schema comment tells operators to use.
+    """
+    config = load_config()
+    obj: Any = config
+    for part in key.split("."):
+        obj = _config_child(obj, part)
+        if obj is _MISSING:
+            raise KeyError(key)
+    return obj
+
+
 def set_config_value(key: str, value: str) -> None:
     """Set a nested config value using dot notation.
 
     Example: set_config_value("llm.api_key", "sk-xxx")
 
-    Supports traversal through both Pydantic model attributes *and* plain dict
-    nodes (e.g. ``mcp.servers.chrome-devtools.enabled``).
+    Supports traversal through Pydantic model attributes, plain dict nodes
+    (``mcp.servers.chrome-devtools.enabled``) and ``extra="allow"`` sections
+    (``platforms.ctf2.enabled`` — the section may not exist yet and is created).
     """
     config = load_config()
     parts = key.split(".")
     obj: Any = config
     for part in parts[:-1]:
-        obj = obj[part] if isinstance(obj, dict) else getattr(obj, part)
+        child = _config_child(obj, part)
+        if child is _MISSING:
+            if not _config_extra_allowed(obj):
+                raise KeyError(key)
+            # Create the section, then walk into it (dicts and extras both take a
+            # plain mapping; ``setattr`` on an extra="allow" model registers it).
+            child = {}
+            if isinstance(obj, dict):
+                obj[part] = child
+            else:
+                setattr(obj, part, child)
+        obj = child
     field_name = parts[-1]
 
     if isinstance(obj, dict):
         # Dict node — infer type from the existing value if present
-        existing = obj.get(field_name)
+        existing = obj.get(field_name, _MISSING)
         if isinstance(existing, bool):
             value = value.lower() in ("true", "1", "yes")
         elif isinstance(existing, int):
             value = int(value)
         elif isinstance(existing, float):
             value = float(value)
+        elif existing is _MISSING:
+            value = _coerce_scalar_literal(value)
         obj[field_name] = value
     else:
         # Pydantic model node — use field annotation for type coercion
