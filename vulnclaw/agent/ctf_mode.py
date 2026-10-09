@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
 if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
@@ -73,6 +73,66 @@ def detect_flag_claim(output: str) -> Optional[str]:
         if match:
             return match.group(1)
     return None
+
+
+# ── Completeness: a brace observed to OPEN must be observed to CLOSE ────────
+#
+# 2026-10-09 (鸡公煲 rehearsal): a flag split into six 7-char fragments was assembled
+# from only FIVE of them, and the model supplied the missing closing brace ITSELF. The
+# candidate then passed every existing check -- it matched the flag regex, and grounding
+# was satisfied because the model had already written that very string into a blackboard
+# note whose tool result counts as evidence. The submission was rejected by the platform.
+#
+# The brace is the cheap tell: an opening brace that was *observed* (it rode inside a
+# fragment) makes its closing brace part of the evidence, not a formatting detail to be
+# filled in. Both shapes below are deliberately narrow, because this runs on the
+# completion path where a false positive loops a run that has actually finished:
+#
+#   1. an UNCLOSED known-prefix token while no complete flag was found -- "here is
+#      `CTF2{...` and there is no `}` anywhere" is exactly the truncated state;
+#   2. a complete flag whose body has UUID shape but a SHORT last group -- 8-4-4-4-6
+#      cannot be a whole UUID, so the tail was never observed.
+#
+# Anything stricter would be wrong: requiring the full flag verbatim in tool output
+# rejects legitimately ASSEMBLED flags, which never appear whole in any single result.
+_FLAG_UNCLOSED_TOKEN_RE = re.compile(
+    r"(?:" + "|".join(re.escape(name) for name in FLAG_PREFIX_NAMES) + r")(?:[0-9_]{0,3})?"
+    r"\{[A-Za-z0-9_\-+=/!@#$%^&*]{8,200}"
+    r"(?![A-Za-z0-9_\-+=/!@#$%^&*])",
+    re.IGNORECASE,
+)
+
+#: UUID with a short final group -- a shape no complete UUID body can have.
+_UUID_SHORT_TAIL_RE = re.compile(
+    r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{1,11}$"
+)
+
+
+def flag_completeness_issues(answer_text: str, flags: Sequence[str]) -> list[str]:
+    """Name the ways a claimed flag is *visibly* incomplete.
+
+    Returns human-readable reasons (empty list = nothing visible). Callers use this to
+    refuse a candidate that was padded rather than observed -- never to validate a flag's
+    content, and never as a substitute for grounding.
+    """
+    issues: list[str] = []
+    text = answer_text or ""
+    if not flags and _FLAG_UNCLOSED_TOKEN_RE.search(text):
+        issues.append(
+            "flag candidate is UNCLOSED: the answer shows an opening brace with no "
+            "closing `}` anywhere, so the tail was never observed -- do NOT supply the "
+            "brace yourself; keep hunting for the missing part"
+        )
+    for flag in flags:
+        body = str(flag or "").split("{", 1)[-1].rstrip("}")
+        if _UUID_SHORT_TAIL_RE.match(body):
+            last_group = body.rsplit("-", 1)[-1]
+            issues.append(
+                f"flag candidate looks TRUNCATED: UUID body's last group has "
+                f"{len(last_group)} hex chars where a UUID has 12 -- a fragment is "
+                f"missing, so do not pad it; find the remaining part"
+            )
+    return issues
 
 
 # Markers that mean "the flag is verified / the challenge is solved".

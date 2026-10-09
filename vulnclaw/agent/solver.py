@@ -26,6 +26,7 @@ from vulnclaw.agent.agent_state import (
     extract_flags,
     one_line,
 )
+from vulnclaw.agent.ctf_mode import flag_completeness_issues
 from vulnclaw.agent.llm_client import (
     _fit_context_window,
     build_chat_completion_kwargs,
@@ -1656,6 +1657,12 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
 
     flags_in_answer = extract_flags(final_text)
     evidence_flags = extract_flags(evidence_text)
+    # Visible-incompleteness check (see ``flag_completeness_issues``): a flag whose closing
+    # brace was never observed, or whose UUID body is short its final group, must not be
+    # reported as finished. Padding it is exactly how a WRONG flag was submitted on
+    # 2026-10-09 -- the candidate matched the flag regex and grounded itself through the
+    # model's own blackboard note.
+    shape_issues = flag_completeness_issues(final_text, flags_in_answer)
     from vulnclaw.agent.agent_state import is_placeholder_flag
 
     # Placeholder/template flags extracted from evidence are not genuine anchors;
@@ -1691,7 +1698,16 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
         return True, final_text.strip(), cited
     if _goal_wants_flag(state.goal):
         if not flags_in_answer:
-            return False, "goal appears to require a flag/shell, but FINAL did not include a flag", cited
+            base = "goal appears to require a flag/shell, but FINAL did not include a flag"
+            if shape_issues:
+                return False, f"{base}; {shape_issues[0]}", cited
+            return False, base, cited
+        # Refused BEFORE the grounding compare on purpose: grounding can be satisfied by
+        # the model's own note (the evidence face includes tool results that merely echo
+        # model text), so "it appears in evidence" is not by itself evidence that the tail
+        # was ever observed.
+        if shape_issues:
+            return False, shape_issues[0], cited
         ungrounded = [
             flag for flag in flags_in_answer
             if not _flag_token_grounded(flag, evidence_text, evidence_flags)

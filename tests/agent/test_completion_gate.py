@@ -56,3 +56,61 @@ def test_missing_flag_in_flag_goal_rejected():
     st = _make_flag_state("some evidence here e001")
     ok, reason, _ = _completion_gate(st, "FINAL: the port is open")
     assert not ok
+
+
+# ── visible incompleteness: an opening brace must be observed to CLOSE ──────
+#
+# 2026-10-09 (鸡公煲 rehearsal): a flag split into six 7-char fragments was assembled
+# from only five, and the model supplied the missing `}` itself. It matched the flag
+# regex AND looked grounded, because the model had already written that exact string into
+# a blackboard note whose tool result counts as evidence. The platform rejected it.
+# These tests pin the tell: the brace, and a UUID body that is short its last group.
+
+
+def test_five_of_six_fragments_is_refused_even_though_it_looks_grounded():
+    flag = "CTF2{515ef9f2-eac9-4cf3-9808-eac092}"
+    st = _make_flag_state(f"note: Full flag = {flag}\n")
+    ok, reason, _ = _completion_gate(st, f"FINAL: {flag} (evidence e008)")
+    assert not ok
+    assert "TRUNCATED" in reason
+    assert "12" in reason  # says what a UUID last group should be
+
+
+def test_complete_uuid_flag_still_completes():
+    flag = "CTF2{8ff2d98e-e990-4604-9235-f012e1b8cb80}"
+    st = _make_flag_state(f"leaked: {flag}")
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+    assert ok, reason
+
+
+def test_unclosed_candidate_says_not_to_supply_the_brace():
+    """No complete flag, only an opening-brace fragment: name the missing brace."""
+    st = _make_flag_state("evidence so far: CTF2{515ef9f2-eac9-4c")
+    ok, reason, _ = _completion_gate(
+        st, "FINAL: assembled so far CTF2{515ef9f2-eac9-4c (缺尾段)"
+    )
+    assert not ok
+    assert "UNCLOSED" in reason
+    assert "brace" in reason
+
+
+def test_completeness_check_is_narrow():
+    """Wide enough shapes must pass untouched -- this runs on the completion path."""
+    from vulnclaw.agent.ctf_mode import flag_completeness_issues
+
+    complete = [
+        "CTF2{8ff2d98e-e990-4604-9235-f012e1b8cb80}",   # full UUID
+        "GKCTF{9cf21dda-34be-4f6c-a629-9c4647981ad7}",  # full UUID, other prefix
+        "D0g3{3466b11de8894198af3636c5bd1efce2}",       # 32 hex, no dashes
+        "flag{189ff9e5b743ae95f940a6ccc6dbd9ab}",       # 32 hex
+        "flag{fil3_ext3nsi0ns_4r3nt_r34l}",             # prose-shaped body
+        "SETCTF{Fi9ht1ng_3ItH_V1rUs}",
+    ]
+    for flag in complete:
+        assert flag_completeness_issues(f"answer says {flag}", [flag]) == [], flag
+
+    # a masked fingerprint is not an unclosed candidate
+    assert flag_completeness_issues("note: CTF2{515e…3680}", []) == []
+    # ...but these two shapes are
+    assert flag_completeness_issues("x", ["CTF2{515ef9f2-eac9-4cf3-9808-eac092}"])
+    assert flag_completeness_issues("只有 CTF2{515ef9f2-eac9-4c 这一段", [])

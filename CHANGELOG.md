@@ -3,6 +3,13 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — flag 完整性：开括号必须在真实输出里找到配对的闭括号（不许自己补 <code>}</code>）</summary>
+
+- **完成闸新增 flag 完整性判据：开括号必须观测到闭括号** — 2026-10-09 彩排真实事故：一道六段碎片题只拼出五段，模型**自己把缺的 `}` 补上**，候选于是既匹配 flag 正则、又"看起来有证据支撑" —— 它已把那个串写进黑板，而黑板的 tool result 本身落入证据面（`_flag_token_grounded` 的 `flag in evidence_text`），**等于自己给自己担保** —— 结果被当作答案报出，**平台判错**。新增 `agent/ctf_mode.flag_completeness_issues()`，两条刻意收窄的判据：① 答案里出现已知前缀的开括号 token、而全文找不到 `}`（`_FLAG_RE` 本就要求闭括号，所以缺尾段的候选根本不会被提取 —— 缺的是"把这件事说出来"）；② 完整候选的 UUID body 末段不足 12 位（8-4-4-4-6 不可能是完整 UUID）。`_completion_gate` 在 grounding 比对**之前**用它拒绝，理由写明"尾段从未被观测到，不要自己补括号"。⚠️ 判据**不能**写成"整串必须在工具输出里逐字符出现过"：正解本身就是拼装出来的，从不在任何单次输出里完整出现 —— 这条边界写在函数注释里。**测试**：`tests/agent/test_completion_gate.py` 新增 4 例（五段拼装即使"有证据"也被拒 / 完整 UUID 仍放行 / 无闭括号的措辞 / 6 个反例证明判据收窄 + 脱敏指纹形不误伤）；`tests/agent` **1425 passed**（+1 既有环境性失败）。**文档**：`IR-RUNBOOK.md` §五"提交前自查"补"括号必须配对 + 自我接地"两条，并注明拼装是允许的。
+
+</details>
+
+<details open>
 <summary><strong>Unreleased</strong> — CLI 报告找回本 run 证据（run_id 反查 + --run-dir）；SSH 纳入硬黑名单 + target 文件名净化统一</summary>
 
 - **修：`vulnclaw report <session.json>` 拿不到本 run 的取证仓库，还把"证据就在那儿"误报成"证据没了"** — 2026-10-09 彩排实测（受控实验，同一个 run 各渲一次）：**A 路** `report(session)`（= CLI；`generate_report_from_file()` **不传 `run_dir`**）正文**不内联**、两条引用被写成 **"⚠ 已绑定但正文不可读取（快照已不在索引中）"**、且不产出 `evidence_bundles`；**B 路** `report(session, run_dir=…)`（agent/orchestrator 路）正文 + 响应体正常内联、bundles 正常生成。**根因比表面深一层**：`vulnclaw solve` 从前**根本没把 run 写进会话**（`session.run_id` 为空 —— 只有 subagent 那条路会生成 `run_id`），"从会话找回 run"这条链在源头就是断的。修法两层：① `orchestrator` 在注入 `agent.run_dir` 的同一处把 `run.json` 的 `run_id` 写进 `session_state.run_id`（已有值不覆盖，兼容 resume）；② 新增 `run_context.find_run_dir_by_run_id()`（best-effort：无 id / 无 root / 无匹配一律 `None`，不抛 —— 调用方是拿它**改善默认值**，不是校验 run）+ `generate_report_from_file(session_path, run_dir=None)` 先反查再渲染 + `vulnclaw report` 新增 `--run-dir`（显式优先，不被反查推翻）。**实测**：新 run 的会话 `session.run_id` == 该 run 的 `run.json.run_id`，反查命中 run 目录；单测 4 例（正文内联 / 显式优先 / 反查 best-effort / 无 run 仍能出报告且保留"不可读取"提示）。⚠️ **渗透题同样中招**，不只 IR —— §9.2 让用 `report <session.json> --pdf` 交 WP，交出去的报告会自述证据不可读。
