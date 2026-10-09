@@ -17,7 +17,7 @@ from vulnclaw import __version__
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V2 违规 — 叶子类型已移至 config/domain_models.py。
 from vulnclaw.agent.context import SessionState
-from vulnclaw.config.domain_models import VulnerabilityFinding
+from vulnclaw.config.domain_models import VulnerabilityFinding, evidence_binding_signature
 from vulnclaw.config.settings import SESSIONS_DIR
 from vulnclaw.i18n import _, current_lang
 from vulnclaw.i18n.phases import localized_phase_name, localized_report_phase_heading
@@ -408,11 +408,18 @@ def generate_report(
     llm_attack_summary: str = "",
     report_format: str = "markdown",
     target_state_context: Optional[dict[str, Any]] = None,
+    run_dir: str | Path | None = None,
 ) -> Path:
     """Generate a penetration test report from session state.
 
     Only verified findings are rendered into the main detailed findings section.
     Pending, candidate, and rejected findings remain in summary/governance views.
+
+    ``run_dir`` is where the run's evidence lives (its ``evidence/`` tree). It is
+    **not** the same thing as ``output.parent``: the report file may be written to
+    a session directory while the captures belong to a run directory. Pass the run
+    anchor explicitly (the orchestrator / scan path both know it); ``output.parent``
+    is only a legacy fallback for callers with no run context.
     """
 
     all_findings = session.findings
@@ -506,7 +513,8 @@ def generate_report(
                 "## 6. 已验证漏洞定位与复现信息",
                 "## 6. Verified Findings — Location & Reproduction",
             ),
-            traffic_store=_resolve_traffic_store(output.parent),
+            traffic_store=_resolve_traffic_store(run_dir or output.parent),
+            evidence_store=_resolve_evidence_store(run_dir or output.parent),
         )
     if target_state_context:
         report_content += "\n\n" + _render_target_state_context(target_state_context)
@@ -539,8 +547,10 @@ def generate_report_from_target_state(
     target_state: dict[str, Any],
     report_format: str = "markdown",
     output_path: str | None = None,
+    run_dir: str | Path | None = None,
 ) -> Path:
     """Generate a report from a target-state snapshot."""
+
     raw = dict(target_state)
     target_state_context = {
         "resume_meta": raw.pop("resume_meta", None),
@@ -555,6 +565,7 @@ def generate_report_from_target_state(
         output_path=output_path,
         report_format=report_format,
         target_state_context=target_state_context,
+        run_dir=run_dir,
     )
 
 
@@ -949,6 +960,7 @@ def generate_persistent_cycle_report(
     output_path: Optional[str] = None,
     llm_attack_summary: str = "",  # ★ LLM 生成的攻击路径摘要
     prev_verified_ids: Optional[set] = None,
+    run_dir: str | Path | None = None,
 ) -> Path:
     """Generate a cycle report for persistent pentest.
 
@@ -963,6 +975,9 @@ def generate_persistent_cycle_report(
         total_steps: Total executed steps so far (cumulative).
         rounds_per_cycle: Rounds per cycle.
         output_path: Output file path. If None, auto-generate.
+        run_dir: Run directory holding this run's ``evidence/`` tree; overrides
+            ``output_path.parent`` as the evidence anchor (they differ when the
+            report is written to a session directory).
         prev_verified_ids: finding_id set of findings already verified before this
             cycle. When provided, "new this cycle" is computed by identity against
             this set instead of slicing by an all-findings count — the count-based
@@ -1064,7 +1079,8 @@ def generate_persistent_cycle_report(
                 "## 已验证漏洞定位与复现信息",
                 "## Verified Findings — Location & Reproduction",
             ),
-            traffic_store=_resolve_traffic_store(output.parent),
+            traffic_store=_resolve_traffic_store(run_dir or output.parent),
+            evidence_store=_resolve_evidence_store(run_dir or output.parent),
         )
     output.write_text(report_content, encoding="utf-8")
 
@@ -1207,51 +1223,204 @@ def _resolve_traffic_store(output_dir: Path) -> Any | None:
     return store if store.index_path.exists() else None
 
 
-def _render_http_captures(finding: VulnerabilityFinding, traffic_store: Any) -> list[str]:
+def _resolve_evidence_store(output_dir: Path) -> Any | None:
+    """Return the run's pinned-evidence store, or None when nothing was pinned.
+
+    Separate from :func:`_resolve_traffic_store` on purpose: pinned evidence is
+    expected to outlive the capture log, so "no captures" must not be read as
+    "no evidence".
+    """
+    try:
+        from vulnclaw.traffic.paths import resolve_report_evidence_store
+    except Exception:
+        return None
+    store = resolve_report_evidence_store(output_dir)
+    return store if store.index_path.exists() else None
+
+
+_EVIDENCE_ROLE_LABELS = {
+    "baseline": ("对照请求", "Baseline request"),
+    "proof": ("证明请求", "Proof request"),
+    "verification": ("验证请求", "Verification request"),
+    "supporting": ("辅助证据", "Supporting evidence"),
+}
+
+
+def _role_label(role: str) -> str:
+    zh, en = _EVIDENCE_ROLE_LABELS.get(str(role or ""), _EVIDENCE_ROLE_LABELS["supporting"])
+    return _rl(zh, en)
+
+
+def _resolve_capture_evidence(
+    ref: Any, traffic_store: Any, evidence_store: Any
+) -> tuple[str, str, str, Any]:
+    """Resolve one ``http_capture`` ref to ``(request_text, response_text, source, snapshot)``.
+
+    A pinned snapshot wins: it is immutable and content-verified, and it survives
+    the capture log being reclaimed -- which is the entire reason the snapshot
+    layer exists. A ref carrying only ``request_id`` (bound before pinning
+    existed) still resolves against the live capture log, so old findings keep
+    rendering. ``snapshot`` is returned rather than looked up again so the caller
+    can label the block without a second index scan.
+
+    Raises nothing: the caller needs to distinguish "no evidence bound" from
+    "bound but unresolvable", and only a return value can express that.
+    """
+    snapshot_id = str(getattr(ref, "snapshot_id", "") or "")
+    if snapshot_id and evidence_store is not None:
+        try:
+            snapshot = evidence_store.get(snapshot_id)
+            if snapshot is not None:
+                return (
+                    evidence_store.request_text(snapshot_id),
+                    evidence_store.response_text(snapshot_id),
+                    "pinned",
+                    snapshot,
+                )
+            # Pinned but absent from the index: fall through to the live store if
+            # the ref also names a capture id; otherwise report it as missing.
+        except Exception:
+            return "", "", "unreadable", None
+
+    request_id = str(getattr(ref, "request_id", "") or "")
+    if request_id and traffic_store is not None:
+        view = traffic_store.view(request_id)
+        if view:
+            return (
+                str(view.get("request_text") or ""),
+                str(view.get("response_text") or ""),
+                "capture-log",
+                None,
+            )
+    return "", "", "missing", None
+
+
+def _render_http_captures(
+    finding: VulnerabilityFinding, traffic_store: Any, evidence_store: Any = None
+) -> list[str]:
     """Inline the raw request/response for each http_capture evidence ref.
 
-    Mirrors the way poc_builder inlines PoC scripts: each verified finding's
-    ``evidence_refs`` with ``kind="http_capture"`` is resolved back to its
-    JSONL record + blob files and rendered as fenced code blocks.
+    Each verified finding's ``evidence_refs`` with ``kind="http_capture"`` is
+    resolved -- pinned snapshot first, live capture log second -- and rendered as
+    fenced code blocks in binding order, tagged with the role that says whether
+    the reader is looking at the control request or the one that proved the bug.
+
+    A bound ref that cannot be resolved is rendered as an explicit
+    "evidence unavailable" line rather than skipped. The old silent ``continue``
+    made a finding whose proof had been reclaimed indistinguishable from one
+    that never had proof, which is the single most misleading thing a report can
+    do.
     """
     refs = getattr(finding, "evidence_refs", None) or []
-    if not refs or traffic_store is None:
+    if not refs:
         return []
 
     lines: list[str] = []
     for ref in refs:
         if getattr(ref, "kind", "") != "http_capture":
             continue
-        request_id = getattr(ref, "request_id", "")
-        view = traffic_store.view(request_id) if request_id else None
-        if not view:
+        handle = str(
+            getattr(ref, "snapshot_id", "") or getattr(ref, "request_id", "") or "(unbound)"
+        )
+        role = _role_label(getattr(ref, "role", "") or "supporting")
+        note = str(getattr(ref, "note", "") or "").strip()
+
+        request_text, response_text, source, snapshot = _resolve_capture_evidence(
+            ref, traffic_store, evidence_store
+        )
+
+        if source in ("missing", "unreadable"):
+            reason = _rl(
+                "已绑定但正文不可读取（快照缺失或校验失败）",
+                "bound but the body is unreadable (snapshot missing or failed verification)",
+            )
+            lines.append(
+                _rl(
+                    f"  - ⚠ 证据 `{handle}`（{role}）— {reason}",
+                    f"  - ⚠ Evidence `{handle}` ({role}) — {reason}",
+                )
+            )
             continue
+
+        if snapshot is not None:
+            handle = snapshot.snapshot_id
+            method, url, status = snapshot.method, snapshot.url, snapshot.status
+        else:
+            view = (
+                traffic_store.view(str(getattr(ref, "request_id", ""))) if traffic_store else None
+            )
+            method = (view or {}).get("method", "")
+            url = (view or {}).get("url", "")
+            status = (view or {}).get("status", "")
+
         header = _rl(
-            f"  - 抓包证据 `{request_id}` — {view.get('method')} {view.get('url')} → {view.get('status')}",
-            f"  - Captured traffic `{request_id}` — {view.get('method')} {view.get('url')} → {view.get('status')}",
+            f"  - 抓包证据 `{handle}`（{role}）— {method} {url} → {status}",
+            f"  - Captured traffic `{handle}` ({role}) — {method} {url} → {status}",
         )
         lines.append(header)
-        request_text = (view.get("request_text") or "").strip()
-        response_text = (view.get("response_text") or "").strip()
-        if request_text:
+        if note:
+            lines.append(_rl(f"    - 说明: {note}", f"    - Note: {note}"))
+
+        if request_text.strip():
             lines.append(_rl("    - 原始请求:", "    - Raw request:"))
             lines.append("")
             lines.append("```http")
-            lines.append(request_text)
+            lines.append(request_text.strip())
             lines.append("```")
-        if response_text:
+        if response_text.strip():
             lines.append(_rl("    - 原始响应:", "    - Raw response:"))
             lines.append("")
             lines.append("```http")
-            lines.append(response_text)
+            lines.append(response_text.strip())
             lines.append("```")
     return lines
 
 
+def _evidence_staleness_notice(
+    findings: list[VulnerabilityFinding], before: dict[int, tuple[int, str]]
+) -> str:
+    """Warn when any finding's bindings changed while the report was rendering.
+
+    Verification and reporting can overlap -- parallel agents merge session
+    state while a report is generated -- and a report that interleaves two
+    binding revisions is not reproducible. The versions are recorded per finding
+    either way; this makes the specific hazard loud instead of silent.
+    """
+    stale: list[str] = []
+    for finding in findings:
+        recorded = before.get(id(finding))
+        if recorded is None:
+            continue
+        version = int(getattr(finding, "evidence_version", 0) or 0)
+        signature = evidence_binding_signature(getattr(finding, "evidence_refs", None) or [])
+        if version != recorded[0] or signature != recorded[1]:
+            stale.append(f"{finding.title} (v{recorded[0]} → v{version})")
+    if not stale:
+        return ""
+    return _rl(
+        "> ⚠ 证据版本在报告生成期间发生变化，以下条目的复现证据可能不是同一版本："
+        + ", ".join(stale),
+        "> ⚠ Evidence bindings changed while this report was being generated; the "
+        "reproduction evidence for these findings may mix revisions: " + ", ".join(stale),
+    )
+
+
 def _render_verified_finding_details_clean(
-    findings: list[VulnerabilityFinding], heading: str, traffic_store: Any | None = None
+    findings: list[VulnerabilityFinding],
+    heading: str,
+    traffic_store: Any | None = None,
+    evidence_store: Any | None = None,
 ) -> str:
     lines = [heading, ""]
+    # Snapshot the binding revisions before rendering so a mid-render change is
+    # detectable rather than producing a report that silently mixes revisions.
+    before = {
+        id(finding): (
+            int(getattr(finding, "evidence_version", 0) or 0),
+            evidence_binding_signature(getattr(finding, "evidence_refs", None) or []),
+        )
+        for finding in findings
+    }
     for idx, finding in enumerate(findings, 1):
         location = _extract_location_summary_clean(finding) or _rl(
             "未定位 / 未提取到 URL", "No location / no URL extracted"
@@ -1264,11 +1433,14 @@ def _render_verified_finding_details_clean(
         if finding.evidence:
             lines.append(_rl("- 验证证据: ", "- Verification evidence: ") + finding.evidence)
         lines.append(_rl("- 复现 / PoC: ", "- Reproduction / PoC: ") + _build_repro_summary_clean(finding))
-        capture_lines = _render_http_captures(finding, traffic_store)
+        capture_lines = _render_http_captures(finding, traffic_store, evidence_store)
         if capture_lines:
             lines.append(_rl("- 抓包复现证据:", "- Captured-traffic reproduction evidence:"))
             lines.extend(capture_lines)
         lines.append("")
+    notice = _evidence_staleness_notice(findings, before)
+    if notice:
+        lines.extend([notice, ""])
     return "\n".join(lines).rstrip()
 
 

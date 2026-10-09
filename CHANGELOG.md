@@ -3,6 +3,14 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 证据改为 per-run 目录（写读同锚、删除跨 run 兜底读）</summary>
+
+- **证据存储改为 per-run：写入与读取都由 run 目录锚定，读侧不再跨 run 兜底** — 此前抓包日志与固定证据落在 **process-wide** 的 `CONFIG_DIR/evidence`（可被 `VULNCLAW_EVIDENCE_DIR` 覆盖），而读侧在目标 run 目录为空时**静默兜底**到该全局树，于是「没有自己证据的 run」会把**上一个 run 的抓包**当成自己的 proof 渲染进报告 —— 同进程多 run（批量扫描 / 并发）下这条泄漏尤其致命。现在：① 写侧 `resolve_traffic_store` / `resolve_evidence_store`（`vulnclaw/traffic/paths.py`，经 `agent/builtin_tools.py` 的 `traffic_capture` / `traffic_bind` 使用）优先取 `agent.run_dir`（由 `orchestrator` 在 checkpoint 前注入 `run_context.run_dir`），落到 `<run_dir>/evidence/traffic`；② 读侧 `resolve_report_*_store` 与工具侧**共用同一 seam**，但语义是**显式 `run_dir` 即权威** —— 该 run 没有抓包就读到空，绝不再回落到 config 默认（D2）；③ `generate_report(session, output_path=..., run_dir=...)` 新增 `run_dir` 参数，把**报告落点**与**证据位置**解耦（`output_path` 只决定报告写哪；修掉「报告写到 `SESSIONS_DIR` 就再也读不到本 run 证据」的坑，D3）；④ 扫描（headless）路径与 `RunContext` 路径共用同一套 run 目录骨架，此前 `_create_run_layout` 已含 `evidence/`，现抽为公共幂等函数 `run_context.ensure_run_layout`，扫描路径在生成 run 目录后同样补齐 `evidence/`（D4）。**实测**：`tests/traffic/test_evidence_report.py` 新增 A/B 双 run **同进程** 隔离用例（B 报告不得出现 A 的 host、请求行、响应体标记与快照 id；两个 run 的响应体刻意取不同值，以免内容寻址的快照摘要撞车造成误判）、`tests/traffic/test_report_export.py` 补「显式 run_dir 不读 config 默认」「缺 run_dir 不内联邻近 run」两条、`tests/cli/test_cli_noninteractive.py` 新增「扫描产物的报告/summary 落在 agent 自己写的 run 目录、且该目录含 `evidence/`」断言；`tests/run/test_headless.py` 补 `ensure_run_layout` 骨架用例。回归 `tests/{traffic,report,run,cli}` 全绿。
+- **文档** — `vulnclaw/traffic/paths.py` 模块 docstring 去掉「Until the run-directory PRD lands…」的临时说明，改为描述 per-run 权威解析（显式 `run_dir` 确定性、无跨 run 兜底；仅无 run 上下文时用 config 默认）。
+
+</details>
+
+<details open>
 <summary><strong>Unreleased</strong> — 硬黑名单（计分平台永不可测）+ CIDR 网段作用域 + 显式出口代理（SOCKS5/HTTP）+ 现场作业卡</summary>
 
 - **新增显式出口代理：让靶场流量走自建隧道（SOCKS5 / HTTP）** — 补上赛前 Q1 的代码级缺口：`http_client` 对私网/回环目标强制 `trust_env=False` 是**为挡系统代理**而设，却也把 `ssh -D` 建的隧道一并挡掉了。现在 `network.http_proxy`（或 `VULNCLAW_HTTP_PROXY`）可指定出口代理，target-facing 工具按 `proxy=resolve_egress_proxy(config)` 接入（`fetch`（含 TLS 重试分支）、`http_probe_batch`、`brute_force_login`、`traffic_repeat`）；**LLM 网关 / 情报 API / 远端 MCP 刻意不接入**，免得把评测与情报流量误送进靶场隧道。语义：① 显式代理对**私网目标同样生效**（这正是隧道的目的，`trust_env` 表达不了）；② **回环目标仍直连** —— 隧道对端会把 `127.0.0.1` 读成它自己；③ 强制 `trust_env=False`，实测可盖过 `HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY=*`；④ 未知 scheme 直接报错（httpx 只认 http/https/socks5/socks5h，不认 socks4）。**实测**（httpx 0.28.1，`tests/utils/test_http_client_egress_proxy.py` 用进程内 SOCKS5 服务器 + 不可解析域名固化成断言）：`socks5://` 交给代理的是**主机名**（`ATYP=3`），DNS 在代理端解析 → **作用域闸仍看到真实 host**，`--only-host` / `blocked_hosts` 在隧道下继续有判别力（这是必须用 `ssh -D` 而非 `ssh -L` 的原因：`-L` 下 agent 只能请求 `127.0.0.1`，闸门失去判别力）；`socks5h://` 在 httpcore <1.0.9 是**裸 `KeyError: b'socks5h'`**（本机 1.0.2 崩、临时 venv 1.0.9 通过，报错点离代理 URL 很远）→ 统一改写成 `socks5://`（两边都是远端解析，实测行为相同，≠ curl）；缺 `socksio` 时点名 `vulnclaw[socks]` 而不是静默失败（`pyproject.toml` 新增该 extra）。

@@ -29,6 +29,9 @@ class _FakeAgent:
         self.context = None  # board lookup resolves to None
         self.session_state = types.SimpleNamespace(findings=findings)
         self.solve_kwargs: dict = {}
+        # The orchestrator injects this before the run; the fake mirrors it so
+        # the CLI's run-dir convergence (D4) is exercised.
+        self.run_dir = ""
 
     async def solve(self, prompt, **kwargs):
         self.solve_kwargs = kwargs
@@ -55,11 +58,14 @@ def _install_fake_run(
     findings=None,
     raise_exc: Exception | None = None,
     captured: dict | None = None,
+    agent_run_dir: str | None = None,
 ):
     """Patch load_config + orchestrator so `run` drives a fake agent.
 
     The fake ``_run_cli_orchestrated_task`` builds a config + agent and invokes
     the real runner closure so scan-mode/engine wiring is exercised end to end.
+    ``agent_run_dir`` mirrors the orchestrator handing the agent a RunContext run
+    directory (D4 convergence).
     """
     findings = findings if findings is not None else []
     monkeypatch.setattr(cli_main, "load_config", _config_with_creds)
@@ -67,6 +73,8 @@ def _install_fake_run(
     async def fake_orchestrated(*, command, target, resume, snapshot, runner):
         shared_config = VulnClawConfig()
         agent = _FakeAgent(findings, shared_config)
+        if agent_run_dir is not None:
+            agent.run_dir = agent_run_dir
         if captured is not None:
             captured["agent"] = agent
             captured["shared_config"] = shared_config
@@ -152,6 +160,57 @@ class TestNonInteractiveOutput:
             ["run", "t", "--non-interactive", "--output", "/custom/report.md"],
         )
         assert report_calls == ["/custom/report.md"]
+
+    def test_scan_artifacts_converge_on_the_agents_run_dir(self, runner, monkeypatch, tmp_path):
+        """D4: report + summary.json land where the agent actually wrote evidence.
+
+        The orchestrator hands the agent a RunContext run dir; the scan path used
+        to synthesise a *different* ``<slug>-<run_id>`` dir and point the report
+        at it. Once the cross-run fallback is gone (D2) that dir has no evidence,
+        so the report would read an empty tree — the two layouts must converge.
+        """
+        runs_root = tmp_path / "runs"
+        agent_run_dir = runs_root / "20261009-run-example.com-ab12cd34"
+        (agent_run_dir / "evidence").mkdir(parents=True)
+
+        _install_fake_run(monkeypatch, agent_run_dir=str(agent_run_dir))
+        monkeypatch.setattr(cli_main, "RUNS_DIR", runs_root)
+
+        report_calls: list[dict] = []
+
+        def capture_report(target, **kwargs):
+            report_calls.append(kwargs)
+            return kwargs.get("output_path") or "/tmp/report.md"
+
+        monkeypatch.setattr(cli_main, "_generate_report_for_target", capture_report)
+
+        result = runner.invoke(app, ["run", "https://example.com", "--non-interactive"])
+        assert result.exit_code == cli_main.headless.EXIT_CLEAN
+
+        assert report_calls
+        assert report_calls[0]["output_path"] == str(agent_run_dir / "report.md")
+        # the reader is told the same run dir the writer used
+        assert report_calls[0]["run_dir"] == str(agent_run_dir)
+        assert (agent_run_dir / "summary.json").exists()
+        # no second, empty headless-style run dir was created alongside it
+        assert [p.name for p in runs_root.iterdir()] == [agent_run_dir.name]
+
+    def test_synthesized_run_dir_carries_the_evidence_layout(self, runner, monkeypatch, tmp_path):
+        """No run dir reached the agent → the synthesized dir still has evidence/.
+
+        D2 removed the cross-run fallback, so a scan run whose report reads
+        ``<run_dir>/evidence`` must actually find that directory.
+        """
+        _install_fake_run(monkeypatch)  # fake agent leaves run_dir == ""
+        monkeypatch.setattr(cli_main, "RUNS_DIR", tmp_path)
+
+        result = runner.invoke(app, ["run", "https://example.com", "--non-interactive"])
+        assert result.exit_code == cli_main.headless.EXIT_CLEAN
+
+        run_dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+        assert len(run_dirs) == 1
+        assert (run_dirs[0] / "evidence").is_dir()
+        assert (run_dirs[0] / "summary.json").exists()
 
 
 # ── Scan-mode presets applied to the engine ─────────────────────────

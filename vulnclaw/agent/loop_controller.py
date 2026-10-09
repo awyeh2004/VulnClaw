@@ -406,6 +406,7 @@ async def persistent_pentest(
                     rounds_per_cycle=rounds_per_cycle,
                     llm_attack_summary=llm_summary,
                     prev_verified_ids=prev_verified_ids,
+                    run_dir=getattr(agent, "run_dir", None) or None,
                 )
             except Exception as e:
                 report_path = _("agent.loop.report_failed", error=e)

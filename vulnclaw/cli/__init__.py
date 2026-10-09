@@ -177,6 +177,7 @@ def _generate_report_for_target(
     current_session: Any = None,
     report_format: str = "markdown",
     output_path: Optional[str] = None,
+    run_dir: Optional[str] = None,
 ) -> str:
     """Generate a report for a target using the best available source data."""
     from vulnclaw.agent.context import SessionState
@@ -186,16 +187,22 @@ def _generate_report_for_target(
     if current_session is not None and (
         current_session.findings or current_session.executed_steps or current_session.notes
     ):
-        path = generate_report(current_session, output_path, report_format=report_format)
+        path = generate_report(
+            current_session, output_path, report_format=report_format, run_dir=run_dir
+        )
         return str(path)
 
     state = load_target_state(target)
     if state:
-        path = generate_report_from_target_state(state, output_path=output_path)
+        path = generate_report_from_target_state(
+            state, output_path=output_path, run_dir=run_dir
+        )
         return str(path)
 
     session = SessionState(target=target)
-    path = generate_report(session, output_path, report_format=report_format)
+    path = generate_report(
+        session, output_path, report_format=report_format, run_dir=run_dir
+    )
     return str(path)
 
 

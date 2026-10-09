@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 
@@ -803,6 +804,7 @@ def _run_repl() -> None:
                     if agent.session_state.target == report_target
                     else None,
                     report_format=config.session.report_format,
+                    run_dir=getattr(agent, "run_dir", None) or None,
                 )
                 console.print(_("cli.report_generated", path=report_path))
                 continue
@@ -898,6 +900,7 @@ def _run_repl() -> None:
                             persistent_target,
                             current_session=agent.session_state,
                             report_format=config.session.report_format,
+                            run_dir=getattr(agent, "run_dir", None) or None,
                         )
                         console.print(_("cli.partial_report", path=partial_report))
                 except KeyboardInterrupt:
@@ -908,6 +911,7 @@ def _run_repl() -> None:
                                 persistent_target,
                                 current_session=agent.session_state,
                                 report_format=config.session.report_format,
+                                run_dir=getattr(agent, "run_dir", None) or None,
                             )
                             console.print(_("persistent.final_report", path=final_report))
                         except Exception as exc:
@@ -1252,12 +1256,19 @@ def _run_non_interactive(
     fail_on: str,
     run_coro_factory,
     classification_holder: dict,
+    run_dir_holder: Optional[dict] = None,
 ) -> None:
     """Drive a headless run: no prompts, structured output, exit-code contract.
 
     Any crash during the scan exits :data:`headless.EXIT_ERROR` (1) — a broken
     scan never exits 0. On completion the finding set is mapped to an exit code
     under ``--fail-on`` and a ``summary.json`` is written into the run directory.
+
+    Artifacts (report + summary.json) land in the *same* run directory the agent
+    wrote its evidence into (``agent.run_dir``, reported back through
+    ``run_dir_holder``), so the report reader resolves the run's own
+    ``evidence/`` tree. Only when no run directory reached the agent (e.g. a
+    legacy/read-only flow) do we synthesise the deterministic headless path.
     """
     from datetime import datetime
 
@@ -1275,12 +1286,24 @@ def _run_non_interactive(
     exit_code = headless.determine_exit_code(classification, fail_on)
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = headless.run_directory(RUNS_DIR, target, run_id)
+    authoritative = str((run_dir_holder or {}).get("run_dir") or "")
+    if authoritative:
+        run_dir = Path(authoritative)
+    else:
+        run_dir = headless.run_directory(RUNS_DIR, target, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    # Converge the two run layouts (D4): a scan run must carry the same skeleton
+    # as a RunContext run, above all ``evidence/``, because the reader no longer
+    # falls back to another run's store.
+    from vulnclaw.run_context import ensure_run_layout
+
+    ensure_run_layout(run_dir)
     # Co-locate the report inside the run directory unless the caller pinned a
     # path with --output, so all structured output for a run lives in one place.
     report_output = output or str(run_dir / "report.md")
-    report_path = _generate_report_for_target(target, output_path=report_output)
+    report_path = _generate_report_for_target(
+        target, output_path=report_output, run_dir=str(run_dir)
+    )
 
     summary = headless.build_run_summary(
         target=target,
@@ -1584,6 +1607,7 @@ def run(
 
     agent_state_holder: dict = {}
     classification_holder: dict = {}
+    run_dir_holder: dict = {}
     stream_out = sys.stdout if stream else None
 
     async def _run():
@@ -1633,6 +1657,10 @@ def run(
             classification_holder["classification"] = headless.classify_findings(
                 getattr(agent, "session_state", None)
             )
+            # Where the agent actually wrote its evidence (injected by the
+            # orchestrator). _run_non_interactive co-locates report + summary
+            # here so the reader resolves this run's own evidence tree.
+            run_dir_holder["run_dir"] = str(getattr(agent, "run_dir", "") or "")
             return result
 
         result = await _run_cli_orchestrated_task(
@@ -1655,6 +1683,7 @@ def run(
             fail_on=fail_on,
             run_coro_factory=_run,
             classification_holder=classification_holder,
+            run_dir_holder=run_dir_holder,
         )
         return
 

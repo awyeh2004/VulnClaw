@@ -459,7 +459,15 @@ def _read_manifest(run_dir: Path) -> dict[str, Any]:
     return raw
 
 
-def _create_run_layout(run_dir: Path, targets: list[Target]) -> None:
+def ensure_run_layout(run_dir: Path, targets: list[Target] | None = None) -> None:
+    """Create the standard per-run directory layout (idempotent, public).
+
+    Both run creators converge here so a run always carries the same skeleton —
+    notably ``evidence/``, which the report reader resolves against once the
+    cross-run fallback is gone (a scan run must not report against a directory
+    that has no evidence tree).
+    """
+    run_dir = Path(run_dir)
     for relative in [
         "events",
         "logs",
@@ -471,10 +479,14 @@ def _create_run_layout(run_dir: Path, targets: list[Target]) -> None:
     ]:
         (run_dir / relative).mkdir(parents=True, exist_ok=True)
     (run_dir / "events" / "events.jsonl").touch(exist_ok=True)
-    for target in targets:
+    for target in targets or []:
         (run_dir / "targets" / target.target_id / "state" / "snapshots").mkdir(
             parents=True, exist_ok=True
         )
+
+
+def _create_run_layout(run_dir: Path, targets: list[Target]) -> None:
+    ensure_run_layout(run_dir, targets)
 
 
 def _snapshot_exists(context: RunContext, snapshot_id: str) -> bool:

@@ -22,6 +22,7 @@ from vulnclaw.headless import (
     scan_mode_profile,
     write_run_artifacts,
 )
+from vulnclaw.run_context import ensure_run_layout
 
 
 class _Finding:
@@ -203,6 +204,24 @@ class TestRunArtifacts:
         assert loaded["exit_code"] == EXIT_VERIFIED
         assert loaded["findings"] == {"verified": 1, "candidates": 0, "total": 1}
         assert loaded["profile"]["max_parallel"] == 1
+
+    def test_ensure_run_layout_creates_the_evidence_tree(self, tmp_path):
+        """D4: scan runs and RunContext runs share one layout, evidence/ included.
+
+        The report reader no longer falls back to another run's store, so a scan
+        run's ``<run_dir>/evidence`` must genuinely exist.
+        """
+        run_dir = tmp_path / "r"
+        ensure_run_layout(run_dir)
+        for name in ("events", "logs", "agents", "evidence", "findings", "reports", "temp"):
+            assert (run_dir / name).is_dir(), f"missing {name}/"
+        assert (run_dir / "events" / "events.jsonl").exists()
+
+    def test_ensure_run_layout_is_idempotent(self, tmp_path):
+        run_dir = tmp_path / "r"
+        ensure_run_layout(run_dir)
+        ensure_run_layout(run_dir)  # must not raise on an existing layout
+        assert (run_dir / "evidence").is_dir()
 
     def test_scan_profile_as_dict_roundtrip(self):
         profile = ScanProfile(1, 2, 3, 4, 5, "quick")

@@ -383,11 +383,11 @@ def test_generate_report_selects_session_target_state_then_empty_session(
     saved_state = object()
     current_session = SimpleNamespace(findings=[object()], executed_steps=[], notes=[])
 
-    def fake_generate(session, output_path=None, report_format="markdown"):
+    def fake_generate(session, output_path=None, report_format="markdown", run_dir=None):
         calls.append(("session", session, output_path, report_format))
         return tmp_path / "session.md"
 
-    def fake_generate_saved(state, output_path=None):
+    def fake_generate_saved(state, output_path=None, run_dir=None):
         calls.append(("saved", state, output_path))
         return tmp_path / "saved.md"
 
