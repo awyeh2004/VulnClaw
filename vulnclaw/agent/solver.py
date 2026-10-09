@@ -1567,10 +1567,18 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"Goal: {state.goal}"
         f"{constraints}"
         f"{bb_instruction}"
-        f"{playbook_instruction}{prior_playbook_brief}"
+        f"{playbook_instruction}"
         f"{pwn_local_instruction}"
         f"{tool_card}"
         f"{mode_block}"
+        # Deliberately last. Of everything assembled here this is the only block
+        # that can change between rounds of one run (`save_playbook` refreshes
+        # runtime.prior_playbook_brief on success), so keeping it at the tail is
+        # what lets the longest-common-prefix cache survive a mid-run playbook
+        # hit. It is safe to detach from `playbook_instruction` above because
+        # _format_prior_playbook_brief renders its own header and its own
+        # "How to use these notes" section.
+        f"{prior_playbook_brief}"
     )
 
 

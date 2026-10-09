@@ -41,15 +41,30 @@ def _sanitize_target(value: str) -> str:
     return cleaned
 
 
-def build_system_prompt(
+def build_system_prompt_parts(
     target: Optional[str] = None,
     phase: Optional[Any] = None,
     skill_context: Optional[str] = None,
     mcp_tools: Optional[list[dict]] = None,
     enable_personnel_dim: bool = True,
     lang: Optional[str] = None,
-) -> str:
-    """Dynamically assemble the full system prompt in the active language.
+) -> tuple[list[str], list[str]]:
+    """Split the system prompt into ``(stable_parts, volatile_parts)``.
+
+    The split exists so an upstream caller can keep every invariant block
+    contiguous at the *front* of the prompt and push everything that perturbs
+    mid-run to the tail. Providers that cache on a longest-common-prefix basis
+    then keep hitting the cache even when a volatile block changes -- see
+    :mod:`vulnclaw.agent.system_prompt` for the full ordering contract.
+
+    Classification rule for this module:
+
+    * ``stable`` -- identity, the core contract, and the target section. All
+      three are fixed for the lifetime of a run; the target is detected once
+      and the other two are module constants.
+    * ``volatile`` -- phase, skill references, and MCP tool schemas. A phase can
+      transition between rounds, a skill bundle is re-selected as the run
+      progresses, and MCP servers can be attached at runtime.
 
     Args:
         target: Current target identifier (IP/URL).
@@ -63,32 +78,59 @@ def build_system_prompt(
             UI language.
 
     Returns:
-        Assembled system prompt string.
+        ``(stable_parts, volatile_parts)`` -- each part already rendered, in
+        the order they must appear.
     """
     resolved_lang = lang or current_lang()
     bundle = _bundle(resolved_lang)
-    parts = [bundle.BASE_IDENTITY, bundle.CORE_CONTRACT]
+    stable: list[str] = [bundle.BASE_IDENTITY, bundle.CORE_CONTRACT]
 
     if target:
         safe_target = _sanitize_target(target)
-        parts.append(bundle.LABELS["target_section"].format(target=safe_target))
+        stable.append(bundle.LABELS["target_section"].format(target=safe_target))
+
+    volatile: list[str] = []
 
     phase_id = canonical_phase_id(phase)
     if phase_id in bundle.PHASE_DESCRIPTIONS:
-        parts.append(
+        volatile.append(
             f"{localized_prompt_phase_heading(phase_id, lang=resolved_lang)}\n\n"
             f"{bundle.PHASE_DESCRIPTIONS[phase_id]}"
         )
 
     # Optional skill references
     if skill_context:
-        parts.append(bundle.LABELS["skill_section"].format(context=skill_context))
+        volatile.append(bundle.LABELS["skill_section"].format(context=skill_context))
 
     if mcp_tools:
         tools_desc = _format_mcp_tools(mcp_tools)
-        parts.append(bundle.LABELS["mcp_section"].format(tools=tools_desc))
+        volatile.append(bundle.LABELS["mcp_section"].format(tools=tools_desc))
 
-    return "\n".join(parts)
+    return stable, volatile
+
+
+def build_system_prompt(
+    target: Optional[str] = None,
+    phase: Optional[Any] = None,
+    skill_context: Optional[str] = None,
+    mcp_tools: Optional[list[dict]] = None,
+    enable_personnel_dim: bool = True,
+    lang: Optional[str] = None,
+) -> str:
+    """Dynamically assemble the full system prompt in the active language.
+
+    Thin wrapper over :func:`build_system_prompt_parts`; see that function for
+    the argument semantics and the stable/volatile classification.
+    """
+    stable, volatile = build_system_prompt_parts(
+        target=target,
+        phase=phase,
+        skill_context=skill_context,
+        mcp_tools=mcp_tools,
+        enable_personnel_dim=enable_personnel_dim,
+        lang=lang,
+    )
+    return "\n".join(stable + volatile)
 
 
 def get_auto_pentest_instruction(lang: Optional[str] = None) -> str:

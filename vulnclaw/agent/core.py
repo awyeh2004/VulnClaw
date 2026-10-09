@@ -499,10 +499,10 @@ class AgentCore:
             kb_context=kb_context,
             experience_context=experience_context,
             task_constraints=self.context.state.task_constraints,
+            # Appended inside the builder (volatile tail) rather than here, so
+            # the stable/volatile boundary the builder reports stays truthful.
+            role_prompt_block=role_prompt_block(self.active_role) or "",
         )
-        active_role_prompt = role_prompt_block(self.active_role)
-        if active_role_prompt:
-            prompt = f"{prompt}\n\n{active_role_prompt}"
         return prompt
 
     def _get_active_skill_context(self, user_input: Optional[str] = None) -> Optional[str]:
