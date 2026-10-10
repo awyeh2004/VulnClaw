@@ -39,9 +39,10 @@
 - [ ] 开赛先扫**零环境依赖题**（签到/杂项/流量）—— 一血/二血/三血权重，速度 > 深度
 - [ ] 确认**解锁关系**：线性题按顺序排；**非线性题（高亮/灰度可辨）可与主链并行**，别在锁着的题上空烧
 
-**⚠️ 当天必做两件（只在这一天做，平时别做）**
+**⚠️ 当天必做（只在这一天做，平时别做）**　① 已提前完成（`remote.hosts` 已清）　② 现场必做（切 `task_mode`）
 
-- [ ] **清 `remote.hosts`**：里面现在还是三台**本地演练容器**（`victim`/`victim-crypto`/`victim-ransom` → `127.0.0.1:2222-2224`，**带明文口令**）。10/09 彩排时 agent 真去连过它们。留着就是"连一堆没用甚至违规的机器"。→ 现场填**跳板机**的 alias（用你拿到的真实地址），或先清空。**下达命令时别忘了它还会照着这份清单连。**
+- [x] ~~**清 `remote.hosts`**~~ ✅ **已清（2026-10-10）**：那三台本地演练容器（`victim`/`victim-crypto`/`victim-ransom`，带明文口令）已移除，实测 `remote_hosts` → `No remote hosts configured.`、别名解析报 `(none configured)`；备份 `~/.vulnclaw/config.yaml.bak-20261010-remotehosts`。
+      → **现场改这一步：拿到跳板机真实地址后填进去**（`remote.hosts.<alias>`：hostname/port/username/key_file 或 password；`note` 里记平台工具清单）。**不填就不填**——副驾模式不用它；只有要让 agent 直连时才需要。**下达命令前确认这份清单里没有不该连的机器。**
 - [ ] **12:20 前切 `task_mode`**：上午是 `pentest`，进应急段前改 `ir` ——
       `vulnclaw config set session.task_mode ir`（或那次 run 用 `VULNCLAW_SESSION_TASK_MODE=ir` 只影响一次）。不改的话 IR 段会套着渗透纪律跑。
 
@@ -52,7 +53,7 @@
 | 1 | **分诊表在手**：题号 / 分值 / 解锁关系 / 每题"网页终端还是直连" | 台账那张纸已经写满（门外汉照抄即可） |
 | 2 | **副驾会话能起**：双击 `copilot.cmd`，提示符是 `vulnclaw Ready>` | 出现任何具体名字（IP/文件名/路径）= §0.1.1 的四道门没生效，先 Ctrl+C 再单独发 `chat` |
 | 3 | **护栏到位**：`set COPILOT_DENY=<本次目标>` 后再起会话 | 横幅出现 `DENY=<host> : hard-blocked for the agent (fetch included)` |
-| 4 | **`remote.hosts` 已清或已填对**（见上） | `vulnclaw` 里 `remote_hosts` 列表 = 你认识的那些机器 |
+| 4 | **`remote.hosts` 状态明确**：已清空（当前状态）**或**已填对现场跳板机 | `vulnclaw` 里 `remote_hosts` 显示 `No remote hosts configured.`（不直连）或只有你认识的机器 |
 | 5 | **计时与台账有人**（门外汉） | 七个闹钟已定、台账纸已摊开、那位主攻手知道"到点喊 5 分钟" |
 
 > 平台操作路径：任务中心 → 拓扑 → **右键攻击机 → 控制台**（网页终端）。
