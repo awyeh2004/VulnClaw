@@ -3,6 +3,7 @@
 > 配套：[`IR-FIELD-CARD.md`](IR-FIELD-CARD.md)（现场动作）· [`IR-PENTEST-CARD.md`](IR-PENTEST-CARD.md)（渗透命令）·
 > 应急命令卡在技能里（`incident-response/references/paste-cards-{linux,windows}.md`）。
 > 这张只回答一件事：**每条消息该怎么写**。全部可照抄。
+> 机制层（提示词失效时靠什么挡）：[§0.1 硬黑名单/审批闸](#01-机制层提示词不是唯一防线2026-10-09-日志实测) · [§0.1.1 认领 target 的四道门](#011-副驾模式下它自己认领-target的四道门2026-10-10-补第四道)。
 
 ---
 
@@ -38,6 +39,30 @@ set COPILOT_DENY=<被排查主机的 IP 或域名>
 
 > ⚠️ `VULNCLAW_SAFETY_DENIED_HOSTS` 是**覆盖**语义（不是追加），所以 `copilot.cmd` 里会把
 > `tp.qianxin.com` 追回去 —— 否则一设 `COPILOT_DENY` 就把计分平台黑名单顶掉了。
+
+### 0.1.1 副驾模式下"它自己认领 target"的四道门（2026-10-10 补第四道）
+
+**除了工具调用，还有一类"自己动手"：它把你粘贴内容里的路径/IP 当成会话目标。**
+这在副驾下尤其烦 —— 你粘的是**被入侵服务器的输出**，里面全是 `/usr/sbin/cron`、`/var/log/nginx/access.log`。
+REPL 提示符一旦从 `vulnclaw Ready>` 变成 `vulnclaw <某个词> | …`，就说明它认领了。
+
+**四个来源、四道门**（全在 `VULNCLAW_REPL_NO_AUTO=1` 这一道 env 门下，`copilot.cmd` 已钉死）：
+
+| # | 来源 | 关它的东西 | 不关会怎样（实测） |
+|---|---|---|---|
+| 1 | 自主循环（粘贴里有路径 → 进 AUTO 自跑） | `_should_auto_pentest` 开头 `return False` | 每次都重进 AUTO，日志打 `[*] Entering autonomous pentest mode` |
+| 2 | REPL 自己从输入里挖 target | `_mined_target_for_session()` | 提示符变成 `vulnclaw /usr/sbin/cron \| Recon>`（cron 行 `*/3 * * * *` 会挖出 `/3`） |
+| 3 | **agent 一个回合结束后"报"回来的 target** | `_target_after_agent_result()` | 提示符变成 `vulnclaw access.log \| Recon>` |
+| 4 | ⭐ **`chat` 内部的独立认领**（2026-10-10 第五轮审计新增） | `AgentCore.chat` 里的 `_copilot_pins_target()` | 前三道门只管住**REPL 的显示变量**；`chat` 另有一条自己的路径会把挖到的东西写进**会话状态**：注入提示词（`当前渗透测试目标: access.log`）并**重写** `~/.vulnclaw/targets/<key>/state.json` |
+
+**现场怎么用这一节**：
+
+- 提示符**应当是** `vulnclaw Ready>`（或只有阶段标签如 `vulnclaw Recon>`）。**出现任何具体名字（IP、文件名、路径）就是漏了**。
+- 出现名字时，不要试图用提示词把它"劝回来"——**贴一次就先 Ctrl+C**，然后**单独发一个 `chat`**（整条输入恰好等于 `chat`/`manual`/`单轮`/`手动`）。真要指目标，**显式打** `target <ip>` 命令。
+- 想自己核对机制有没有生效（不依赖现场表现）：`VULNCLAW_REPL_NO_AUTO=1` 下，同一段粘贴应当得到 `should_auto=False`、`mined=None`。回归用例见 `tests/cli/test_user_intent.py::TestReplNoAutoOptOut`（9 例）与 `TestCopilotPinsChatTarget`（5 例）。
+
+> ⚠️ **别把这道门当"防弹衣"**：它保证的是"**它不会自己认领目标**"，不是"它不会去连目标"——
+> 后者靠 §0.1 的 `COPILOT_DENY` 硬黑名单。两件事、两道机制，别混。
 
 ### 0.2 知识工具白名单：为什么不该写"任何工具都不许"
 
