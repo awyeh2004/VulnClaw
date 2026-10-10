@@ -6,6 +6,7 @@
 > 应急段可直接抄的命令：技能里的 **`paste-cards-linux.md` / `paste-cards-windows.md`**（在 `vulnclaw/skills/specialized/incident-response/references/`，100 / 106 行，全部只读、逐行可粘贴）。
 > **每条消息该怎么写**（四个槽 + 照抄模板 + 跑偏时的纠偏短句）：[`IR-PROMPTS.md`](IR-PROMPTS.md)。
 > **历史笔记贴哪篇**（本机 311 篇 playbook → 精选 ~45 篇，按"看到什么 → 贴哪篇"）：[`PLAYBOOK-SHORTLIST.md`](PLAYBOOK-SHORTLIST.md)。
+> ⭐ **要粘进 REPL 的文本已做成纯文本文件**：[`IR-CONTRACT.txt`](IR-CONTRACT.txt)（记事本打开 → 选中那一段 → 粘贴；不含 Markdown 符号，全选也不会带进围栏/引用符）。
 >
 > **合规现状（10/9）**：**AI 辅助已确认合规 —— 有群内书面依据**：`hongge`（官方联系人李洪）09-18 群内答
 > 「**不做限制**」+「**不断网**」（问题原文："线下赛对 ai 的包容度怎样，录屏中能出现询问 ai 辅助的情况吗?"）。
