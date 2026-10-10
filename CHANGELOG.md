@@ -3,7 +3,7 @@
 ---
 
 <details open>
-<summary><strong>Unreleased</strong> — 副驾的 playbook 检索只认操作员标签（修掉"勒索题被塞 RCE 笔记"）</summary>
+<summary><strong>Unreleased</strong> — 副驾 playbook 一键注入：自动认证据（认不出不注入），标签可覆写</summary>
 
 - **修（中·机制）：`COPILOT_PLAYBOOKS=1` 的自动注入不再读粘贴正文** — 起因是用户实战反馈"prompt 里还是没有 playbook 内容"。查下去发现**注入了但全是错的**：副驾路径把**整段用户消息**（= 操作员粘贴的终端输出）交给 `target_fingerprint` / `challenge_class_signature` 当检索条件，而终端输出里全是会被误读的 token。实测（2026-10-10）一条勒索排查的粘贴：
   - `python3 -c "import socket,subprocess,os;"` → 引号规则（`_CLASS_QUOTED_RE`，本意是读**题目名**）把 shell 参数当成标题 → 查询词 `'import socket,subprocess,os;...'`；
@@ -14,6 +14,13 @@
 - **实测效果**：写 `category incident-response  [ransomware]` → 命中 `ir-triage-checklist-ten-drills`（**1.0**）；**不写标签 → 零注入**（不再塞错笔记）。
 - **回归**：`tests/agent/test_chat_playbook_label_only.py` 9 例（钉住"引号参数/时间戳/契约措辞都不算标签"+"显式标签必须被采纳"+端到端"无标签零注入"）。
 - **文档**：`IR-PROMPTS.md` §0.3 重写（结论由"自动注入有害"改为"写标签即可用"，并保留根因记录）；`IR-CONTRACT.txt` 第 1/2 段加**类别标签行**（6 种常用类别照抄）；`copilot.cmd` 注释同步（仍纯 ASCII，非 ASCII 字节数 0）。
+
+
+- **追加：一键注入（2026-10-10 用户要求"不用我自己查询"）** — 上一条修成"必须手写标签"，用户指出现场不该让人做分类。新增 `playbook.auto_label_from_evidence()`：从**粘贴输出里的证据**推类别，`operator_declared_labels()` 优先、证据推断兜底。规则是**封闭的**（每组至少命中一个 token），7 类：ransomware / cryptomining / pcap traffic / webshell / data exfiltration / persistence audit / hidden account。
+  两条实测逼出的取舍：① **宁可给空不给错**——认不出就不注入（上一版正是"整段模糊匹配→静默注错"）；② **pcap 优先于 webshell**——`webshell-plus.pcapng` 这类流量题文件名含 "webshell"，故 webshell 规则**去掉裸词**，由捕获文件证据判为 `[pcap traffic]`。
+  过程中修掉自己两个错：**规则语义写反**（首版要求"所有 token 全中"，现实不可达 ⇒ 一条都不命中，改成"每组任中一个"）；**重排规则时切坏代码块**（标签行与 token 组错位，已按块重写）。
+  回归：`tests/agent/test_chat_playbook_label_only.py` 扩到 **17 例**（含反例：普通端口扫描/闲聊→零注入；pcap 文件名含 webshell→判 pcap；operator 标签覆写证据推断）。
+  ⚠️ **已知噪声**：命中的 2 篇里常有一篇 `autonotes-*`（自动笔记，与干货同分）。机制可用了但召回仍会给自动笔记——按 slug 取舍（`autonotes-*` 基本可忽略）。
 
 </details>
 

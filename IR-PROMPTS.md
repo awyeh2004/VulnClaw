@@ -94,7 +94,7 @@ REPL 提示符一旦从 `vulnclaw Ready>` 变成 `vulnclaw <某个词> | …`，
 > ⚠️ 白名单必须**点名列出**危险工具，不要写成"尽量少调工具" —— 第一轮那次 16 次调用的教训就是
 > "含糊的约束等于没有约束"。
 
-### 0.3 playbook：写**类别标签**即可自动注入（2026-10-10 修掉污染根因）
+### 0.3 playbook：**一键注入已可用**（自动认证据；写标签则更准）
 
 **先给结论**：`COPILOT_PLAYBOOKS=1` 现在**可以开了**（2026-10-10 修掉了根因），
 但**必须写类别标签**，否则不注入任何东西。下面说清为什么。
@@ -116,11 +116,30 @@ REPL 提示符一旦从 `vulnclaw Ready>` 变成 `vulnclaw <某个词> | …`，
 
 | 方式 | 做法 | 评价 |
 |---|---|---|
-| ✅ **自动注入 + 写标签**（现在可用） | `set COPILOT_PLAYBOOKS=1` → 并在契约里写 **`category <类别>`** 或 **`[标签]`** | 实测：写 `[ransomware]` → 命中 `ir-triage-checklist-ten-drills`（**1.0**）；不写标签 → **零注入**（不再塞错笔记） |
+| ⭐ **一键注入**（推荐，2026-10-10 加） | `set COPILOT_PLAYBOOKS=1` 即可，**不用写标签** | 从**粘贴输出里的证据**自动认类别（见下表的封闭规则），实测：勒索输出的 `.locked`+`README_RESTORE` → `[ransomware]`；挖矿的 `minexmr`+`%cpu` → `[cryptomining]`；pcap 的 `.pcapng` → `[pcap traffic]`。**认不出就不注入**（不会塞错） |
+| ✅ **写标签覆写**（更准） | 首轮写一行 **`category <类别>`** 或 **`[标签]`** | **操作员写的标签优先于自动判断**——你比证据更懂题意。实测写 `[ransomware]` → `ir-triage-checklist-ten-drills`（1.0） |
 | ⚠️ ~~按需查 `lookup_playbook`~~ | 单轮 chat 里让它自己查 | **仍有的硬限制**：它会查，但**那一轮就不给命令**（见 §0.3.1）。要查得分两轮 |
 | ✅ 手动喂（最准） | 自己把 `~/.vulnclaw/playbooks/` 里那篇贴进提示词 | 零噪声、不占轮次；贴哪篇见 `PLAYBOOK-SHORTLIST.md` |
 
-**能用的标签格式**（写进契约首轮即可，检索器认这几种）：
+**自动注入认哪些证据**（封闭规则，每组至少中一个才算命中）：
+
+| 判定 | 需要看到的证据 |
+|---|---|
+| `[ransomware]` | `README_RESTORE`/`restore_instructions`/`勒索信` **+** `.locked`/`.crypt3d`/`encrypted` |
+| `[cryptomining]` | `minexmr`/`stratum+tcp`/`xmrig`/`矿池` **+** `%cpu`/`system_cache`/`kdevtmpfsi`/`挖矿` |
+| `[pcap traffic]` | `.pcap`/`.pcapng`/`tshark`/`wireshark`/`tcp.stream` |
+| `[webshell]` | `eval($_POST`/`eval($_GET`/`china chopper`/`菜刀`/`哥斯拉`/`冰蝎`（**不含裸 `webshell` 一词**——那是文件名噪声，见下） |
+| `[data exfiltration]` | `bash_history`/`.upload.log`/`外带` **+** `tar -czf`/`curl -T`/`scp` |
+| `[persistence audit]` | `crontab -l`/`/etc/cron.d`/`authorized_keys`/`profile.d`/`rc.local`/`systemctl` |
+| `[hidden account]` | `uid=0`/`:0:0:`/`nologin` **+** `/etc/passwd`/`getent passwd` |
+
+> ⚠️ 两条设计取舍（都是实测逼出来的）：
+> ① **宁可给空，不给错**——认不出就**不注入**。之前那版是把粘贴正文整段丢给检索器，
+> 结果勒索题被塞 RCE 笔记（静默、看不出来）。现在只有证据齐全才认。
+> ② **pcap 优先于 webshell**——一个叫 `webshell-plus.pcapng` 的流量题，文件名里有 "webshell"，
+> 但证据是捕获文件 ⇒ 判 `[pcap traffic]`。所以 webshell 规则里**去掉了裸词 `webshell`**。
+
+**想手写标签时，格式**（检索器认这几种）：
 ```
 category incident-response  [ransomware]
 category web  [upload bypass]

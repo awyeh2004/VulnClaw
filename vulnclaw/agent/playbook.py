@@ -586,6 +586,95 @@ def operator_declared_labels(text: str) -> str:
     return " ".join(bit for bit in bits if bit.strip())
 
 
+#: Evidence → label rules for the copilot path. Ordered: the first rule that
+#: matches wins.
+#:
+#: Why a closed rule table and not a fuzzy match (2026-10-10 measured): the
+#: previous attempt fed the whole pasted message to the normal lookup, so a
+#: ransomware dump produced the query ``'import socket,subprocess,os;... rce'``
+#: and matched RCE-sandbox notes. Deriving a label from pasted text is only safe
+#: when it is *evidence-gated*: each rule names artefacts only that scenario
+#: emits. A rule firing on words any dump might contain would rebuild the same
+#: noise.
+#:
+#: Each rule is ``(label, need_groups)`` where **every group must match at least
+#: one token** (``("a", "b")`` = a or b; a one-token group = that token must be
+#: present). An earlier version required ALL tokens of a rule to be present at
+#: once -- unreachable in practice (a ransomware dump carries README_RESTORE or
+#: ``.locked``, rarely both plus the encryptor name), so nothing ever matched.
+_AUTO_LABEL_RULES: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = (
+    (
+        "category incident-response  [ransomware]",
+        (
+            ("readme_restore", "restore_instructions", "ransom note", "勒索信"),
+            (".locked", ".crypt3d", ".encrypted", "encrypted"),
+        ),
+    ),
+    (
+        "category incident-response  [cryptomining]",
+        (
+            ("minexmr", "stratum+tcp", "xmrig", "minerd", "mining pool", "矿池"),
+            ("%cpu", "system_cache", "kdevtmpfsi", "kinsing", "挖矿"),
+        ),
+    ),
+    # Checked before the webshell rule: a capture whose filename contains
+    # "webshell" (e.g. webshell-plus.pcapng) is a traffic-analysis task, so the
+    # more specific evidence has to win.
+    (
+        "category forensics          [pcap traffic]",
+        (
+            (".pcap", ".pcapng", "tshark", "wireshark", "tcp.stream", "follow tcp"),
+        ),
+    ),
+    # No bare "webshell" token: every webshell capture also carries .pcap/.pcapng,
+    # so a bare word would steal the traffic cases handled by the rule above.
+    (
+        "category incident-response  [webshell]",
+        (
+            ("eval($_post", "eval($_get", "eval($_request", "eval($_cookie",
+             "china chopper", "菜刀", "哥斯拉", "behinder", "冰蝎"),
+        ),
+    ),
+    (
+        "category incident-response  [data exfiltration]",
+        (
+            ("bash_history", ".upload.log", "exfil", "外带"),
+            ("tar -czf", "tar.gz", "curl -t", "scp "),
+        ),
+    ),
+    (
+        "category incident-response  [persistence audit]",
+        (
+            ("crontab -l", "/etc/cron.d", "cron.d/", "systemd/system",
+             "authorized_keys", "profile.d", "rc.local", "systemctl"),
+        ),
+    ),
+    (
+        "category incident-response  [hidden account]",
+        (
+            ("uid=0", "uid 0", ":0:0:", "nologin", "/etc/shadow"),
+            ("/etc/passwd", "getent passwd", "userdel", "passwd"),
+        ),
+    ),
+)
+
+
+def auto_label_from_evidence(text: str) -> str:
+    """Infer a lookup label from artefacts in pasted output. ``""`` when unsure.
+
+    Conservative by design: a rule fires only when **every one of its groups**
+    matches at least one token. An empty result means "not recognisable" and the
+    caller injects nothing -- silently guessing is the failure this replaced.
+    """
+    low = str(text or "").lower()
+    if not low.strip():
+        return ""
+    for label, groups in _AUTO_LABEL_RULES:
+        if all(any(tok.lower() in low for tok in group) for group in groups):
+            return label
+    return ""
+
+
 def challenge_class_signature(goal: str) -> str:
     """A port-free identity of the *kind* of challenge, used as a second lookup key.
 

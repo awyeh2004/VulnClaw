@@ -91,3 +91,69 @@ class TestCopilotChatQueryUsesOnlyLabels:
         brief, matches = self._brief(PASTE_BODY)
         assert matches == []
         assert brief == ""
+
+
+class TestAutoLabelFromEvidence:
+    """一键注入：从证据推断类别（用户不想手写标签时）。
+
+    设计约束：**宁可给空，也不给错**。空 = 不注入（安全）；
+    给错 = 静默塞无关笔记（这正是 2026-10-10 修掉的那个失败）。
+
+    规则语义：每条规则由若干"组"构成，**每组至少命中一个 token** 才算命中
+    （与"所有 token 全中"不同——后者现实中不可达，是首版的错误）。
+    """
+
+    def test_ransomware_evidence(self):
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        dump = "/root/README_RESTORE.txt\nreport.docx.locked\nbudget.xlsx.locked"
+        assert "ransomware" in auto_label_from_evidence(dump)
+
+    def test_cryptomining_evidence(self):
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        dump = "root 901 101.0 /bin/bash /usr/local/bin/.system_cache_d\nstratum+tcp://pool.minexmr.com:4444"
+        assert "cryptomining" in auto_label_from_evidence(dump)
+
+    def test_webshell_evidence(self):
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        dump = "-rwxr-xr-x 1 www-data www-data 2143 shell.php\n<?php @eval($_POST['x']); ?>"
+        assert "webshell" in auto_label_from_evidence(dump)
+
+    def test_pcap_evidence(self):
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        dump = "$ tshark -r a.pcap -q -z conv,tcp\n$ ls\nwebshell-plus.pcapng"
+        assert "pcap" in auto_label_from_evidence(dump)
+
+    def test_pcap_wins_over_the_word_webshell(self):
+        # 流量题的文件名里可能带 "webshell"，但证据是 pcap → 必须判 pcap
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        got = auto_label_from_evidence("webshell-plus.pcapng")
+        assert "pcap" in got and "webshell" not in got, got
+
+    def test_plain_scan_yields_nothing(self):
+        # 反例：普通端口扫描没有任何一类应急/取证证据 → 不注入
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        dump = "$ nmap -sT 10.20.0.5\n22/tcp open ssh\n80/tcp open http\nServer: nginx/1.14.2"
+        assert auto_label_from_evidence(dump) == ""
+
+    def test_small_talk_yields_nothing(self):
+        from vulnclaw.agent.playbook import auto_label_from_evidence
+
+        assert auto_label_from_evidence("今天天气不错，随便聊聊") == ""
+
+    def test_operator_label_beats_auto(self):
+        # 操作员写了标签就以他为准（即使证据指向别的类别）
+        from vulnclaw.agent.core import AgentCore
+        from vulnclaw.config.schema import VulnClawConfig
+
+        goal = "category web  [upload bypass]\n/root/README_RESTORE.txt\nreport.docx.locked"
+        brief, matches = AgentCore(VulnClawConfig())._chat_playbook_brief("", goal)
+        slugs = [m.get("slug") for m in matches]
+        # 断言命中的是上传类笔记而非应急排查（operator 的标签优先）
+        if slugs:
+            assert not any("triage-checklist" in s for s in slugs), slugs

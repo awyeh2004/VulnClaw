@@ -11,8 +11,9 @@ vulnclaw 副驾 · 现场可粘贴文本（2026-10-11 天津）
   第 4 段 = 想用手贴的历史解法时，加在首轮契约里
   第 5 段 = 出问题时补发一次契约（Ctrl+C 之后 / 用过 target 之后 / 约 25 轮之后）
 
-要想让 agent 自动带出历史解法：启动时用 `set COPILOT_PLAYBOOKS=1` 再 `copilot.cmd`，
-并在首轮写上一行【类别标签】（上面第 1 段里已列好，选一个）。不写标签就不会带。
+要想让 agent 自动带出历史解法：启动时用 `set COPILOT_PLAYBOOKS=1` 再 `copilot.cmd` 即可
+（它会从你粘贴的输出里认类别：勒索/挖矿/webshell/流量/外带/持久化/隐藏账号）。
+写下面那行【类别标签】可以覆写它的判断 —— 你比证据更懂题意，不确定就写。
 
 
 ============================================================
@@ -25,7 +26,7 @@ vulnclaw 副驾 · 现场可粘贴文本（2026-10-11 天津）
 命令请用一行纯文本给，不要包在代码块里。
 不要重复我已跑过的命令。找到 flag 后直接告诉我原文，不要建议提交。
 
-类别标签（选一个写上，供检索历史解法用；不写也行）：
+类别标签（**可选**；不写就自动认。写了以你为准）：
   category incident-response  [ransomware]        （勒索排查）
   category incident-response  [cryptomining]      （挖矿排查）
   category incident-response  [webshell]          （webshell 排查）
@@ -47,7 +48,7 @@ vulnclaw 副驾 · 现场可粘贴文本（2026-10-11 天津）
 命令请用一行纯文本给，不要包在代码块里。
 不要重复我已跑过的命令。找到 flag 后直接告诉我原文，不要建议提交。
 
-类别标签（同上，选一个写上；不写也行）：
+类别标签（同上，**可选**；不写就自动认）：
   category incident-response  [ransomware] / [cryptomining] / [webshell]
   category forensics          [pcap traffic]
   category web                [upload bypass] / [ssti jinja2]

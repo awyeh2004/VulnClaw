@@ -669,9 +669,17 @@ class AgentCore:
             if fingerprint:
                 queries.append(("target", fingerprint))
             try:
-                from vulnclaw.agent.playbook import operator_declared_labels
+                from vulnclaw.agent.playbook import (
+                    auto_label_from_evidence,
+                    operator_declared_labels,
+                )
 
-                labels = operator_declared_labels(goal)
+                # Operator's own label always wins. With no label, fall back to
+                # evidence-gated inference (artefacts only that scenario emits) so
+                # the notes arrive without the operator classifying by hand -- but
+                # never to a fuzzy match of the dump, which is what produced the
+                # wrong-notes failure this replaced.
+                labels = operator_declared_labels(goal) or auto_label_from_evidence(goal)
             except Exception:
                 labels = ""
             if labels:
