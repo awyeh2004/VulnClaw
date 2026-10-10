@@ -63,6 +63,25 @@ class TestReportGenerator:
         assert path.suffix == ".html"
         assert path.exists()
 
+    def test_generate_html_report_escapes_captured_bytes(self, tmp_path):
+        """The HTML body must escape finding text: it is served as ``text/html``.
+
+        A verification capture can carry a target's raw response body, so an
+        unescaped ``<script>`` in a finding would execute in a reviewer's browser
+        when the report is opened (or fetched from ``/api/reports/download``).
+        The fixture's XSS finding carries ``<script>alert(1)</script>``; in the
+        HTML output it must be inert, not markup.
+        """
+        from vulnclaw.report.generator import generate_report
+
+        session = self._make_session()
+        output = str(tmp_path / "report.md")
+        path = generate_report(session, output, report_format="html")
+        html = Path(path).read_text(encoding="utf-8")
+
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
     def test_report_contains_target(self, tmp_path):
         from vulnclaw.report.generator import generate_report
 

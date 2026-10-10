@@ -529,8 +529,15 @@ def generate_report(
         report_content += "\n\n" + _render_target_state_context(target_state_context)
 
     if report_format.lower() == "html":
+        # autoescape=True: the report body carries bytes we did not author --
+        # captured request/response bodies are inlined verbatim by
+        # ``_render_http_captures`` -- and this page is served as ``text/html``
+        # (web ``/api/reports/download``), so an unescaped ``<script>`` in a
+        # target's response would execute in a reviewer's browser. Escaping keeps
+        # the body readable inside ``<pre>`` while making it inert markup.
         html_content = Template(
-            """<!doctype html><html><head><meta charset="utf-8"><title>VulnClaw Report</title></head><body><pre>{{ content }}</pre></body></html>"""
+            """<!doctype html><html><head><meta charset="utf-8"><title>VulnClaw Report</title></head><body><pre>{{ content }}</pre></body></html>""",
+            autoescape=True,
         ).render(content=report_content)
         output = output.with_suffix(".html") if output.suffix.lower() != ".html" else output
         output.write_text(html_content, encoding="utf-8")
@@ -1519,8 +1526,19 @@ def _write_evidence_bundles(
     """
     if evidence_store is None:
         return []
+    from vulnclaw.traffic.evidence import is_valid_snapshot_id
+
     written: list[str] = []
     for snapshot_id in _cited_snapshot_ids(findings):
+        # The id becomes a path component below, and a snapshot id is minted as
+        # 16 hex chars -- so anything else (a traversal string, an absolute path,
+        # a Windows drive) is foreign and must not reach the filesystem. Without
+        # this gate the export below fails first (the store's index has no such
+        # row) and the cleanup path then hands that foreign id to rmtree, which
+        # on an absolute path deletes a directory outside dest_root entirely.
+        if not is_valid_snapshot_id(snapshot_id):
+            logger.warning("refusing malformed snapshot id %r", snapshot_id)
+            continue
         dest = dest_root / snapshot_id
         if (dest / "manifest.json").exists():
             continue
@@ -1531,11 +1549,28 @@ def _write_evidence_bundles(
             # failure can leave a partial bundle behind. Drop it: a directory
             # named after a snapshot but holding no manifest still looks like
             # evidence to a reviewer, and would block the retry above.
-            shutil.rmtree(dest, ignore_errors=True)
+            _remove_bundle_dir(dest, dest_root)
             logger.warning("evidence bundle for %s not exported: %s", snapshot_id, exc)
             continue
         written.append(snapshot_id)
     return written
+
+
+def _remove_bundle_dir(dest: Path, dest_root: Path) -> None:
+    """Remove a partial export directory, refusing anything outside ``dest_root``.
+
+    Defence in depth behind the id gate in :func:`_write_evidence_bundles`: the
+    ids are validated before a path is built, and this checks that the path is
+    still inside the bundles root before deleting it. ``resolve()`` collapses any
+    symlink or ``..`` that survived, so a bundle directory that was swapped for a
+    link pointing elsewhere is not followed.
+    """
+    try:
+        dest.resolve().relative_to(dest_root.resolve())
+    except (OSError, ValueError):
+        logger.warning("refusing to remove path outside the evidence root: %s", dest)
+        return
+    shutil.rmtree(dest, ignore_errors=True)
 
 
 def _evidence_staleness_notice(

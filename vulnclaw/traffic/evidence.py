@@ -117,6 +117,23 @@ def split_head_body(raw: bytes) -> tuple[str, bytes]:
     return head.decode("utf-8", "replace"), body
 
 
+def is_valid_snapshot_id(value: str) -> bool:
+    """True when ``value`` is a snapshot id this store could have minted.
+
+    :func:`compute_snapshot_id` mints ``sha256(...)`` truncated to 16 lower-case
+    hex chars, so anything else is foreign. This is the snapshot-id twin of
+    :func:`is_valid_blob_digest`, and it exists for the same reason but a sharper
+    one: the id ends up as a *path component* on the export side
+    (``dest_root / snapshot_id``), and a value carrying ``/``, ``\\`` or a drive
+    letter turns that into a path outside ``dest_root`` -- ``pathlib`` replaces
+    the whole left side when the right side is absolute. Callers that build a
+    path from an id must gate on this first; the store's own lookup would reject
+    the value anyway (nothing foreign is in the index), but only after the path
+    has already been formed.
+    """
+    return len(value) == 16 and all(c in "0123456789abcdef" for c in value)
+
+
 def compute_snapshot_id(
     *,
     source_request_id: str,

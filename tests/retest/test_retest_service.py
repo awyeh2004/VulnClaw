@@ -100,12 +100,17 @@ def test_apply_verdict_is_idempotent_per_record(tmp_path):
     store = RetestStore(tmp_path)
     finding = _finding()
     service.start_retest(finding, store)
-    done = store.conclude(finding.finding_id, verdict="fixed")
+    done = store.conclude(finding.finding_id, verdict="fixed", note="返回 401")
 
     service.apply_verdict(finding, done)
+    note_after_first = finding.verification_note
     service.apply_verdict(finding, done)
 
     assert len(finding.retest_history) == 1
+    # The history was deduplicated but the note used to be appended again, so a
+    # record folded twice produced "…| 复测（第 1 轮）：已修复 …" twice (2026-10-10 audit).
+    assert finding.verification_note == note_after_first
+    assert finding.verification_note.count("复测（第 1 轮）") == 1
 
 
 def test_follow_up_round_never_moves_the_disposition(tmp_path):

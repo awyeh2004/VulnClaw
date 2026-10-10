@@ -71,3 +71,25 @@ def test_the_local_target_is_the_allowed_path():
     constraints = agent.context.state.task_constraints
     assert constraints.allowed_paths == [LOCAL_TARGET]
     assert constraints.strict_mode is True
+
+
+def test_a_broken_agent_is_reported_not_silently_unscoped(capsys):
+    """Failing to install the guard must be visible, not a silent no-op.
+
+    This is the only place a local-file run gets its network lockdown, and it
+    runs before the autonomous loop. If it raises and is swallowed, the operator
+    believes the sweep is confined to the target while the run is actually
+    unscoped -- so the failure has to surface.
+    """
+
+    class _Boom:
+        @property
+        def task_constraints(self):  # pragma: no cover - reached via attribute access
+            raise RuntimeError("state unavailable")
+
+    agent = SimpleNamespace(context=SimpleNamespace(state=_Boom()))
+
+    _apply_local_path_constraints(agent, LOCAL_TARGET)
+
+    printed = capsys.readouterr().err
+    assert "网络封锁未能安装" in printed

@@ -193,7 +193,11 @@ class RetestStore:
         """Write the round-1 verdict. Overwriting an existing verdict is refused."""
 
         if verdict not in VALID_VERDICTS:
-            raise ValueError(
+            # RetestStoreError, not a bare ValueError: the CLI catches the store's
+            # error family and turns it into a one-line message, so a mistyped
+            # ``--verdict`` must arrive as one of its members. A bare ValueError
+            # passes through to the user as a raw traceback.
+            raise RetestStoreError(
                 f"unknown retest verdict {verdict!r}; expected one of {VALID_VERDICTS}"
             )
         with file_lock(self._lock_path(finding_id)):

@@ -189,7 +189,23 @@ def unbind_finding_evidence(
         raise EvidenceBindError("unbind needs a snapshot_id or request_id")
 
     existing = list(getattr(finding, "evidence_refs", None) or [])
-    kept = [ref for ref in existing if target not in _ref_handles(ref)]
+
+    # Match the two namespaces *separately*. They share one id space in shape
+    # (both 16-hex), so a flat "target in _ref_handles(ref)" test lets an id that
+    # names one ref's snapshot_id also match another ref's request_id and delete
+    # both. Prefer an exact snapshot_id match and fall back to legacy request_id
+    # handles only when no snapshot carries the id -- the documented "or legacy
+    # request id" path -- so one id removes exactly one binding.
+    if snapshot_id is not None:
+        kept = [ref for ref in existing if str(ref.snapshot_id or "") != target]
+        if len(kept) == len(existing):
+            kept = [
+                ref
+                for ref in existing
+                if not (not ref.snapshot_id and str(ref.request_id or "") == target)
+            ]
+    else:
+        kept = [ref for ref in existing if str(ref.request_id or "") != target]
     removed = len(existing) - len(kept)
 
     if removed:

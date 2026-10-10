@@ -95,7 +95,36 @@ class RunContext:
         return self.state_dir(target) / "current.json"
 
     def snapshot_path(self, snapshot_id: str, target: Target | str | None = None) -> Path:
-        return self.state_dir(target) / "snapshots" / f"{snapshot_id}.json"
+        """Path of a target-state snapshot whose id we minted ourselves.
+
+        ``snapshot_id`` becomes a path component, so it is gated *here* rather
+        than left to the caller. The current caller
+        (``target_state.store._candidate_state_paths``) happens to pre-check an
+        id pattern, but that pattern permits ``..`` and this method is public:
+        a value carrying ``/`` or ``\\``, or an absolute one, would step outside
+        the run directory -- ``pathlib`` lets an absolute right-hand side replace
+        everything to its left. The containment check is namespace-agnostic
+        because these ids are timestamps (``20261009_161030_recon``), not the
+        16-hex digest the traffic evidence store mints.
+        """
+
+        snapshots = self.state_dir(target) / "snapshots"
+        candidate = snapshots / f"{snapshot_id}.json"
+        # Single path component only, then contained under snapshots/. The
+        # separator test rejects ``a/b`` (which would silently nest a directory
+        # and never be found again); the containment test rejects ``..`` even
+        # when the separators were the platform-native ones.
+        if os.sep in snapshot_id or "/" in snapshot_id or "\\" in snapshot_id:
+            raise RunCorruptError(
+                self.run_dir, f"snapshot id is not a single path component: {snapshot_id!r}"
+            )
+        try:
+            candidate.resolve().relative_to(snapshots.resolve())
+        except ValueError as exc:
+            raise RunCorruptError(
+                self.run_dir, f"snapshot id escapes the run directory: {snapshot_id!r}"
+            ) from exc
+        return candidate
 
     def target_json_path(self, target: Target | str | None = None) -> Path:
         item = self.target_manifest(target)

@@ -185,6 +185,39 @@ class TestIntakeQuarantine:
         assert not finding.title.startswith("[未验证]")
         assert finding.lifecycle_status == "rejected"
 
+    def test_fixed_disposition_survives_a_validation_round_trip(self):
+        # ``fixed`` is a retest disposition, not a verification outcome. Re-deriving
+        # the verified/pending/rejected fields (which ``model_validate`` does via
+        # ``model_post_init``) used to overwrite it back to ``verified`` -- so a
+        # written-back finding lost the fix on the very next read (2026-10-10 audit).
+        finding = VulnerabilityFinding(title="Was fixed", vuln_type="SQLi", severity="High")
+        finding.mark_verified(note="was exploitable")
+        finding.lifecycle_status = "fixed"
+
+        reloaded = VulnerabilityFinding.model_validate(finding.model_dump())
+        assert reloaded.lifecycle_status == "fixed"
+        assert reloaded.verification_status == "verified"  # the gate is untouched
+
+    def test_fixed_disposition_is_not_a_verification_status(self):
+        # A fixed-but-unverified finding must stay out of the report gate while
+        # keeping its disposition through the same re-derivation.
+        finding = VulnerabilityFinding(title="Candidate fixed", vuln_type="SQLi", severity="Low")
+        finding.lifecycle_status = "fixed"
+
+        reloaded = VulnerabilityFinding.model_validate(finding.model_dump())
+        assert reloaded.lifecycle_status == "fixed"
+        assert reloaded.verification_status != "verified"
+
+    def test_clear_intake_quarantine_leaves_a_fixed_disposition_alone(self):
+        # Lifting the quarantine demotes an unverified finding to ``candidate``;
+        # a retest ``fixed`` disposition must not be collaterally undone.
+        finding = VulnerabilityFinding(title="Bare", severity="Low")
+        assert finding.lifecycle_status == "needs_manual_review"
+        finding.lifecycle_status = "fixed"
+
+        assert finding.clear_intake_quarantine() is True
+        assert finding.lifecycle_status == "fixed"
+
     def test_candidates_are_never_dropped(self):
         state = SessionState(target="https://example.com")
         # Two bare findings with distinct titles must both survive intake.

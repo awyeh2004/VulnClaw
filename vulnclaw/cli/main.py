@@ -4775,6 +4775,12 @@ def _apply_local_path_constraints(agent: Any, target: str) -> None:
     ``"192.168."``) were inert, because ``host_in_scope`` matches a bare IP
     pattern exactly and has no prefix form — measured 2026-10-08, the guard
     blocked nothing while reading as if it blocked three ranges.
+
+    A failure here is reported rather than swallowed. This is the only place a
+    local-file task gets its network lockdown, and the guard is installed *before*
+    the autonomous loop starts, so a silent failure would hand the run an
+    unscoped machine while the operator believes the sweep is confined to the
+    target -- the exact opposite of what a guard is for.
     """
     if not _is_local_path_target(target):
         return
@@ -4796,8 +4802,12 @@ def _apply_local_path_constraints(agent: Any, target: str) -> None:
         ):
             if host not in tc.blocked_hosts:
                 tc.blocked_hosts.append(host)
-    except Exception:
-        pass
+    except Exception as exc:
+        err_console.print(
+            f"[!] 本地路径任务的网络封锁未能安装（{exc}）——"
+            "本次运行将不受本地文件作用域限制，请核实后重试",
+            highlight=False,
+        )
 
 
 #: The CTF2 practice-ground task sentence the platform hands the operator, e.g.

@@ -156,6 +156,28 @@ def test_indexed_snapshot_path_rejects_traversal_ids(tmp_path, monkeypatch):
         assert store.load_target_state(target.raw, snapshot_id=bad_id) is None
 
 
+def test_snapshot_path_rejects_ids_that_are_not_a_single_component(tmp_path):
+    # ``RunContext.snapshot_path`` builds a path from the id, so it gates the id
+    # itself rather than trusting the caller's pattern -- which is namespace-aware
+    # only by luck and permits separators on other paths (2026-10-10 audit).
+    target = parse_target("https://example.com/")
+    ctx = create_run_context(
+        command="run",
+        targets=[target],
+        runs_dir=tmp_path / "runs",
+        run_name="snapshot-guard-run",
+    )
+
+    # The ids this store actually mints are timestamps, and must keep working.
+    assert ctx.snapshot_path("20261009_161030_123456_recon", target).name == (
+        "20261009_161030_123456_recon.json"
+    )
+
+    for bad_id in ["../../evil", "..\\evil", "/abs/x", "a/b"]:
+        with pytest.raises(RunCorruptError):
+            ctx.snapshot_path(bad_id, target)
+
+
 @pytest.mark.asyncio
 async def test_multi_target_run_seeds_secondary_state_and_resumes(tmp_path, monkeypatch):
     import vulnclaw.target_state.store as store

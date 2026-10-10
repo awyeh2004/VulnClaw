@@ -3,6 +3,29 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 第七轮审计收口：复测非法 verdict 不再甩 traceback · HTML 报告转义捕获字节</summary>
+
+- **修（高）：HTML 报告转义正文，堵住存储型 XSS** — HTML 输出用 `Template(...).render(content=report_content)` 包裹，而 jinja2 的 `Template` 默认 `autoescape=False`。报告正文里包含由 `_render_http_captures` 逐字内联的**目标请求/响应正文**，且该页面由 Web 以 `text/html` 直接回传（`/api/reports/download`）——目标响应体里一个 `<script>` 就会在审阅者浏览器里执行。现 `autoescape=True`：正文在 `<pre>` 中仍可读，但 HTML 元字符一律转义成惰性文本。新增测试断言 fixture 里的 `<script>alert(1)</script>` 在 HTML 输出中变成 `&lt;script&gt;…`。
+- **修（低·CLI 健壮性）：retest 非法 `--verdict` 不再抛原始 traceback** — `RetestStore.conclude()` 对未知 verdict 抛的是**裸 `ValueError`**，而 `retest_cmd` 只捕获 `FindingsFileError` 与 `RetestStoreError` 家族（`RetestStoreError` 虽继承 `ValueError`，但裸 `ValueError` 不是它的成员）→ 用户敲错 `--verdict` 看到的是完整 traceback。现改抛 `RetestStoreError`，CLI 收成一行红字提示并 `exit 1`。新增测试断言 `--verdict not-a-verdict` 输出含错误名、且不含 `Traceback`。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 第六轮审计收口：<code>fixed</code> 处置不再被校验抹掉 · 复测备注幂等 · 解绑命名空间 · 快照路径闸</summary>
+
+- **修（中）：`fixed` 处置不再被下一次校验抹回 `verified`** — `_sync_status_fields()` 在 `verified` 分支无条件写 `lifecycle_status = "verified"`，而 `fixed` 是复测（A1）盖的**处置**状态、与 verified/pending/rejected 正交。于是 `model_validate`（经 `model_post_init`）往返一圈就把 `fixed` 还原成 `verified`：实测 `f.lifecycle_status='fixed'` → `model_dump_json()` → `model_validate_json()` → `'verified'`。现改为在重算验证轴时保留 `fixed` 处置（`clear_intake_quarantine` 的 `candidate` 降级同样不再覆盖 `fixed`）。当前 CLI 仍不写回 `findings.json`（有意设计），但这条堵死了"哪天真写回就丢"的陷阱。
+- **修（低）：`apply_verdict` 对 `verification_note` 幂等** — `_remember` 按 `retest_id` 去重，但 `verification_note` 的追加无守卫，同一 record 折两次会追加两遍"复测（第 N 轮）：已修复"。现 `_remember` 返回"是否首次加入"，note 仅在首次追加；`retest_history` 行为不变。
+- **修（低）：`unbind` 按命名空间精确匹配，不再一次删两条** — `snapshot_id` 与 `request_id` 同为 16-hex、共用一个 `set[str]`，扁平匹配下"一个 ref 的 snapshot_id 恰等于另一 ref 的 request_id"会连带删掉两条。现优先精确匹配 `snapshot_id`，仅当无 snapshot 命中时才回退到旧式 `request_id`（保住 legacy 引用）。实测：`unbind(s1)` 后只剩 `(s2, s1)`，legacy `request_id` 解绑仍生效。
+- **修（低）：`RunContext.snapshot_path` 自带路径闸** — 该函数把 id 直接拼进路径，此前自身无闸、只靠调用点（`target_state.store`）的 `SNAPSHOT_ID_PATTERN` 兜底，且该 pattern 放行 `..`。现函数内拒绝非单一组件（含 `/`、`\`）并做 `relative_to` 纵深校验。**注意**：这里的 id 是**时间戳**（`20261009_161030_recon`）、不是 traffic 证据层的 16-hex，故用的是命名空间无关的路径安全校验，**不能**套 `is_valid_snapshot_id`（那会拒掉全部合法调用）。
+- **测试** — 新增/扩展 6 例：`test_findings_schema.py` +3（fixed 往返/未验证 fixed/clear 不覆盖）、`test_retest_service.py` 扩 1（note 幂等）、`test_evidence_binding.py` +2（命名空间碰撞 + legacy 回退）、`test_run_persistence.py` +1（snapshot_path 闸）。全量 **4914 passed / 17 skipped**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 分工按实际人力重写（4 人队 = 2 能打的 + 2 门外汉）· WP 不用交 · 现场卡补收束点</summary>
 
 - **两个前提变更（用户 2026-10-10 明确）**：① **赛方明确 WP 不用交** —— 培训时那句"需在截止前提交演练报告"作废，`IR-WP-TEMPLATE.md` 保留作赛后复盘、现场不填；② **实际是 4 人队（4 个账号）= 你 + 1 位稍微有点经验的选手 + 2 位门外汉**，门外汉不懂 vulnclaw、不会 CTF。

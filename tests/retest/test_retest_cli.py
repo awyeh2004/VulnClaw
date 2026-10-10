@@ -157,3 +157,37 @@ def test_retest_without_a_finding_is_a_usage_error(tmp_path):
 
     assert result.exit_code == 2
     assert "finding id" in result.output
+
+
+def test_retest_mistyped_verdict_is_a_message_not_a_traceback(tmp_path):
+    """A bad ``--verdict`` must reach the user as one line, not a raw traceback.
+
+    ``conclude`` validates the verdict; the store's own error family is what the
+    CLI catches, so the rejection has to be a member of it. A bare ``ValueError``
+    is not caught and escapes as a traceback.
+    """
+
+    finding = _finding()
+    store_dir = tmp_path / "store"
+    findings = _write_findings(tmp_path, finding)
+    runner = CliRunner()
+    runner.invoke(app, ["retest", finding.finding_id, "--findings", findings, "--store", str(store_dir)])
+
+    result = runner.invoke(
+        app,
+        [
+            "retest",
+            finding.finding_id,
+            "--findings",
+            findings,
+            "--store",
+            str(store_dir),
+            "--verdict",
+            "not-a-verdict",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "not-a-verdict" in result.output
+    assert "Traceback" not in result.output
+    assert "unknown retest verdict" in result.output

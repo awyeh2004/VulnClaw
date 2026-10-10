@@ -12,7 +12,11 @@ import shutil
 
 import pytest
 
-from vulnclaw.config.domain_models import VulnerabilityFinding, evidence_binding_signature
+from vulnclaw.config.domain_models import (
+    EvidenceRef,
+    VulnerabilityFinding,
+    evidence_binding_signature,
+)
 from vulnclaw.traffic.binding import (
     EvidenceBindError,
     bind_finding_evidence,
@@ -307,6 +311,35 @@ def test_unbind_of_an_unknown_handle_changes_nothing(tmp_path):
 def test_unbind_without_an_identifier_is_rejected(tmp_path):
     with pytest.raises(EvidenceBindError):
         unbind_finding_evidence(_finding())
+
+
+def test_unbind_matches_the_snapshot_namespace_not_a_colliding_request_id(tmp_path):
+    # snapshot_id and request_id share one id space in shape (both 16-hex), so a
+    # flat handle lookup let an id naming one ref's snapshot_id also match a
+    # DIFFERENT ref's request_id and drop both. Unbinding must remove exactly one.
+    finding = _finding()
+    finding.evidence_refs = [
+        EvidenceRef(kind="http_capture", request_id="r1", snapshot_id="s1"),
+        EvidenceRef(kind="http_capture", request_id="s1", snapshot_id="s2"),
+    ]
+
+    unbind_finding_evidence(finding, snapshot_id="s1")
+
+    assert [(r.snapshot_id, r.request_id) for r in finding.evidence_refs] == [("s2", "s1")]
+
+
+def test_unbind_still_accepts_a_legacy_request_id_handle(tmp_path):
+    # Refs bound before the snapshot layer existed carry only request_id and must
+    # keep working -- including when they are the id-named argument.
+    finding = _finding()
+    finding.evidence_refs = [
+        EvidenceRef(kind="http_capture", request_id="legacy-7"),
+        EvidenceRef(kind="http_capture", request_id="keep-me", snapshot_id="s9"),
+    ]
+
+    unbind_finding_evidence(finding, snapshot_id="legacy-7")
+
+    assert [r.request_id for r in finding.evidence_refs] == ["keep-me"]
 
 
 # ── reorder ─────────────────────────────────────────────────────────────────

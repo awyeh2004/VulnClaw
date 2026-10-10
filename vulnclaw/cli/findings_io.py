@@ -70,6 +70,14 @@ def save_finding(raw: str | Path, finding: VulnerabilityFinding) -> Path:
 
     Only the one entry is touched: the document's other keys (``summary``,
     ``version``, the sibling findings) are preserved verbatim.
+
+    Fields the model does not know are preserved too. ``VulnerabilityFinding`` is
+    a plain ``BaseModel`` (``extra`` defaults to ``ignore``), so a foreign key on
+    the entry -- one written by a newer build, or by hand -- is dropped the
+    moment the entry is validated. Writing ``model_dump`` back verbatim would
+    therefore silently delete it. Overlay the dump on the original entry instead:
+    every known field comes from the model (so the edit takes effect), and any
+    key the model never saw survives untouched.
     """
 
     path = resolve_findings_file(raw)
@@ -77,7 +85,7 @@ def save_finding(raw: str | Path, finding: VulnerabilityFinding) -> Path:
     payload = finding.model_dump(mode="json")
     for index, entry in enumerate(document["findings"]):
         if str(entry.get("finding_id", "")) == str(finding.finding_id):
-            document["findings"][index] = payload
+            document["findings"][index] = {**entry, **payload}
             break
     else:
         raise FindingsFileError(f"finding {finding.finding_id!r} is not in this findings file")

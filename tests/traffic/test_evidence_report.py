@@ -542,6 +542,42 @@ def test_bundles_are_not_rewritten_once_complete(tmp_path):
     assert marker.stat().st_mtime_ns == before
 
 
+def test_a_traversal_snapshot_id_cannot_delete_an_outside_directory(tmp_path):
+    """A foreign id must never become a path component, let alone an rmtree target.
+
+    ``dest_root / snapshot_id`` with an absolute (or ``..``) id resolves outside
+    the bundles directory, and the export's failure cleanup used to hand exactly
+    that path to ``shutil.rmtree`` -- deleting a real directory the run never
+    wrote. The id gate has to stop it before a path is even built.
+    """
+    from vulnclaw.agent.context import EvidenceRef
+    from vulnclaw.report.generator import _write_evidence_bundles
+    from vulnclaw.traffic.evidence import EvidenceStore
+
+    out_parent = tmp_path / "out"
+    out_parent.mkdir()
+    dest_root = out_parent / "evidence_bundles"
+
+    victim = tmp_path / "VICTIM_DIR"
+    victim.mkdir()
+    (victim / "secret.txt").write_text("must survive")
+
+    finding = VulnerabilityFinding(title="t", severity="Low")
+    finding.evidence_refs = [
+        EvidenceRef(kind="http_capture", snapshot_id=str(victim)),          # absolute
+        EvidenceRef(kind="http_capture", snapshot_id="../../VICTIM_DIR"),   # traversal
+    ]
+
+    store = EvidenceStore(tmp_path / "evidence")  # empty index -> export always fails
+
+    written = _write_evidence_bundles([finding], store, dest_root)
+
+    assert written == []
+    assert victim.exists()
+    assert (victim / "secret.txt").read_text() == "must survive"
+    assert not dest_root.exists() or list(dest_root.iterdir()) == []
+
+
 # ── a session file finds its run's evidence (rehearsal finding, 2026-10-09) ──
 
 

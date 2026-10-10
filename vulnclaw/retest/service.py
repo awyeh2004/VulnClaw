@@ -110,9 +110,19 @@ def start_retest(
     )
 
 
-def _remember(finding: VulnerabilityFinding, record: RetestRecord) -> None:
-    if not any(existing.retest_id == record.retest_id for existing in finding.retest_history):
-        finding.retest_history.append(record)
+def _remember(finding: VulnerabilityFinding, record: RetestRecord) -> bool:
+    """Append ``record`` to the history unless already there. Returns whether it was added.
+
+    Both the history entry and the ``verification_note`` must be keyed on this:
+    a record applied twice (a caller that retries, or folds the same verdict onto
+    a finding it already folded) otherwise duplicated the note while the history
+    stayed deduplicated.
+    """
+
+    if any(existing.retest_id == record.retest_id for existing in finding.retest_history):
+        return False
+    finding.retest_history.append(record)
+    return True
 
 
 def apply_verdict(
@@ -129,11 +139,15 @@ def apply_verdict(
         return False
     if record.status is not RetestStatus.COMPLETED:
         return False
-    _remember(finding, record)
+    first_time = _remember(finding, record)
     if not record.is_fixed:
         return False
 
     finding.lifecycle_status = "fixed"
+    if not first_time:
+        # Same record folded twice: history was already deduplicated, so the note
+        # must be too. Keep the disposition flip reported as before.
+        return True
     detail = record.note or "复测未复现"
     note = f"复测（第 {record.round} 轮）：已修复 — {detail}"
     finding.verification_note = (

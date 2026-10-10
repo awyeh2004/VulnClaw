@@ -545,31 +545,47 @@ class VulnerabilityFinding(BaseModel):
 
         if stripped and not (self.verified or self.verification_status in ("verified", "rejected")):
             # The quarantine also demoted the lifecycle; recompute it from the
-            # fields the finding now carries.
-            self.lifecycle_status = "candidate"
+            # fields the finding now carries. A ``fixed`` disposition is set by
+            # the retest workflow and is not the quarantine's to undo.
+            if self.lifecycle_status != "fixed":
+                self.lifecycle_status = "candidate"
             self._sync_status_fields()
 
         return stripped
 
     def _sync_status_fields(self) -> None:
-        """Keep lifecycle and evidence metadata consistent with verification state."""
+        """Keep lifecycle and evidence metadata consistent with verification state.
+
+        ``fixed`` is a *disposition* stamped by the retest workflow (A1), not a
+        verification outcome: it is orthogonal to the verified/pending/rejected
+        axis. Re-deriving the verification fields must therefore leave it alone,
+        or a ``model_validate`` round-trip silently reverts a fixed finding to
+        ``verified`` (2026-10-10 audit). Only the verification axis is recomputed
+        when it is set.
+        """
+        keep_disposition = self.lifecycle_status == "fixed"
+
         if self.verified or self.verification_status == "verified":
             self.verified = True
             self.verification_status = "verified"
-            self.lifecycle_status = "verified"
+            if not keep_disposition:
+                self.lifecycle_status = "verified"
             if self.evidence_level in ("", "L1", "L2", "L3"):
                 self.evidence_level = "L4"
             return
 
         if self.verification_status == "rejected":
             self.verified = False
-            self.lifecycle_status = "rejected"
+            if not keep_disposition:
+                self.lifecycle_status = "rejected"
             if self.evidence_level in ("", "L1", "L2"):
                 self.evidence_level = "L3"
             return
 
         self.verified = False
         self.verification_status = "pending"
+        if keep_disposition:
+            return
         if self.lifecycle_status == "needs_manual_review":
             if self.evidence_level in ("", "L1"):
                 self.evidence_level = "L2"
