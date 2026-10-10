@@ -50,7 +50,7 @@
 
 - `web-pentest` 与 `web-security-advanced` 的 `references/` 有 **3 个同名文件，且三份全部逐字节相同**
   （`web-injection` 906 + `web-logic-auth` 582 + `web-modern-protocols` 348 = **1,836 行**）。
-- `android-pentest` 与 `client-reverse` 的 `references/` **9 份逐字节相同**（合计约 1,202 行）。
+- `android-pentest` 与 `client-reverse` 的 `references/` **9 份逐字节相同**（合计 1,203 行）。
 
 **为什么存在**：技能是独立加载单元，`references/` 必须自包含（`loader.py` 的目录约定：
 `<skill_name>/SKILL.md + <skill_name>/references/`）。这是**有意冗余**，但代价真实：
