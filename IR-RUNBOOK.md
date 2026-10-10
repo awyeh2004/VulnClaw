@@ -1185,7 +1185,7 @@ IR 的输出里全是 `/usr/sbin/cron`、`/var/www/html/uploads`、`/tmp/.x/.kwo
 > 需要真的指定目标时**显式**用 `target` 命令（`cli/main.py:890` 那条路径不受影响）——副驾本来就是"你打目标、它出命令"。
 
 ⇒ env 未设时行为逐字节不变（回归：`tests/cli/test_user_intent.py::TestReplNoAutoOptOut` **9 例**，含一条"先钉住前提"的用例；
-另加第五轮审计的 `TestCopilotPinsChatTarget` **5 例**盖住 `chat` 内部那道门）。**第三轮彩排实测**：同一段粘贴 → 日志**没有** `[*] Entering autonomous pentest mode`、
+另加第五轮审计的 `TestCopilotPinsChatTarget` **4 例**盖住 `chat` 内部那道门）。**第三轮彩排实测**：同一段粘贴 → 日志**没有** `[*] Entering autonomous pentest mode`、
 **只答一轮**、`Tools: none`，且不再认领 target。
 
 **⇒ 出路 ②（不改代码的兜底，万一忘了设 env）**：粘贴 → 它自跑一轮给出命令 → **立刻 Ctrl+C** → 提示符回到

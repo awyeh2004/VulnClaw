@@ -59,7 +59,7 @@ REPL 提示符一旦从 `vulnclaw Ready>` 变成 `vulnclaw <某个词> | …`，
 
 - 提示符**应当是** `vulnclaw Ready>`（或只有阶段标签如 `vulnclaw Recon>`）。**出现任何具体名字（IP、文件名、路径）就是漏了**。
 - 出现名字时，不要试图用提示词把它"劝回来"——**贴一次就先 Ctrl+C**，然后**单独发一个 `chat`**（整条输入恰好等于 `chat`/`manual`/`单轮`/`手动`）。真要指目标，**显式打** `target <ip>` 命令。
-- 想自己核对机制有没有生效（不依赖现场表现）：`VULNCLAW_REPL_NO_AUTO=1` 下，同一段粘贴应当得到 `should_auto=False`、`mined=None`。回归用例见 `tests/cli/test_user_intent.py::TestReplNoAutoOptOut`（9 例）与 `TestCopilotPinsChatTarget`（5 例）。
+- 想自己核对机制有没有生效（不依赖现场表现）：`VULNCLAW_REPL_NO_AUTO=1` 下，同一段粘贴应当得到 `should_auto=False`、`mined=None`。回归用例见 `tests/cli/test_user_intent.py::TestReplNoAutoOptOut`（9 例）与 `TestCopilotPinsChatTarget`（4 例）。
 
 > ⚠️ **别把这道门当"防弹衣"**：它保证的是"**它不会自己认领目标**"，不是"它不会去连目标"——
 > 后者靠 §0.1 的 `COPILOT_DENY` 硬黑名单。两件事、两道机制，别混。

@@ -23,7 +23,7 @@
 - **修（低）：`vulnclaw config get` 支持 dict/extra 键** — 原本是裸 `getattr` 链，`config get platforms.ctf2.enabled`、`mcp.servers.chrome-devtools.enabled` 直接 traceback 穿出 CLI（而 `config/schema.py:1048` 的注释恰恰推荐这些键）。新增 `settings.get_config_value()`（与 `set` 共用遍历），未知键 → 干净报错 + 退出码 2。
 - **修（低）：`vulnclaw retest --verdict fixed` 的提示不再像落盘** — 第四轮第 8 条按选项 ② 收口：提示改为「已记入复测记录，未写回 findings.json」。**行为不变**（不写回是模块 docstring 声明的有意设计），只纠正表述。
 - **文档** — `AUDIT-2026-10-08.md` 新增《第五轮》，含三条发现的证据、探针实测与"未改的行为（有意）"说明；本仓库根新增 [`PLAYBOOK-SHORTLIST.md`](PLAYBOOK-SHORTLIST.md)（赛前 playbook 手贴短清单，311 篇 → 精选 ~45 篇）。
-- **测试** — `tests/cli/test_user_intent.py::TestCopilotPinsChatTarget` 5 例、`tests/cli/test_config_get.py` 5 例、`tests/retest/test_retest_cli.py` +2 例。`tests/cli + tests/config + tests/mcp + tests/agent` → **2150 passed / 7 skipped**。
+- **测试** — `tests/cli/test_user_intent.py::TestCopilotPinsChatTarget` 4 例、`tests/cli/test_config_get.py` 5 例、`tests/retest/test_retest_cli.py` +2 例。`tests/cli + tests/config + tests/mcp + tests/agent` → **2150 passed / 7 skipped**。
 
 </details>
 
