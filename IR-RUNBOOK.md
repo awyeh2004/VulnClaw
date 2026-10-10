@@ -843,6 +843,38 @@ pip install 'vulnclaw[socks]'   # SOCKS 需要 socksio
 > `proxychains`，或回跳板机手打；② **agent 经 SSH 驱动跳板机**是否算红线"远程操作"——那是另一个问题
 > （"不做限制"答的是 AI 辅助），仍走副驾。
 
+### ⭐⭐ 跳板链式真机验证（2026-10-10 上午，本地两跳 Docker 拓扑）—— 记忆里标"最高缺口"的那条已闭合
+
+**拓扑（一次性搭建，验完即拆）**：`笔记本 → jump-drill(宿主 2222→22) → internal-drill(:8080, 仅在 internal 网络)`。
+前提先钉住：笔记本直连内网靶机 = `curl 000`（不可达）、跳板机到靶机 = 拿到 `flag{INTERNAL_TARGET_REACHED}`。
+`remote.hosts` 临时加 `jump` alias；验完已还原（`config.yaml` 与 `known_hosts` 都恢复原状，容器/网络/镜像已删）。
+
+| # | 验的是什么 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | **`remote_exec` 链式抽内网** | ✅ **通** | 在跳板机上执行 `curl http://172.19.0.2:8080/flag.txt` → `flag{INTERNAL_TARGET_REACHED}`——**这是此前从未验过的一跳** |
+| 1b | 打跳板机本身（拿立足点） | ✅ 通 | `id` → `uid=0(root)`；`cat /root/flag-local.txt` → 本地 flag |
+| 1c | **硬黑名单在 SSH 链上生效** | ✅ 生效 | `denied_hosts=['127.0.0.1']` → `[constraint_violation] Host 127.0.0.1 is blocked … remote_exec/remote_collect/remote_fetch will not connect` |
+| 1d | **只读分类在 SSH 链上生效** | ✅ 生效 | `auto_review` 下：`id`/`cat /etc/passwd` **免批通过**；`touch`/`rm` **被拒**（`no_channel`，脚本环境无审批通道 → fail-closed） |
+| 2 | **`ssh -D` SOCKS 隧道 + `VULNCLAW_HTTP_PROXY`** | ✅ **通** | `resolve_egress_proxy()` 读到 `socks5://127.0.0.1:1080`；vulnclaw 自己的 `http_client(targets=…, proxy=…)` 穿隧道取回 `flag{…}`（HTTP 200） |
+| 2b | 决策表方向正确 | ✅ | 私网 `172.19.0.2`/`10.20.0.30` → `(隧道, False)`；回环 `127.0.0.1` → `(None, 直连)` |
+| 3 | **`-D` 下 `--only-host` 判别力** | ✅ 保持 | 作用域 `10.20.0.0/16`：`172.19.0.2` → **被拒**、`10.20.0.30` → 放行 |
+| 4 | **`-L` 反例（为什么不能用）** | ❌ 实测坐实 | `-L 18080:172.19.0.2:8080` 隧道本身**能通**，但 agent 只能写 `http://127.0.0.1:18080` ⇒ ① 作用域闸看到的 host 是 `127.0.0.1`（**判别力归零**）；② `is_local_target()` 判它为**本地** ⇒ 客户端**直连、根本不走隧道**。**两个独立原因都指向同一结论：`-L` 不可用。** |
+
+**Windows 跳板机（原"Win跳板未验"）—— 验了能验的部分，结论是"命令面要整个换"**：
+
+- **`remote_collect` 在 Windows 上整条不可用**（已核代码）：33 段采集命令**全是 POSIX sh + `/proc` + `/etc/*`**
+  （`cat /etc/passwd`、`ps auxww`、`for d in /proc/[0-9]*`…）。跳板机是 Windows ⇒ 别指望 `remote_collect`，
+  改用手打 Windows 取证卡（`paste-cards-windows.md`）。
+- **只读分类器只认 CMD 原生，PowerShell 全需批**（实测）：`whoami`/`ipconfig /all`/`systeminfo`/`tasklist`/
+  `net user`/`netstat -ano`/`dir`/`type`/`reg query`/`wmic`/`findstr` → **免批**；
+  但 `Get-Process`/`Get-ChildItem`/`powershell -c "…"` → **一律需批**（不在信任表 / 解释器一律询问）。
+  ⇒ Windows 跳板上想免批跑取证，**优先用 `cmd` 原生命令**，不要习惯性打 `Get-*`。
+- **未验的（诚实说明）**：真正的 Windows 主机 SSH 到 Windows 的端到端——本机 WSL2 后端**跑不了 Windows 容器**，
+  没有真环境。上面两条是从**代码与分类器实测**得出，不是端到端跑通。
+- 另记一个**运维坑（实测踩到）**：本机 `~/.vulnclaw/known_hosts` 里有 10-04 留下的 `[127.0.0.1]:2222` 记录，
+  新跳板机复用同一 host:port ⇒ `BadHostKeyException` **直接连不上**。**现场若跳板机地址与演练环境撞端口，
+  先查 `~/.vulnclaw/known_hosts`**（`host_key_policy: accept_new` 只在"该 host:port 没记录"时才自动接受）。
+
 ### ✅ 赛前培训提到的两件事（其一已作废）
 
 1. ~~**演练报告（WP）**：部分题目要求截止前提交~~ **作废（2026-10-10：赛方明确不用交）**。
@@ -1343,7 +1375,7 @@ python .ir-tools\verify-ir.py
 | P1-4 | 短命令卡 | ✅ **已补**：`references/paste-cards-linux.md` + `paste-cards-windows.md`（逐行可粘贴；Windows 那份在本机 Win11 23H2 逐条实跑） | **关闭** |
 | P1-5 | chrome-devtools 驱动终端 | ❌ `_npx` 缓存目录**不存在**（从未下载过） | 建议**不做** |
 | P1-6 | ~~WP / PDF 交付~~ **整条作废（2026-10-10）** | 赛方明确 **WP 不用交** ⇒ 不再是交付物。PDF 链路本身仍可用（`reportlab` 已装、`vulnclaw report <session.json> --pdf` rc=0），但现在只作**赛后复盘**用途 | **不再占用现场时间**（`IR-WP-TEMPLATE.md` 保留在仓库，现场不填） |
-| P1-7 | 端到端彩排 | ✅ **三半都已完成（2026-10-09）**：① **IR 半** —— 本地容器，105 秒 / 5 分，并**暴露出 IR 交付链是断的**（见下）；② **渗透半** —— CTF2 真靶机 BUU LFI COURSE 1，1 轮拿到 flag（注：那次复用了 3 天前的 playbook，**不算冷解**）；③ **B 半（副驾交接）** —— 同一台 `ir-drill`，6 轮 / 5 分 05 秒 / 4.5–5 分，**抓到副驾闸门漏在 `result.target` 上**（见下） | ✅ **完成** |
+| P1-7 | 端到端彩排 | ✅ **三半 + 跳板链式（2026-10-10）** —— 跳板链式/隧道/`-D`判别力/Windows跳板命令面已实测（见 §五「跳板链式真机验证」）。**三半都已完成（2026-10-09）**：① **IR 半** —— 本地容器，105 秒 / 5 分，并**暴露出 IR 交付链是断的**（见下）；② **渗透半** —— CTF2 真靶机 BUU LFI COURSE 1，1 轮拿到 flag（注：那次复用了 3 天前的 playbook，**不算冷解**）；③ **B 半（副驾交接）** —— 同一台 `ir-drill`，6 轮 / 5 分 05 秒 / 4.5–5 分，**抓到副驾闸门漏在 `result.target` 上**（见下） | ✅ **完成** |
 | P1-8 | 时间盒/分工 | ✅ **已定稿（V4，2026-10-10）**：**4 名选手 = 你 + 1 位稍熟练 + 2 位门外汉**（用户更正，见 §9.3）→ 2 名能打的各开一条线，2 名门外汉只做**计时 / 台账 / 素材**（不碰靶机、不做判断）；4 个账号，2 个暂时闲置 | ✅ 角色与职责均已落到动作；名字现场 1 分钟填 |
 | P2-9 | paramiko / `remote_*` 真机验证 | ✅ **已升级 + 已验证**。2.8.1 → **5.0.0**（+invoke 3.0.3）。证据见下 | **关闭** |
 | P2-11 | `permission_mode: full_access` | 确认仍在（无人值守时风险自担） | 不变 |
@@ -1637,7 +1669,7 @@ python .ir-tools\verify-ir.py
 | 12:20–12:35 | **分诊**：数题 / 分值 / 解锁顺序；判每题是"网页终端手打"还是"agent 打" | 同样 15 分钟不许开打 |
 | 12:35–15:00 | **主攻**：按 `flag-landing-spots.md` 的**五步**走（内容搜 → 时间圈定 → 进程/环境 → 服务侧 → 变形解码）；优先 `remote_collect` 一键固化现场 | 每题 **30 分钟硬盒**；到点写 3 行状态跳走。**不要一进题就全盘搜索**（实测 271 秒起） |
 | 15:00–15:20 | **回收**：逐题写 3 行状态（结论 / 证据出处 / 是否已交），把会话里的关键命令与输出**归档留痕**（赛后可能抽查答题思路）。WP 不用交（赛方明确），所以这里只做"留痕 + 核对"，不拼报告 | **先把 flag 交了再整理**；结论比过程重要 |
-| 15:20–15:30 | 最终提交核对（**链式：逐题确认都交了**）+ 交付物落盘 | 漏交一个可能少解锁一整题 | 
+| 15:20–15:30 | 最终提交核对（**链式：逐题确认都交了**）+ 把留痕文件落到 E:/G:（**无交付物要交**） | 漏交一个可能少解锁一整题 | 
 
 ### 9.3 角色分工（**V4 · 4 人队 = 2 能打的 + 2 门外汉 · 2026-10-10 更正**）
 

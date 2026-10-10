@@ -160,6 +160,8 @@ VULNCLAW_HTTP_PROXY=socks5://127.0.0.1:1080 vulnclaw run <靶机IP> --only-host 
   ③ `--only-host` 写窄网段时，agent 打网段外主机会被拒（**没被拒 = 用错 `-L` 了，立即停**）。
   三条全过才切模式 B（agent 主驾）；任一不过就留在副驾。
   **隧道只带 HTTP 工具**：`nmap` 不支持 SOCKS（要 `proxychains` 或回控制台手打）；agent 走 SSH 驱动跳板机是另一个问题（仍副驾）。
+  > ✅ **以上四条已于 2026-10-10 在本地两跳拓扑实测**（笔记本→跳板机→内网靶机）：`-D` 通、`-L` 两个独立原因都不可用（作用域看到 `127.0.0.1` + 被判本地直连）、`--only-host` 在 `-D` 下判别力保持、`remote_exec` 能链式抽内网 flag。详见 `IR-RUNBOOK.md` §「跳板链式真机验证」。
+  > ⚠️ **连不上先查 `~/.vulnclaw/known_hosts`**：里面若有同 `host:port` 的旧记录（演练环境常留），`accept_new` 会因主机键不符直接拒连（实测踩到）。删掉那行即可。
 
 ---
 
