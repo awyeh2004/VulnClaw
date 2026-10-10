@@ -536,6 +536,55 @@ _CLASS_TASK_NAME_RE = re.compile(
 )
 _CLASS_BARE_ID_RE = re.compile(r"^[0-9a-fA-F][0-9a-fA-F-]{6,}$")
 
+#: Operator-declared labels for the **copilot** path, e.g. ``[ransomware]`` /
+#: ``category incident-response`` / ``CVE-2024-36401``.
+#:
+#: Why a separate extractor exists (2026-10-10, measured): in copilot mode the
+#: operator pastes raw terminal output back, and ``challenge_class_signature``
+#: reads that whole blob. Terminal output is full of tokens the signature
+#: mistakes for challenge identity --
+#:
+#: * ``python3 -c "import socket,subprocess,os;"`` matched ``_CLASS_QUOTED_RE``
+#:   (quote-based title rule) and became the query
+#:   ``'import socket,subprocess,os;...'``;
+#: * ``find / -newermt '2026-03-14'`` became the query ``'2026-03-14'``;
+#: * the operator-facing contract itself contains 命令执行, which
+#:   :func:`vulnerability_classes` reads as class ``rce``.
+#:
+#: Net effect measured on a ransomware paste: the query was
+#: ``'import socket,subprocess,os;... 2026-03-14 rce'`` and the top hits were
+#: ``coderunner-python-sandbox-escape`` / ``pickle-deserialization`` -- RCE notes
+#: for a ransomware case. Stripping quotes is not a general fix either (it fixed
+#: ransomware but BROKE an upload case that was previously right), so the copilot
+#: path must not derive its query from pasted output at all.
+#:
+#: This extractor therefore reads **only** deliberate label forms -- bracketed tag,
+#: ``category``/``difficulty`` label, CVE id -- and never a quoted shell argument.
+#: Empty result means "the operator declared no class", which correctly yields no
+#: class query (the fingerprint still carries the target).
+_OPERATOR_LABEL_TAG_RE = _CLASS_TAG_RE
+_OPERATOR_LABEL_WORD_RES = _CLASS_LABEL_RES
+_OPERATOR_LABEL_CVE_RE = _CLASS_CVE_RE
+
+
+def operator_declared_labels(text: str) -> str:
+    """Labels the operator wrote on purpose, ignoring pasted terminal output.
+
+    Returns a space-joined label string (``""`` when nothing was declared).
+    See the module comment above ``_OPERATOR_LABEL_TAG_RE`` for the measured
+    reason the copilot lookup must not read pasted output.
+    """
+    src = str(text or "")
+    bits: list[str] = [m.group(1).strip() for m in _OPERATOR_LABEL_TAG_RE.finditer(src)]
+    bits += [m.group(0).upper() for m in _OPERATOR_LABEL_CVE_RE.finditer(src)]
+    for rx in _OPERATOR_LABEL_WORD_RES:
+        # First occurrence only: one label per form is the operator's intent;
+        # repeated occurrences add no discrimination.
+        for m in rx.finditer(src):
+            bits.append(m.group(1))
+            break
+    return " ".join(bit for bit in bits if bit.strip())
+
 
 def challenge_class_signature(goal: str) -> str:
     """A port-free identity of the *kind* of challenge, used as a second lookup key.

@@ -94,21 +94,40 @@ REPL 提示符一旦从 `vulnclaw Ready>` 变成 `vulnclaw <某个词> | …`，
 > ⚠️ 白名单必须**点名列出**危险工具，不要写成"尽量少调工具" —— 第一轮那次 16 次调用的教训就是
 > "含糊的约束等于没有约束"。
 
-### 0.3 playbook：**手动喂**最划算（自动注入有害 · 按需查要两轮）
+### 0.3 playbook：写**类别标签**即可自动注入（2026-10-10 修掉污染根因）
 
-我加了"单轮 chat 也自动注入 playbook"（env 门 `VULNCLAW_CHAT_PLAYBOOKS=1`，默认关）。但**实测建议默认别开**：
+**先给结论**：`COPILOT_PLAYBOOKS=1` 现在**可以开了**（2026-10-10 修掉了根因），
+但**必须写类别标签**，否则不注入任何东西。下面说清为什么。
 
-拿本题（MiniOA，目标"读 `/tmp/flag.txt`"）跑注入链 → 匹配 **2 篇**、最高分 **0.333**，
-内容是一篇 **"安洵杯2019 easy misc (BUUCTF)"**（RAR/隐写题）—— 与眼前的 Web 上传题**毫无关系**。
+**修之前的根因（实测，已修）**：旧的自动注入把**整段用户消息**（= 你粘贴的终端输出）当检索条件，于是：
 
-原因：副驾模式下 agent 的"目标"就是操作员随手写的自然语言题面，`target_fingerprint` 退化成**全文模糊匹配**、
-`challenge_class_signature` 常常为空 → 只能靠弱相似度凑分。solve 模式的噪声投诉（CHANGELOG 里那条）是同一机制。
+| 污染源 | 被抽成什么 |
+|---|---|
+| `python3 -c "import socket,subprocess,os;"` | 引号规则当成**题目名** → 查询词 `'import socket,subprocess,os;...'` |
+| `find / -newermt '2026-03-14'` | 同上 → 查询词 `'2026-03-14'` |
+| 契约里「会把你给的**命令执行**后」 | `vulnerability_classes` 读成类别 **`rce`** |
+
+合成查询 `'import socket,subprocess,os;... 2026-03-14 rce'` ⇒ 给**勒索排查**题塞
+`coderunner-python-sandbox-escape` / `pickle-deserialization`（RCE 笔记）。
+**这就是"注入了但全不对"的原因**；剥引号也不是通用解（修好了勒索、弄坏了上传）。
+
+**修法**：副驾路径只用**操作员显式写的标签**当检索条件（`operator_declared_labels`），
+粘贴正文一律不参与。**默认行为不变**（该功能本来就在 env 门后、默认关）。
 
 | 方式 | 做法 | 评价 |
 |---|---|---|
-| ⚠️ ~~按需查 `lookup_playbook`~~ | 单轮 chat 里让它自己查 | **实测有硬限制，见下** —— 它会查，但**那一轮就不给命令了**。要查就得**分两轮**（先查、再发"继续"） |
-| ⚠️ 自动注入 | `set COPILOT_PLAYBOOKS=1` → `copilot.cmd`（= `VULNCLAW_CHAT_PLAYBOOKS=1`） | 实测会注入无关笔记并占 prompt |
-| ✅ **手动喂**（推荐，最准） | 你自己打开 `~/.vulnclaw/playbooks/` 里那篇贴进提示词 | 零匹配噪声，且**不占轮次** —— 见 `PLAYBOOK-SHORTLIST.md` 的手贴清单 |
+| ✅ **自动注入 + 写标签**（现在可用） | `set COPILOT_PLAYBOOKS=1` → 并在契约里写 **`category <类别>`** 或 **`[标签]`** | 实测：写 `[ransomware]` → 命中 `ir-triage-checklist-ten-drills`（**1.0**）；不写标签 → **零注入**（不再塞错笔记） |
+| ⚠️ ~~按需查 `lookup_playbook`~~ | 单轮 chat 里让它自己查 | **仍有的硬限制**：它会查，但**那一轮就不给命令**（见 §0.3.1）。要查得分两轮 |
+| ✅ 手动喂（最准） | 自己把 `~/.vulnclaw/playbooks/` 里那篇贴进提示词 | 零噪声、不占轮次；贴哪篇见 `PLAYBOOK-SHORTLIST.md` |
+
+**能用的标签格式**（写进契约首轮即可，检索器认这几种）：
+```
+category incident-response  [ransomware]
+category web  [upload bypass]
+category web  [ssti jinja2]
+CVE-2024-36401
+```
+> 中文标签也认（`[上传绕过]` 实测可命中）。**别写长句**——检索按词的命中比例打分，句子越长分越低。
 
 ### ⭐ 0.3.1 实测限制：副驾里"调工具"的那一轮不给命令
 

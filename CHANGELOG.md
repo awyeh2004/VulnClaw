@@ -3,6 +3,23 @@
 ---
 
 <details open>
+<summary><strong>Unreleased</strong> — 副驾的 playbook 检索只认操作员标签（修掉"勒索题被塞 RCE 笔记"）</summary>
+
+- **修（中·机制）：`COPILOT_PLAYBOOKS=1` 的自动注入不再读粘贴正文** — 起因是用户实战反馈"prompt 里还是没有 playbook 内容"。查下去发现**注入了但全是错的**：副驾路径把**整段用户消息**（= 操作员粘贴的终端输出）交给 `target_fingerprint` / `challenge_class_signature` 当检索条件，而终端输出里全是会被误读的 token。实测（2026-10-10）一条勒索排查的粘贴：
+  - `python3 -c "import socket,subprocess,os;"` → 引号规则（`_CLASS_QUOTED_RE`，本意是读**题目名**）把 shell 参数当成标题 → 查询词 `'import socket,subprocess,os;...'`；
+  - `find / -newermt '2026-03-14'` → 查询词 `'2026-03-14'`；
+  - 面向操作员的**契约自身**含「命令执行」，被 `vulnerability_classes` 读成类别 **`rce`**。
+  合成查询 `'import socket,subprocess,os;... 2026-03-14 rce'` ⇒ 命中 `coderunner-python-sandbox-escape` / `pickle-deserialization`——**给勒索题塞 RCE 笔记**。另实测"剥掉引号"**不是通用解**：修好了勒索案例，却让一个原本正确的上传案例变错（`actf2020-upload` → `ofbiz-groovy-rce`），即该路径**不稳定**比"没有"更糟。
+- **修法**：新增 `vulnclaw/agent/playbook.py::operator_declared_labels()`，只认操作员**显式写的标签形态**（`[tag]` / `category x` / `difficulty x` / CVE id），**绝不读引号内的 shell 参数**；`AgentCore._chat_playbook_brief` 改用它，且 fingerprint 只吃 `origin` 不再吃 `goal`。**默认行为不变**（该功能本就在 `VULNCLAW_CHAT_PLAYBOOKS` 门后、默认关）。
+- **实测效果**：写 `category incident-response  [ransomware]` → 命中 `ir-triage-checklist-ten-drills`（**1.0**）；**不写标签 → 零注入**（不再塞错笔记）。
+- **回归**：`tests/agent/test_chat_playbook_label_only.py` 9 例（钉住"引号参数/时间戳/契约措辞都不算标签"+"显式标签必须被采纳"+端到端"无标签零注入"）。
+- **文档**：`IR-PROMPTS.md` §0.3 重写（结论由"自动注入有害"改为"写标签即可用"，并保留根因记录）；`IR-CONTRACT.txt` 第 1/2 段加**类别标签行**（6 种常用类别照抄）；`copilot.cmd` 注释同步（仍纯 ASCII，非 ASCII 字节数 0）。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 第七轮审计收口：复测非法 verdict 不再甩 traceback · HTML 报告转义捕获字节</summary>
 
 - **修（高）：HTML 报告转义正文，堵住存储型 XSS** — HTML 输出用 `Template(...).render(content=report_content)` 包裹，而 jinja2 的 `Template` 默认 `autoescape=False`。报告正文里包含由 `_render_http_captures` 逐字内联的**目标请求/响应正文**，且该页面由 Web 以 `text/html` 直接回传（`/api/reports/download`）——目标响应体里一个 `<script>` 就会在审阅者浏览器里执行。现 `autoescape=True`：正文在 `<pre>` 中仍可读，但 HTML 元字符一律转义成惰性文本。新增测试断言 fixture 里的 `<script>alert(1)</script>` 在 HTML 输出中变成 `&lt;script&gt;…`。

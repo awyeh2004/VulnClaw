@@ -643,10 +643,7 @@ class AgentCore:
         would mean never seeing them. Best-effort: any failure returns no block.
         """
         try:
-            from vulnclaw.agent.playbook import (
-                challenge_class_signature,
-                target_fingerprint,
-            )
+            from vulnclaw.agent.playbook import target_fingerprint
             from vulnclaw.agent.solver import (
                 _format_prior_playbook_brief,
                 _lookup_prior_playbooks,
@@ -656,12 +653,29 @@ class AgentCore:
 
         queries: list[tuple[str, str]] = []
         try:
-            fingerprint = target_fingerprint(origin, goal)
+            # Copilot lookup must NOT derive its query from pasted terminal output
+            # (measured 2026-10-10): a ransomware paste whose body contained
+            # `python3 -c "import socket,subprocess,os;"` and `-newermt '2026-03-14'`
+            # produced the query `'import socket,subprocess,os;... 2026-03-14 rce'`
+            # (the quote-title rule read the shell argument as a challenge name, and
+            # the operator-facing contract's 命令执行 read as class `rce`), so the top
+            # hits were RCE-sandbox notes for a ransomware case. Only a deliberate
+            # label the operator wrote (`[ransomware]`, `category incident-response`,
+            # a CVE id) is used as the class key; the target fingerprint still comes
+            # from `origin` as before.
+            # Only the target identity goes in the fingerprint -- not the request
+            # text, which in copilot mode is the pasted dump itself.
+            fingerprint = target_fingerprint(origin, "")
             if fingerprint:
                 queries.append(("target", fingerprint))
-            signature = challenge_class_signature(goal)
-            if signature:
-                queries.append(("class", signature))
+            try:
+                from vulnclaw.agent.playbook import operator_declared_labels
+
+                labels = operator_declared_labels(goal)
+            except Exception:
+                labels = ""
+            if labels:
+                queries.append(("class", labels))
             if not queries:
                 return "", []
             matches, _gated = _lookup_prior_playbooks(queries)

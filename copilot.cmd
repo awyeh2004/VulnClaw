@@ -25,9 +25,12 @@ set VULNCLAW_REPL_NO_AUTO=1
 set VULNCLAW_SAFETY_PERMISSION_MODE=auto_review
 if defined COPILOT_DENY set VULNCLAW_SAFETY_DENIED_HOSTS=%COPILOT_DENY%,tp.qianxin.com
 REM Optional 4th layer: auto-inject prior-run notes into single-turn chat.
-REM OFF by default -- measured 2026-10-09: the goal text is fuzzy-matched and pulled in
-REM an unrelated BUUCTF misc note (score 0.333). Prefer on-demand lookup_playbook or
-REM pasting the one relevant note by hand (see IR-PROMPTS.md section 0.3).
+REM OFF by default. Set COPILOT_PLAYBOOKS=1 to enable, and write a class label in the
+REM first message (e.g. "category incident-response  [ransomware]").
+REM Measured 2026-10-10: the lookup used to read the WHOLE pasted message, so a ransomware
+REM dump matched RCE-sandbox notes (a shell-quoted argument became the query). The copilot
+REM path now uses ONLY an operator-written label -- without one, nothing is injected, which
+REM is why the label line matters. Details: IR-PROMPTS.md section 0.3.
 if defined COPILOT_PLAYBOOKS set VULNCLAW_CHAT_PLAYBOOKS=1
 
 echo.
