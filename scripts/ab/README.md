@@ -1,7 +1,8 @@
 # A/B 与冷热对照实验工装
 
-这三个脚本是为"笔记复用链"的实测对照写的（背景见仓库根目录
-`PLAYBOOK-REUSE-HANDOFF.md`）。原先它们放在 `.test-tmp/` 里，而那个目录会被
+这三个脚本是为"笔记复用链"的实测对照写的（该任务的两份过程文档
+`PLAYBOOK-REUSE-HANDOFF.md` / `PLAYBOOK-REUSE-RESULT.md` 已因数字过期删除，
+通用经验提炼进 `CONTRIBUTING.md` §六；原文见 git 历史）。原先它们放在 `.test-tmp/` 里，而那个目录会被
 **pytest 的 conftest 清理掉超过 12 小时的顶层条目** —— 交接文档指向的脚本会凭空消失，
 所以拷到这里留存。
 

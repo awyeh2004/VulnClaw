@@ -502,3 +502,57 @@ python scripts/release_preflight.py --build
 - 类型安全（TypeScript）：避免滥用 any，尽量定义精确类型
 - 变量不可变性：优先使用 const 而非 let
 - 命名：使用简洁但表意清晰的英文单词
+
+
+---
+
+## 六、协作纪律与踩坑记录（通用，跨任务复用）
+
+> 本节由已完成的「笔记复用链」任务的两份过程文档（`PLAYBOOK-REUSE-HANDOFF.md` /
+> `PLAYBOOK-REUSE-RESULT.md`）提炼而来——那两份文档里的 HEAD/测试基线等数字已过期，
+> 过期部分已删，通用经验留在这里。原文见 git 历史。
+
+### 6.1 表述纪律（这轮反复吃过亏，代价真实）
+
+- **先量后说**。至少三次"先把机制讲圆再去测，结果与讲的不一样"：① 说"确定性命中永不
+  触发"（实测旧键照样命中，撤回）；② 说"class 键会提高命中率"（实测 0.727 vs 0.727）；
+  ③ 说"关掉推理图能提速"（实测更慢，还丢题）。**结论先有测量、后有表述。**
+- 汇报时把 **[实测]** 与 **[推断]** 分开，并**主动写出没做/没验的部分**。
+- **数字要数准再写**：这轮把 9 个测试写成 10 个、把 3873 写成 3874，都是自查才抓到。
+  （同一类错在 2026-10-10 又犯过一次：测试例数 4 写成 5。）
+- 已知、**不要重复走**的结论：推理图/能力卡**不是**效率损失来源（消融后更慢）；
+  "当前版本比 09-19 慢 2.3 倍"**不成立**（同代码方差同量级，已撤回）；
+  **同代码不同次运行方差 33%–100%** ⇒ n=1 的任何对比都不足以下结论。
+
+### 6.2 本仓库的既有不变量（改代码前先看一眼）
+
+- **flag 必须脱敏后再落盘**（`_fingerprint_flags`，多于 8 个则 `first4…last4`）；
+  改 `playbook.py` 时不要把明文 flag 写回去。
+- **`_ALWAYS_KEEP_TOOLS` 与平台核心工具**：平台工具必须能存活 schema 裁剪。
+- **审计类字段**（`source`、`vuln_classes`）要"沉默不算矛盾"——没声明的不要当成反对证据。
+- **唯一来源纪律**：抽取/解析逻辑复用已有 helper，不要再写第二份。本仓库有前车之鉴：
+  flag 正则副本漂移（漂到 3/17）、`_ALWAYS_KEEP_TOOLS` 手写清单漂移。
+- 改 `exec_gate.py` / 执行边界扫描器 allowlist / `command_classifier.py` 后，
+  跑 `python scripts/verify_execution_boundary.py`，应为
+  `27 spawn site(s), all inside the reviewed allowlist`。
+
+### 6.3 PowerShell / Windows 踩坑（本机开发环境是 Windows）
+
+- `echo` 在 pwsh 里是 `Write-Output` 的别名，**裸 `echo` 会报缺少参数**；用 `""` 或写完整 cmdlet。
+- **不要**给 python 命令加 `2>&1`：一旦 MCP/子进程往 stderr 写东西，PowerShell 会抛
+  **NativeCommandError 并制造假的 exit 1**。
+- 中文提交信息用 `git commit -F <文件>`；不要用 here-string 拼。
+- `Get-Content` / `Measure-Object -Line` 会误读 UTF-8，**用 Python 读**。
+- `git show rev:path > file` 在 PowerShell 里会写成 **UTF-16**（Python 读会报 null byte）；
+  用 `Path(p).write_bytes(subprocess.run([...], capture_output=True).stdout)`。
+- 跑脚本加 `-X utf8` 并设 `$env:PYTHONIOENCODING="utf-8"`，否则中文日志乱码。
+- 遇到带 UTF-8 BOM 的文件，`ast.parse` 需 `encoding="utf-8-sig"`。
+- 别用 Unix 管道（`curl ... | head -40` → `CommandNotFoundException`）；
+  目标自签证书时 `requests` 要 `verify=False`。
+
+### 6.4 测试与提交习惯
+
+- 全量：`python -X utf8 -m pytest -q`（本机约 4–5 分钟）。
+- 提交正文写清：**实测证据、改了什么、已知局限、测试计数变化**。
+- 报"N 例 / N passed"前**重新数一遍**，不要凭记忆复述上一个版本的数字。
+

@@ -875,7 +875,7 @@ class TestCaptureRefusesToWriteANoteNobodyCanRecall:
 class TestAScoreOfZeroIsUnreachableByNameToo:
     """round7 D1 correction, measured at round9: the NAME does not rescue such a note.
 
-    `PLAYBOOK-REUSE-RESULT.md` §4.7 and §6 used to say the stale `'E:'` entry "靠 name 里的
+    The (since-removed) `PLAYBOOK-REUSE-RESULT.md` §4.7 and §6 used to say the stale `'E:'` entry "靠 name 里的
     babyfengshui 还能被按题名查的路径召回". That is false, and the distinction matters for
     anyone deciding whether a legacy entry can be left in place:
 
