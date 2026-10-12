@@ -117,11 +117,12 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "purpose": "background runner for the gated bg_launch path; argv is the "
                    "validated brute-force/pure-computation command",
     },
-    "vulnclaw/agent/builtin_tools.py:execute_nmap:run_text:23791bbb": {
+    "vulnclaw/agent/tools/nmap.py:execute_nmap:run_text:23791bbb": {
         "count": 1,
-        "purpose": "fixed Windows nmap path lookup (where.exe), via the pinned-codec funnel",
+        "purpose": "fixed Windows nmap path lookup (where.exe), via the pinned-codec funnel "
+                   "(moved from builtin_tools.py in the tools/ split; body unchanged)",
     },
-    "vulnclaw/agent/builtin_tools.py:_run_nmap_argv:run_text:ddcaa122": {
+    "vulnclaw/agent/tools/nmap.py:_run_nmap_argv:run_text:ddcaa122": {
         "count": 1,
         # model-reachable: called via asyncio.to_thread from execute_nmap.
         # Round-8 finding R8-8: this entry's purpose used to justify the site with
@@ -131,7 +132,8 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         # are exactly those the ExecutionGate must gate") was violated in the file
         # that states it. execute_nmap now authorizes before its first
         # _run_nmap_argv call; a schema-constrained argv decides WHICH flags run,
-        # never WHETHER the host is scanned.
+        # never WHETHER the host is scanned. Moved from builtin_tools.py to
+        # tools/nmap.py in the tools/ split; body and hash unchanged.
         "purpose": "structured argv nmap execution constrained by the nmap tool schema, "
                    "behind the ExecutionGate in execute_nmap (approval precedes the "
                    "first spawn and the de-escalated retry)",
