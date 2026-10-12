@@ -103,7 +103,7 @@ class TestMechanicalBoundary:
         from scripts.verify_execution_boundary import SpawnSite, _partition_sites
 
         key_holder = SpawnSite(
-            "vulnclaw/agent/builtin_tools.py", 457, "subprocess.Popen",
+            "vulnclaw/agent/tools/shell_exec.py", 457, "subprocess.Popen",
             "_spawn_captured", "1eacb151",
         )
         # Only valid while that key is in the allowlist with a budget.
@@ -131,7 +131,7 @@ class TestMechanicalBoundary:
             for s in report["reviewed_sites"]
         }
         assert (
-            "vulnclaw/agent/builtin_tools.py",
+            "vulnclaw/agent/tools/shell_exec.py",
             "_spawn_captured",
             "subprocess.Popen",
             "1eacb151",

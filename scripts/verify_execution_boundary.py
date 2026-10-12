@@ -99,13 +99,15 @@ _SPAWN_CALLS = {
 # operator (doctor probes, TUI launcher).
 ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
     # ── model-reachable: the ExecutionGate must cover these ──────────────
-    "vulnclaw/agent/builtin_tools.py:_spawn_captured:subprocess.Popen:1eacb151": {
+    "vulnclaw/agent/tools/shell_exec.py:_spawn_captured:subprocess.Popen:1eacb151": {
         "count": 1,
-        "purpose": "shared gated process runner for shell/python/PHP execution",
+        "purpose": "shared gated process runner for shell/python/PHP execution "
+                   "(moved from builtin_tools.py in the tools/ split; body unchanged)",
     },
-    "vulnclaw/agent/builtin_tools.py:_kill_process_tree:subprocess.run:0d8fbefe": {
+    "vulnclaw/agent/tools/shell_exec.py:_kill_process_tree:subprocess.run:0d8fbefe": {
         "count": 1,
-        "purpose": "fixed Windows taskkill fallback for the gated process runner",
+        "purpose": "fixed Windows taskkill fallback for the gated process runner "
+                   "(moved from builtin_tools.py in the tools/ split; body unchanged)",
     },
     "vulnclaw/agent/builtin_tools.py:_bg_run:subprocess.run:f04864d1": {
         "count": 1,
