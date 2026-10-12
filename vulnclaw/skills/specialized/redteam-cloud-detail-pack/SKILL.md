@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized cloud security
 routing:
   aliases: [云安全, 云资产, 对象存储, bucket, 云元数据]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 云安全测试

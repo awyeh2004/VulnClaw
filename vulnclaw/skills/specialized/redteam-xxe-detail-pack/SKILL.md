@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [xxe]
   aliases: [xml外部实体]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # XXE XML 外部实体注入测试

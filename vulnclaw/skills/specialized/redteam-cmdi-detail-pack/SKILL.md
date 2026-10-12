@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [rce]
   aliases: [命令注入, 命令执行]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # OS 命令注入测试

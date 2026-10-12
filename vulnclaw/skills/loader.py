@@ -8,7 +8,7 @@ Supports two Skill formats:
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
 from vulnclaw.config.settings import SKILLS_DIR
@@ -33,6 +33,48 @@ def is_valid_skill_name(name: str) -> bool:
     """True when ``name`` is a plausible single-component skill name."""
     value = str(name or "").strip()
     return bool(value) and _SKILL_NAME_RE.match(value) is not None
+
+
+# ── Shared references (deduplication root) ─────────────────────────────────
+#
+# Skills are independent load units, so identical reference content used to be
+# copied into each skill's references/ (13 byte-identical groups, 4,167 wasted
+# lines; TECH-DEBT.md #1). Symlinks cannot dedupe this: resolve_skill_reference
+# follows symlinks and requires the result to stay inside the skill's own
+# references_dir, and that containment is what stops a model-supplied
+# ``ref_name`` from reading arbitrary files — it must not be relaxed. Instead a
+# skill *declares* shared names in its frontmatter; declared names (and only
+# those — operator-authored, never model-chosen) resolve against this fixed
+# root with the exact same containment check. The root itself is not a skill
+# directory and its name fails is_valid_skill_name, so no scanner picks it up.
+_SHARED_REFERENCES_DIR = Path(__file__).parent / "_shared" / "references"
+
+
+def _clean_shared_reference_names(raw: Any) -> list[str]:
+    """Normalize the frontmatter ``shared_references`` list to safe relative names.
+
+    The declaration lives in an operator-authored SKILL.md, but it is still data
+    read from disk, so each entry is validated here: only plain POSIX-relative
+    paths without ``..`` survive. Anything else is silently dropped — a bad
+    declaration yields no shared access rather than a widened lookup surface.
+    """
+    if not isinstance(raw, list):
+        return []
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or "\\" in value:
+            continue
+        path = PurePosixPath(value)
+        if path.is_absolute() or PureWindowsPath(value).drive:
+            continue
+        parts = [p for p in path.parts if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts):
+            continue
+        names.append("/".join(parts))
+    return names
 
 
 def _is_directory_skill(path: Path) -> bool:
@@ -210,6 +252,16 @@ def _parse_skill_directory(skill_dir: Path) -> dict[str, Any]:
         collected.sort(key=reference_sort_key)
         ref_files.extend(collected)
 
+    # Declared shared references are advertised alongside the skill's own files
+    # so the model can discover them; only names whose shared file actually
+    # exists are listed, keeping the advertised list truthful. Resolution order
+    # is the skill's own references/ first, so an own copy overrides shared.
+    for shared_name in result.get("shared_references", []):
+        if shared_name in ref_files:
+            continue
+        if (_SHARED_REFERENCES_DIR / shared_name).is_file():
+            ref_files.append(shared_name)
+
     result["references"] = ref_files
     result["references_dir"] = str(references_dir)
     result["skill_dir"] = str(skill_dir)
@@ -239,6 +291,9 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
     # raw frontmatter mapping here; the resolver normalizes/validates it into a
     # ``SkillRouting`` model so the loader stays free of routing-schema imports.
     routing: dict[str, Any] = {}
+    # Frontmatter-declared names allowed to resolve against the shared root
+    # (see _SHARED_REFERENCES_DIR). Empty for every skill that does not opt in.
+    shared_references: list[str] = []
     body = content
 
     if content.startswith("---"):
@@ -260,6 +315,9 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
                     raw_routing = frontmatter.get("routing")
                     if isinstance(raw_routing, dict):
                         routing = raw_routing
+                    shared_references = _clean_shared_reference_names(
+                        frontmatter.get("shared_references")
+                    )
             except yaml.YAMLError:
                 pass
             body = parts[2].strip()
@@ -271,6 +329,7 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
         "path": str(path),
         "requires_target": requires_target,
         "routing": routing,
+        "shared_references": shared_references,
         "references": [],
         "references_dir": "",
         "skill_dir": str(path.parent) if path.name == "SKILL.md" else "",
@@ -278,8 +337,28 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
     }
 
 
+def _contained_reference_file(root: Path, ref_name: str) -> Optional[Path]:
+    """Resolve ``ref_name`` under ``root`` with symlink-aware containment.
+
+    ``resolve()`` also collapses ``..`` and follows symlinks, so a link planted
+    inside the root cannot be used to step outside it either. Returns None when
+    the name escapes the root, is not a regular file, or does not exist.
+    """
+    try:
+        resolved_root = root.resolve()
+        candidate = (resolved_root / str(ref_name)).resolve()
+    except (OSError, ValueError, RuntimeError):
+        # ValueError covers embedded NUL bytes; RuntimeError covers symlink loops.
+        return None
+    if candidate != resolved_root and resolved_root not in candidate.parents:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
 def resolve_skill_reference(skill_name: str, ref_name: str) -> Optional[Path]:
-    """Resolve ``ref_name`` to a file *inside* the skill's references directory.
+    """Resolve ``ref_name`` to a reference file for this skill.
 
     ``ref_name`` is model-supplied (``load_skill_reference`` is a built-in tool),
     so a bare ``Path(references_dir) / ref_name`` join is a path-traversal
@@ -288,27 +367,28 @@ def resolve_skill_reference(skill_name: str, ref_name: str) -> Optional[Path]:
     legitimate, documented shape, so the join is allowed but the *result* must
     still land under ``references_dir`` after symlink resolution.
 
-    Returns the resolved path, or None when the name escapes the directory,
-    is not a regular file, or does not exist.
+    Names declared in the skill's frontmatter ``shared_references`` (normalized
+    at parse time to plain relative paths, see
+    :func:`_clean_shared_reference_names`) additionally resolve against the
+    fixed shared root — with the same containment check, never a relaxed one.
+    The skill's own ``references/`` wins on a name clash, so a local copy can
+    still override shared content.
+
+    Returns the resolved path, or None when the name escapes, is not a regular
+    file, or does not exist.
     """
     skill = load_skill_by_name(skill_name)
     if not skill or not skill.get("references_dir"):
         return None
 
-    try:
-        ref_dir = Path(skill["references_dir"]).resolve()
-        # resolve() also collapses ``..`` and follows symlinks, so a link
-        # planted inside references/ cannot be used to step outside either.
-        candidate = (ref_dir / str(ref_name)).resolve()
-    except (OSError, ValueError, RuntimeError):
-        # ValueError covers embedded NUL bytes; RuntimeError covers symlink loops.
-        return None
+    own = _contained_reference_file(Path(skill["references_dir"]), ref_name)
+    if own is not None:
+        return own
 
-    if candidate != ref_dir and ref_dir not in candidate.parents:
-        return None
-    if not candidate.is_file():
-        return None
-    return candidate
+    declared = skill.get("shared_references") or []
+    if str(ref_name) in declared:
+        return _contained_reference_file(_SHARED_REFERENCES_DIR, ref_name)
+    return None
 
 
 def load_skill_reference(skill_name: str, ref_name: str) -> Optional[str]:

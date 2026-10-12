@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [sqli]
   aliases: [sql注入]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # SQL 注入测试

@@ -27,6 +27,10 @@ routing:
     - prototype_pollution
     - business_logic
   exclude_signals: ["无法重放", "签名阻塞", "重放被阻"]
+shared_references:
+  - web-injection.md
+  - web-logic-auth.md
+  - web-modern-protocols.md
 ---
 
 # Web 高级安全测试 Skill

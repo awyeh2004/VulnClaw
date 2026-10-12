@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [file_upload]
   aliases: [文件上传漏洞, 任意文件读取]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 文件上传/包含/读取漏洞测试

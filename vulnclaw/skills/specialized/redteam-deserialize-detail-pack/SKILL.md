@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [deserialization]
   aliases: [反序列化]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 反序列化漏洞测试

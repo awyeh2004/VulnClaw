@@ -6,6 +6,8 @@ routing:
   task_types: [pentest]
   aliases: [域渗透, active directory, ad域攻击, mimikatz]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # Active Directory 域渗透

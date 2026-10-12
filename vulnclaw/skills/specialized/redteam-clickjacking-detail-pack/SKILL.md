@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized clickjacking t
 routing:
   aliases: [点击劫持, clickjacking, ui重定向]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # Clickjacking 点击劫持测试

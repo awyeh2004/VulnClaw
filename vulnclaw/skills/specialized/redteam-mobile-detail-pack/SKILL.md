@@ -5,6 +5,8 @@ routing:
   target_types: [android, mobile]
   aliases: [移动端安全, app测试]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 移动应用安全测试

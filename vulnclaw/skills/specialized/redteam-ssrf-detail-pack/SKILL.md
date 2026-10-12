@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [ssrf]
   aliases: [服务端请求伪造]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # SSRF 服务端请求伪造测试

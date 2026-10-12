@@ -5,6 +5,8 @@ routing:
   target_types: [network, host]
   aliases: [网络设备, 网络层攻击]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 网络层渗透测试

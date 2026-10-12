@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized defense evasio
 routing:
   aliases: [免杀, 流量伪装, 绕过检测, 防御规避]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 防御规避与绕过

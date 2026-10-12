@@ -26,7 +26,24 @@
 
 ---
 
-## 1. 技能库 references 存在成组重复（13 组 / 可省 4,167 行）
+## 1. 技能库 references 成组重复（13 组 / 4,167 行）—— ✅ 已修（2026-10-12）
+
+**修法（已落地）**：新增 `vulnclaw/skills/_shared/references/` 共享根 + frontmatter
+`shared_references` 声明机制（`loader.py`）。技能只在自己 SKILL.md 里**声明**要用哪些共享名
+（操作员写盘的静态清单，不是模型输入）；`resolve_skill_reference` 先查本技能
+`references/`（原路径原逻辑），声明过的名字才回退到共享根，**共用同一套 containment 检查**
+（resolve + 必须落在根内 + is_file），穿越面一个字没放松。本技能同名文件优先 = 本地可覆盖共享。
+
+**迁移**（13 组全部完成，剩余重复 0 组）：web 域 3 文件（web-pentest /
+web-security-advanced / secknowledge-skill）→ android 域 9 文件（android-pentest /
+client-reverse）→ `upstream-source.md` ×34（全部 redteam-*-detail-pack）。
+
+**防回潮**：`tests/skills/test_no_duplicate_references.py`——扫全部 `references/` 树
+（含 `_shared`），任何两份逐字节相同即 fail；`tests/skills/test_shared_references.py`
+钉住解析契约（未声明不可达 / own 覆盖共享 / 穿越仍拒 / 声明清洗）。
+
+以下为原始记录（留存供对照）：
+
 
 同一份内容在多个 skill 的 `references/` 下各存一份，**逐字节相同**（sha256 相等）：
 

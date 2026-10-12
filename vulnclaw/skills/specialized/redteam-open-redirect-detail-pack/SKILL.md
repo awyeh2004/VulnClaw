@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized open redirect 
 routing:
   aliases: [开放重定向, open redirect, url跳转]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 开放重定向测试

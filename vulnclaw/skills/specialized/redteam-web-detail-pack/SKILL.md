@@ -6,6 +6,8 @@ routing:
   broad: true
   aliases: [web渗透]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # Web 综合渗透测试

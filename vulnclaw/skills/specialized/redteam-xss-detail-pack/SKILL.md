@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [xss]
   aliases: [跨站脚本]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # XSS 跨站脚本测试

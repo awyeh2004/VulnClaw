@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized general inject
 routing:
   aliases: [注入类漏洞, 模板注入, 表达式注入]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 通用注入测试

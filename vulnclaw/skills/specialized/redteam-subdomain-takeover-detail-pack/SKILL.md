@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized subdomain take
 routing:
   aliases: [子域名接管, subdomain takeover, 悬空cname]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 子域名接管测试

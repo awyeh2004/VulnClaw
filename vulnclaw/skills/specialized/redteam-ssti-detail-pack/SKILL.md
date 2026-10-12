@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [ssti]
   aliases: [模板注入]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # SSTI 服务端模板注入测试

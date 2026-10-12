@@ -5,6 +5,8 @@ routing:
   task_types: [crypto]
   aliases: [密码学弱点, 加密误用]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 密码学弱点测试

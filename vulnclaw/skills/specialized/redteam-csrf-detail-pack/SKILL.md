@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [csrf]
   aliases: [跨站请求伪造]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # CSRF 跨站请求伪造测试

@@ -6,6 +6,8 @@ routing:
   phases: [recon]
   aliases: [踩点, 攻击面梳理]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 信息收集与侦察

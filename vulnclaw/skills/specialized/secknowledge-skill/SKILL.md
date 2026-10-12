@@ -17,6 +17,9 @@ routing:
   target_types: [web, ai_agent]
   task_types: [pentest, audit, bugbounty, ctf]
   broad: true
+shared_references:
+  - web-logic-auth.md
+  - web-modern-protocols.md
 ---
 
 # Web 和 AI 安全测试知识库

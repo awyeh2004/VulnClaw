@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized web cache pois
 routing:
   aliases: [缓存投毒, cache poisoning, web缓存]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 缓存投毒测试

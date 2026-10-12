@@ -5,6 +5,8 @@ routing:
   phases: [post_exploitation]
   aliases: [后渗透, 权限维持]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 后渗透利用

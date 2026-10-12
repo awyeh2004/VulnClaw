@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized payload constr
 routing:
   role: support
   aliases: [payload构造, 攻击载荷]
+shared_references:
+  - upstream-source.md
 ---
 
 # Payload 构造与武器化

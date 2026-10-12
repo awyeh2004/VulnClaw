@@ -5,6 +5,16 @@ routing:
   target_types: [client, android, mobile]
   task_types: [reverse]
   tooling: [frida, jadx, burp, scrcpy]
+shared_references:
+  - android-external-url-runtime-first-workflow.md
+  - android-signing-and-crypto-workflow.md
+  - android-ui-driven-observation-and-packet-loop.md
+  - android-authorized-app-pentest-sop.md
+  - android-network-layer-testing-quick-reference.md
+  - android-signature-reverse-template.md
+  - android-dynamic-hooking-and-replay.md
+  - android-static-triage-and-callflow.md
+  - android-native-signature-analysis.md
 ---
 
 # 客户端逆向与 Burp 重放 Skill

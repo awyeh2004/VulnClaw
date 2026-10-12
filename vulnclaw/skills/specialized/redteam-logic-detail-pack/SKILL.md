@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [business_logic]
   aliases: [逻辑漏洞, 业务逻辑, 支付逻辑]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 业务逻辑漏洞测试

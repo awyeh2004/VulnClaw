@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [auth_bypass]
   aliases: [认证漏洞, 登录绕过, 弱口令策略]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 认证与授权漏洞测试

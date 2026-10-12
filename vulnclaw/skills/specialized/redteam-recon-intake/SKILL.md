@@ -6,6 +6,8 @@ routing:
   phases: [recon]
   aliases: [侦察受理, 测试范围确认]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # Recon Intake

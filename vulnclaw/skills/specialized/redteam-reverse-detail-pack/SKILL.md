@@ -5,6 +5,8 @@ routing:
   task_types: [reverse]
   aliases: [二进制逆向, 逆向分析]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 逆向工程分析

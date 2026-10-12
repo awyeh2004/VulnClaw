@@ -5,6 +5,8 @@ routing:
   vulnerability_classes: [cors]
   aliases: [跨域配置, cors错误配置]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # CORS 配置错误测试

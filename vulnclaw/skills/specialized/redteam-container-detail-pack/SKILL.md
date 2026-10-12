@@ -4,6 +4,8 @@ description: "Domain routing and boundary guidance for authorized container and 
 routing:
   aliases: [容器逃逸, docker安全, k8s安全, kubernetes]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 容器安全测试

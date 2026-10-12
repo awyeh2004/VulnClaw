@@ -5,6 +5,8 @@ routing:
   task_types: [audit]
   aliases: [代码审计, 源码审计, 白盒]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # 代码审计

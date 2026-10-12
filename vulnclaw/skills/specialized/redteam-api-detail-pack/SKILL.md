@@ -6,6 +6,8 @@ routing:
   task_types: [pentest]
   aliases: [接口测试, api安全]
   role: support
+shared_references:
+  - upstream-source.md
 ---
 
 # API 安全测试
