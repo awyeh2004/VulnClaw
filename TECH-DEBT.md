@@ -26,7 +26,7 @@
 
 ---
 
-## 1. 技能库 references 成组重复（13 组 / 4,167 行）—— ✅ 已修（2026-10-12）
+## 1. 技能库 references 成组重复（13 组 / 4,167 行）—— ✅ 已修（2026-10-12，commit `86322a6`）
 
 **修法（已落地）**：新增 `vulnclaw/skills/_shared/references/` 共享根 + frontmatter
 `shared_references` 声明机制（`loader.py`）。技能只在自己 SKILL.md 里**声明**要用哪些共享名
