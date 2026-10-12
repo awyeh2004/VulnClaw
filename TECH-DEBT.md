@@ -89,6 +89,27 @@ flag 正则副本曾漂移到 3/17）。
 
 ## 2. 两个"上帝文件"（各 5 千行）
 
+> **2026-10-12 更新**：`builtin_tools.py` 已拆（见下"拆分进度"）；`cli/main.py` 仍待拆。
+
+**拆分进度（2026-10-12，aw 分支，未推）**：
+
+- ✅ **`builtin_tools.py` 5,473 → 2,853 行**：按工具族拆成 `vulnclaw/agent/tools/` 子包——
+  `shell_exec.py`（shell_command 族）/ `python_exec.py` / `nmap.py` / `http_probe.py` /
+  `brute_force.py` / `runtime_diff.py` / `ocr.py` / `pyc.py` / `pdf.py` /
+  `subprocess_util.py` / `_shared.py`（跨族 `_runtime_config`）。`builtin_tools.py` 保留
+  gating/policy/dispatch 与 schema 注册，并**原样 re-export 每个搬走的名字（含私有名）**，
+  旧 import 路径与测试的属性访问全部不变。**每族一笔提交**（8 笔），每笔跑全量。
+  - ⚠️ 两个非显然的坑（下次拆别的族会再遇到）：① 搬走的代码原来吃 `builtin_tools.py` 顶部的
+    stdlib import，搬完就 `NameError`——新模块必须补自己的 import；②
+    `scripts/verify_execution_boundary.py` 的 `ALLOWED_SPAWN_SITES` 键含文件路径，搬迁会让
+    旧键 stale、新键未登记——**必须同笔提交里删旧加新**（该守卫专门逼人复查每个 spawn 点）。
+  - `_bg_*`（后台任务族）**刻意不拆**：有模块级可变状态（`_bg_tasks` dict / `_bg_seq` 经
+    `global` 重绑 / `_bg_lock`），测试按属性访问并 `clear()`，拆了会产生孤儿副本——属单独设计任务。
+- ⏳ **`cli/main.py` 5,355 行仍待拆**（下一条的"修法"仍适用）；拆时顺手修
+  `_print_cli_manual` 双定义（`:3610` 与 `:4368`，后者静默覆盖前者）。
+
+以下为原始记录（留存供对照）：
+
 | 行数 | 文件 |
 |---|---|
 | **5,473** | `vulnclaw/agent/builtin_tools.py` |
