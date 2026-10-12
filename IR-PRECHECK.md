@@ -10,12 +10,12 @@
 
 | 项 | 当前值 | 需要动吗 |
 |---|---|---|
-| `session.task_mode` | **`pentest`** | ⚠️ **12:20 进应急段前改 `ir`** |
+| `session.task_mode` | **`ir`**（10-11 应急段切过；备份 `config.yaml.bak-20261011-before-ir`） | 下次打**渗透**段前改回 `pentest` |
 | `safety.permission_mode` | `full_access` | 不改（副驾靠 `copilot.cmd` 那层） |
 | `safety.denied_hosts` | `['tp.qianxin.com']` | ✅ 对 |
 | `competition.allow_flag_submission` | `False` | ✅ 对（提交由人做） |
 | `competition.stall_turns` | `6` | ✅ 对 |
-| `remote.hosts` | **空** | ✅ 已清；现场要 agent 直连时再填跳板机 |
+| `remote.hosts` | **空** | ✅ 保持空 —— **除了 VPN 直连场景**（拨上 VPN 后要 agent 直连才填） |
 | `platforms.ctf2/gcs` | 双关 | ✅ 对 |
 | `network.http_proxy` | 空 | ✅ 对（搭隧道时才设） |
 
@@ -66,6 +66,7 @@ vulnclaw config get safety.denied_hosts
 |---|---|
 | 08:30 | 到场签到（**开赛 30 分钟后禁止入场**） |
 | 09:00–09:30 | 登录 → 任务中心 →【进入演练】→ 读规则说明 → 看拓扑（**点一下能看到 IP**） |
+| **09:30 第一件事** | ⭐ **找 VPN 拨入通道**：拓扑里右键「数字VPN设备」→【VPN信息】拿账号密码 → 本机 VPN 拨入（L2TP/IPSec、共享密钥 `vpn`、服务器=平台登录IP）→ `route print -4` 确认靶网段出现 |
 | 09:30–09:40 | **分诊**：记分值 / 解锁关系 / 每题"网页终端还是直连"→ 填网络清单（`#N IP ★`） |
 | 09:40 | **过收束点**，然后开打 |
 | 11:30 | 停止开新题，核对 flag 都交了 |
@@ -77,6 +78,10 @@ vulnclaw config get safety.denied_hosts
 **收束点 5 条**（没全绿不许开打）：
 ① 分诊表在手　② 副驾会话能起且提示符 `vulnclaw Ready>`　③ `COPILOT_DENY` 横幅出现
 ④ `remote.hosts` 状态明确　⑤ 计时与台账有人
+
+**⭐ VPN 判定（10-11 实付代价换来的，开场必做）**：拨上 VPN 后先确认目标服务与授权，不能仅凭路由可达就认定可自动采集。`remote_collect` 在整体审批后自动探测 OS：Linux 保持 POSIX/tar.gz；Windows 需要**可达 SSH + PowerShell**，走只读 UTF-8 长度帧临时**单文件**回传（base64 传输，不用 zip/tar）。
+VPN 不会启用 WinRM/RDP，也不会创建 SSH；缺 SSH/PowerShell 或探测未知/歧义时，退回 `remote_exec` / `remote_fetch`（有 SSH 时）或人工副驾。真实 Windows SSH/PowerShell E2E **未验证**，现场要单独验收。
+只有网页终端可用时按 [IR-FIELD-CARD.md](IR-FIELD-CARD.md) §0.1 的信道速查走（短则截图、长则 base64、成批则上传 `.txt` 脚本）。
 
 ---
 
@@ -93,7 +98,19 @@ vulnclaw config get safety.denied_hosts
 | 项 | 状态 |
 |---|---|
 | Docker Desktop | **未运行** → 本地演练靶（ir-drill 等）暂时用不了；**不影响比赛**（靶场在平台侧） |
-| 本机有 **2 笔未推提交** | 需要时说一声推；不推也不影响现场使用 |
+| 本机有未提交文档 | `HANCLOUD-SITREP.md` / `IR-EXAM-PLAN.md` 未跟踪、`IR-PENTEST-HANCLOUD.md` 已改；需要时说一声推 |
 | 全量测试 | 4932 passed / **1 failed** —— 那条是 Windows 保留端口 1455 导致的环境问题，与代码无关（已用 `git stash` 证明） |
 | 一键注入的召回 | 可用但**不精**：命中的 2 篇里常有一篇 `autonotes-*`（自动笔记，与干货同分）——按 slug 取舍 |
-| 真 Windows 跳板端到端 | 未验（本机 WSL2 跑不了 Windows 容器）；已验到"`remote_collect` 全 POSIX 不可用 / 免批只认 CMD 原生命令" |
+| 真 Windows 跳板端到端 | **未验证**（本机无真实 Windows SSH/PowerShell 环境）；代码/模拟覆盖自动 OS probe、只读 framed 单文件路径；现场仍需验证 SSH + PowerShell 可达性 |
+
+## 七、10-11 实战复盘（下一场开场前过一遍）
+
+| 教训 | 下一场怎么做 |
+|---|---|
+| **没先拨 VPN**，两场全程只在网页控制台里敲 ⇒ agent 无法直连，效率被信道掐死 | **开场第一件事找 VPN**（见第四节）；拨上再决定模式 |
+| 长命令粘到控制台**必掉字符**（`\f` 翻页、引号丢、残字粘连） | 命令压到 **≤100 字符**；成批走**上传 `.txt` 脚本** |
+| 控制台**不能复制文字** ⇒ 靠截图 ⇒ agent 读图反复出错（`SourceFireSux` 读成 `SourceFireSIXTHe`、`id` 读成 `mirror`） | **字符串类答案一律打印字符码/长度**；长输出回传 **base64 一行** |
+| 一道题连发多条**口径不明**的计数命令（Q10 试 79/81/82/65 全错） | **先用一条命令打印所有候选口径**，再判交哪个 |
+| 凭 pcap 帧号序推"JNDI 第一条命令"（Q4 推 `id`，实测错） | 顺序类题目**按日志/时间戳判**，不能按抓包帧号 |
+
+> 传输手法全表见 [IR-FIELD-CARD.md](IR-FIELD-CARD.md) §0.1；契约文本已含精简版（[`IR-CONTRACT.txt`](IR-CONTRACT.txt) 第 1/2/6 段）。
