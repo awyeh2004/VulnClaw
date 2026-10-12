@@ -136,9 +136,10 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
                    "behind the ExecutionGate in execute_nmap (approval precedes the "
                    "first spawn and the de-escalated retry)",
     },
-    "vulnclaw/agent/builtin_tools.py:run_subprocess_capture:subprocess.run:f57fafd0": {
+    "vulnclaw/agent/tools/subprocess_util.py:run_subprocess_capture:subprocess.run:f57fafd0": {
         "count": 1,
-        "purpose": "run_subprocess_capture helper used by the pyc-analyze tool (PR #265-era module)",
+        "purpose": "run_subprocess_capture helper used by the pyc-analyze tool "
+                   "(moved from builtin_tools.py in the tools/ split; body unchanged)",
     },
     "vulnclaw/report/verifier.py:VerifierExecutor.execute_poc:run_text:90b02123": {
         "count": 1,
