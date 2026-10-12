@@ -226,7 +226,7 @@ remote:
 | 工具 | 用途 |
 |---|---|
 | `remote_hosts` | 列出已配置别名（先跑这个，别猜主机名） |
-| `remote_collect` | ⭐ **一次性只读采集 33 段**并打包拉回本地、自动解包 |
+| `remote_collect` | ⭐ **一次性只读采集 33 段**并拉回本地：Linux 走 POSIX/tar.gz；Windows 自动走只读 PowerShell framed 单文件回传（不打包） |
 | `remote_exec` | 在远程跑单条命令 |
 | `remote_fetch` | SFTP 取单个大文件（内存镜像、pcap） |
 
@@ -860,20 +860,14 @@ pip install 'vulnclaw[socks]'   # SOCKS 需要 socksio
 | 3 | **`-D` 下 `--only-host` 判别力** | ✅ 保持 | 作用域 `10.20.0.0/16`：`172.19.0.2` → **被拒**、`10.20.0.30` → 放行 |
 | 4 | **`-L` 反例（为什么不能用）** | ❌ 实测坐实 | `-L 18080:172.19.0.2:8080` 隧道本身**能通**，但 agent 只能写 `http://127.0.0.1:18080` ⇒ ① 作用域闸看到的 host 是 `127.0.0.1`（**判别力归零**）；② `is_local_target()` 判它为**本地** ⇒ 客户端**直连、根本不走隧道**。**两个独立原因都指向同一结论：`-L` 不可用。** |
 
-**Windows 跳板机（原"Win跳板未验"）—— 验了能验的部分，结论是"命令面要整个换"**：
+**Windows 跳板机（原“Win跳板未验”）——自动探测已接入；真实 Windows SSH/PowerShell 端到端仍未验证**：
 
-- **`remote_collect` 在 Windows 上整条不可用**（已核代码）：33 段采集命令**全是 POSIX sh + `/proc` + `/etc/*`**
-  （`cat /etc/passwd`、`ps auxww`、`for d in /proc/[0-9]*`…）。跳板机是 Windows ⇒ 别指望 `remote_collect`，
-  改用手打 Windows 取证卡（`paste-cards-windows.md`）。
-- **只读分类器只认 CMD 原生，PowerShell 全需批**（实测）：`whoami`/`ipconfig /all`/`systeminfo`/`tasklist`/
-  `net user`/`netstat -ano`/`dir`/`type`/`reg query`/`wmic`/`findstr` → **免批**；
-  但 `Get-Process`/`Get-ChildItem`/`powershell -c "…"` → **一律需批**（不在信任表 / 解释器一律询问）。
-  ⇒ Windows 跳板上想免批跑取证，**优先用 `cmd` 原生命令**，不要习惯性打 `Get-*`。
-- **未验的（诚实说明）**：真正的 Windows 主机 SSH 到 Windows 的端到端——本机 WSL2 后端**跑不了 Windows 容器**，
-  没有真环境。上面两条是从**代码与分类器实测**得出，不是端到端跑通。
-- 另记一个**运维坑（实测踩到）**：本机 `~/.vulnclaw/known_hosts` 里有 10-04 留下的 `[127.0.0.1]:2222` 记录，
-  新跳板机复用同一 host:port ⇒ `BadHostKeyException` **直接连不上**。**现场若跳板机地址与演练环境撞端口，
-  先查 `~/.vulnclaw/known_hosts`**（`host_key_policy: accept_new` 只在"该 host:port 没记录"时才自动接受）。
+- `remote_collect` 会在执行 collector 前先运行一次有界 OS probe；识别为 Windows 后走独立的只读 PowerShell 路径（cmd/PowerShell 原生语义），不再是“整条不可用”。Linux 仍保持 POSIX/tar.gz 路径。探测结果只在本次调用内使用，不写入 `SSHHostConfig`。
+- Windows 路径把各只读 section 写入一个 UTF-8 单文件，以固定 magic、section 名、十进制 UTF-8 字节长度、payload、record terminator 和 end marker 做长度帧回传；本地严格校验后逐 section 写入本机目录，不调用 tar extractor。坏 magic、截断/超长 payload、重复或不安全名称、end marker 后尾随字节都会 fail-closed。
+- 批量采集仍是一次性整体审批，且审批发生在 OS 未知时；审批文本会同时说明 POSIX 与 Windows 两条分支的只读命令、临时单文件回传、本机落盘与清理影响。Windows 临时文件只在 stdout marker 确认后清理本次 collector 自己生成的 artifact；`keep_remote=true` 时保留。
+- 使用前提是目标提供**可达 SSH + PowerShell**；VPN 只提供路由，**不会自动提供 SSH、WinRM 或 RDP**。探测未知/歧义或超时会拒绝执行 collector，并提示改用 `remote_exec`（按目标 shell 语法）或 `remote_fetch`。
+- **未验的（诚实说明）**：本机没有真实 Windows SSH/PowerShell 环境，不能宣称现场实测或端到端闭环。上面的 Windows 路径来自实现与模拟/单测验证。
+- 只读分类器只认 CMD 原生，PowerShell 全需批（实测）：`whoami`/`ipconfig /all`/`systeminfo`/`tasklist`/`net user`/`netstat -ano`/`dir`/`type`/`reg query`/`wmic` → **免批**；但 `Get-Process`/`Get-ChildItem`/`powershell -c "…"` → **一律需批**。
 
 ### ✅ 赛前培训提到的两件事（其一已作废）
 
@@ -1207,13 +1201,10 @@ IR 的输出里全是 `/usr/sbin/cron`、`/var/www/html/uploads`、`/tmp/.x/.kwo
 
 **代码侧的硬事实**（决定用哪个工具）：
 
-- `remote_collect` 发的是 **POSIX `sh` 脚本**（`#!/bin/sh` + `tar`）→ **Windows 上整条不可用**；
-  失败时现在的报错会直接点名"目标像 Windows cmd，请改用 `remote_exec` + `remote_fetch`"
-  （`_windows_target_hint`，2026-10-08 加），但**别等它失败**，先探测。
-- `remote_exec` 是把命令**原样**交给远端 shell（`exec_command`，不开 pty）：
-  Linux 走 sh/bash，**Windows 走 cmd.exe** → 命令必须换成 `dir /a`、`tasklist`、`whoami /all`、
-  `powershell -c "..."` 这类写法，Linux 的 `ls -al` / `ps aux` 一律不认。
-- `remote_fetch` 走 SFTP，两端都可用（Windows 路径写 `C:/Users/...`）。
+- `remote_collect` 会先执行一次有界 OS probe，再自动选择 collector：Linux 走现有 POSIX `sh` + `tar.gz`；Windows 走只读 PowerShell framed 单文件回传，不打包。探测未知/歧义/超时会 fail-closed，改用 `remote_exec` 或 `remote_fetch`。
+- Windows 自动路径要求目标同时具备**可达 SSH + PowerShell**。VPN 只提供路由，不会凭空创建 SSH、WinRM 或 RDP；没有 SSH 时仍需网页终端/人工路径。
+- Windows 回传文件使用 UTF-8 长度帧（固定 magic、section 名、十进制 UTF-8 byte length、payload、record terminator、end marker）；本地严格解析并逐 section 落盘，Windows 不调用 tar extractor。`keep_remote=false` 时仅在 stdout marker 确认后清理本次生成 artifact；`keep_remote=true` 保留。
+- **真实 Windows SSH/PowerShell 端到端仍未验证**，不要把模拟/单测写成现场实测。
 
 **探测结果写进别名备注**，agent 调 `remote_hosts` 就能直接看到该用哪套语法：
 
@@ -1224,7 +1215,7 @@ remote:
       hostname: 10.20.0.1
       username: <给的用户>
       password: <给的密码>
-      note: "Windows 10 (OpenSSH_for_Windows) — 用 cmd/PowerShell 语法；remote_collect 不可用"
+      note: "Windows 10 (OpenSSH_for_Windows) — remote_collect 自动探测后走 PowerShell framed 单文件；需 SSH + PowerShell；真实 E2E 未验证"
 ```
 
 > ⭐ 渗透那条线（OA + webshell）也补了一张卡：

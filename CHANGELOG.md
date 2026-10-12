@@ -1,4 +1,12 @@
-# 更新日志
+<details open>
+<summary><strong>Unreleased</strong> — remote_collect 自动 OS 探测与 Windows 只读 framed 单文件回传</summary>
+
+- **新增**：`remote_collect` 在单次批量审批后先执行有界 OS probe；Linux 保持既有 33 段 POSIX/tar.gz collector，Windows 改走只读 PowerShell collector，不依赖 zip/tar。
+- **Windows 回传**：各 section 写入一个 UTF-8 长度帧单文件，经 base64 传输；帧含固定 magic、section 名、十进制 UTF-8 byte length、payload、record terminator 与 end marker。严格本地解析拒绝坏 magic、截断/超长 payload、重复或不安全名称、end marker 后尾随字节，并逐 section 落盘，继续执行 overwrite 保护。
+- **清理与边界**：仅在 stdout marker 确认后清理本次 collector 生成的远端 artifact；`keep_remote=true` 保留。Windows 路径不调用 tar extractor。目标必须有可达 SSH + PowerShell；VPN 只提供路由，不会创建 SSH 或启用 WinRM/RDP。探测未知/歧义/超时 fail-closed，退回 `remote_exec` / `remote_fetch`。
+- **验证范围**：真实 Windows SSH/PowerShell 端到端仍未验证，不宣称现场实测；保留真实环境验证项。
+
+</details>
 
 ---
 
@@ -238,7 +246,7 @@
 - **文档** — `IR-RUNBOOK.md` 新增"五点五、赛前缺口清单（10/10 复核用）"：把 2026-10-08 实测出的未补缺口按 P0/P1/P2 分级并附证据（AI 辅助合规未问、录屏与磁盘空间（C: 15.5 GB / D: 17.9 GB 可用）、**LLM 凭据单点：`llm.api_keys` 仅 1 条、zhipu key 已失效**（单次失败硬题实测烧 3.14M prompt + 0.16M completion tokens / 70 请求，`solve_max_model_tokens` 现值 6M）、无"可粘贴短命令卡"、`chrome-devtools` MCP 实为 placeholder 且从未下载（`_npx` 缓存为空）、`report --pdf` 缺 weasyprint 而 `python-docx` 可用、无端到端彩排、时间盒与分工未定、`remote_*` 未真机验证且 paramiko 仅 2.8.1（rsa-sha2 需 2.9+）、`uvx` 缺失、burp/ctf2 MCP placeholder）。
 - **比赛策略 skill 补两条** — `competition-mode`：①**提交的例外**——赛事禁止 agent 联平台/要求人工提交时（判据：赛方明令 + 平台地址被 `safety.denied_hosts` 拉黑），只交付 flag 并给证据，不打开 `competition.allow_flag_submission`；②**名次权重（一血/二血/三血）**——速度优先于深度、先做零环境依赖题、链式解锁时一题一交付。
 - **文档** — `IR-RUNBOOK.md` 第五节再补 10/9 赛前培训（朱禹）确认的赛事事实：日程（8:30 签到 / 9:30–12:00 渗透 / 12:20–15:30 应急 / 15:30 颁奖，**开赛 30 分钟后禁止入场**）、**一血/二血/三血速度权重**、平台操作路径（任务中心 → 拓扑 → 右键攻击机控制台 → 内置账号密码）、**链式解锁**、**内置工具库供下载**、现场网线（可连比赛环境与互联网）、**部分题需 VPN 登录 + 提交演练报告（WP）**、违规四条（跨组交流 / 攻击平台 / **C2 类非有效登录或远程操作** / **全程录屏 9:30–15:30**）；新增"自动化边界"表（平台与跳板机一律人操作、本机分析与 VPN 类题目 agent 可驱动）与 WP/一血两项交付物说明；待确认清单收敛为 7 项并标注朱禹的三条群内待办。
-- **文档（同日更早一批）** — 补记接入形态（官方网线 → **跳板机** → 靶场）、IR 作答形式（**经跳板机远程排查 + 找隐藏 flag**）、**平台内置工具库**（本机工具退回离线/兜底；工具清单写进 `remote.hosts.<alias>.note` 供 `remote_hosts` 渲染；附任务 prompt 模板）、**题目链式解锁**（flag 必须提交但**提交由人做**，agent 只交付不提交，goal 措辞已给）、**操作入口=平台网页端右键开终端**（确认后 `remote_*` 从主路径**降级为备选**，主路径改为"人打字 + agent 出命令"的**副驾模式**，含四条纪律与 prompt 模板）、**攻击机系统未知**（现场先定性的探测表 + `remote_collect` 仅 POSIX 的硬事实）与**"隧道 / 浏览器驱动 agent"两个问题的技术结论**（跳板机一人一连的席位冲突；`http_client.py` 对私网/回环目标刻意 `trust_env=False` 导致 SOCKS 不生效、`-L` 转发下作用域闸只看到 `127.0.0.1`；`chrome-devtools` MCP 虽已启用但自动操作平台 UI 属高风险，中间路线=人粘贴、agent 只生成）；网络可达性节补充"国内实测可达，要问的是国外与公网出口"。
+- **文档（同日更早一批）** — 补记接入形态（官方网线 → **跳板机** → 靶场）、IR 作答形式（**经跳板机远程排查 + 找隐藏 flag**）、**平台内置工具库**（本机工具退回离线/兜底；工具清单写进 `remote.hosts.<alias>.note` 供 `remote_hosts` 渲染；附任务 prompt 模板）、**题目链式解锁**（flag 必须提交但**提交由人做**，agent 只交付不提交，goal 措辞已给）、**操作入口=平台网页端右键开终端**（确认后 `remote_*` 从主路径**降级为备选**，主路径改为"人打字 + agent 出命令"的**副驾模式**，含四条纪律与 prompt 模板）、**攻击机系统未知**（现场先定性的探测表 + `remote_collect` 自动 OS probe；Linux 仍 POSIX/tar.gz，Windows 走只读 PowerShell framed 单文件路径）与**"隧道 / 浏览器驱动 agent"两个问题的技术结论**（跳板机一人一连的席位冲突；`http_client.py` 对私网/回环目标刻意 `trust_env=False` 导致 SOCKS 不生效、`-L` 转发下作用域闸只看到 `127.0.0.1`；`chrome-devtools` MCP 虽已启用但自动操作平台 UI 属高风险，中间路线=人粘贴、agent 只生成）；网络可达性节补充"国内实测可达，要问的是国外与公网出口"。
 - **新增 IR 找 flag 落点清单** — `skills/specialized/incident-response/references/flag-landing-spots.md`：赛方材料明确"要找隐藏的 flag"后补的**解题交付卡**（五步作业顺序：内容搜 → 时间圈定 → 进程/环境 → 服务侧 → 变形解码；Linux/Windows 落点表；已删除文件、磁盘未分配区、数据库、日志、ADS；编码变形对照；常见坑与"搜不到时怎么体面收尾"）。`SKILL.md` 的"常见提问 → 检索路径"与参考文档索引各加一条；`.ir-tools/verify-ir.py` 自检 **PASS=97 FAIL=0**。
 - **`remote_collect` 在 Windows 目标上给出可执行的下一步** — 攻击机/跳板机的系统不由赛方公布，而 `remote_collect` 发的是 POSIX `sh` 脚本（`#!/bin/sh` + `tar`），在 Windows 上每一步都失败、现场只看得到"no archive produced"。新增 `_windows_target_hint(stderr)`：仅当 stderr 里出现 cmd.exe 自有诊断（`is not recognized as an internal or external command` / `The system cannot find the path specified` / `was unexpected at this time`）时，才在报错后追加"目标像 Windows cmd，请改用 `remote_exec`（cmd/PowerShell 语法）+ `remote_fetch`"；POSIX 端的一般失败（`tar: not found`、`Permission denied`）不会触发，避免把操作者引到错方向。测试见 `tests/security/test_remote_collector_integrity.py::TestWindowsTargetHint`。
 - **新增 OA / 产品化 Web 系统 → webshell 卡片** — `skills/specialized/web-security-advanced/references/web-oa-webshell.md`：赛题明确"获取 OA 系统漏洞并植入 webshell"后补的**渗透交付卡**（产品指纹表（泛微/致远/通达/蓝凌…，要求两条互相印证）、能出 shell 的漏洞族、上传后缀与解析差异（白名单/黑名单/多后缀/`;`/`%00`/Tomcat `;jsessionid=`）、上传目录可访问性、无回显三法（回显/时间盲/带外）、落马后取证与"按 `flag-landing-spots.md` 找 flag"顺序、7 个高频坑）。`web-security-advanced/SKILL.md` 的场景路由与参考索引、`web-pentest/SKILL.md` 的文件上传条目各加指针。

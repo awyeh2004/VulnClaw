@@ -185,7 +185,7 @@ routing:
 | 工具 | 用途 |
 |---|---|
 | `remote_hosts` | 先看有哪些已配置的主机别名 |
-| `remote_collect` | ⭐ 一次性只读采集 33 段并拉回本地（现场固化，最先做） |
+| `remote_collect` | ⭐ 一次性只读采集 33 段并拉回本地：自动探测 OS；Linux 走 POSIX/tar.gz，Windows 走只读 PowerShell framed 单文件回传（不打包） |
 | `remote_exec` | 在远程跑单条命令（走**同一个**只读审批门） |
 | `remote_fetch` | SFTP 取单个大文件/二进制（内存镜像、pcap） |
 

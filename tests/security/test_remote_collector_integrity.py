@@ -214,6 +214,10 @@ class TestCleanupConfirmationReadsStdout:
 
         def fake_capture(host, alias, command, **kwargs):
             calls.append(command)
+            if command == "uname -s":
+                return b"Linux\n", "", ""
+            if command == "cmd /c ver":
+                return b"", "", ""
             if "base64" in command:  # archive download
                 import base64 as b64
                 blob = b64.b64encode(_make_tar())
@@ -240,6 +244,10 @@ class TestCleanupConfirmationReadsStdout:
         monkeypatch.setattr(remote, "validate_collector_commands", lambda: [])
 
         def fake_capture(host, alias, command, **kwargs):
+            if command == "uname -s":
+                return b"Linux\n", "", ""
+            if command == "cmd /c ver":
+                return b"", "", ""
             if "base64" in command:
                 import base64 as b64
                 return b64.b64encode(_make_tar()), "", ""

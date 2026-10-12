@@ -65,6 +65,7 @@ import shlex
 import tarfile
 import tempfile
 import time
+import uuid
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -497,6 +498,7 @@ def run_command_capture(
     *,
     connect_timeout: float = 15.0,
     timeout_s: float = 300.0,
+    stdin_data: bytes | None = None,
 ) -> tuple[bytes, str, str]:
     """Run a command and return RAW stdout bytes plus (stderr text, error).
 
@@ -514,6 +516,9 @@ def run_command_capture(
         chan = transport.open_session()
         chan.settimeout(max(1.0, timeout_s))
         chan.exec_command(command)
+        if stdin_data is not None:
+            chan.sendall(stdin_data)
+            chan.shutdown_write()
         raw_out, raw_err, timed_out, err = _drain(chan, timeout_s)
         if timed_out:
             return raw_out, raw_err.decode("utf-8", "replace"), "timeout"
@@ -644,7 +649,7 @@ def validate_collector_commands() -> list[str]:
             problems.append(f"empty name or command: {name!r}")
         if "\n" in cmd or "\r" in cmd:
             problems.append(f"{name!r}: command spans multiple lines")
-        if name in seen:
+        if name.lower() in seen:
             problems.append(f"duplicate section name: {name!r}")
         seen.add(name)
         if not re.fullmatch(r"[A-Za-z0-9_]+", name):
@@ -921,6 +926,133 @@ def _collector_script(out_dir: str, *, keep_remote: bool = False) -> str:
 
 
 COLLECT_MARKER = "=== COLLECTED ==="
+
+# ── Windows framed collector ─────────────────────────────────────────────
+
+WINDOWS_FRAME_MAGIC = b"VCLAW-FRAME-1\n"
+WINDOWS_FRAME_END = b"VCLAW-END-1\n"
+_WINDOWS_SECTION_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_WINDOWS_MAX_SECTION = 120
+_WINDOWS_MAX_PAYLOAD = 64 * 1024 * 1024
+
+
+def _windows_collector_commands() -> list[tuple[str, str]]:
+    """Read-only PowerShell snippets used on Windows targets."""
+    return [
+        ("identity", "Get-CimInstance Win32_OperatingSystem | Format-List *; whoami /all; hostname; (Get-Date).ToUniversalTime()"),
+        ("accounts", "Get-LocalUser | Format-List *; Get-LocalGroup | Format-List *; net user"),
+        ("groups", "Get-LocalGroup | ForEach-Object { Write-Output ('=== ' + $_.Name + ' ==='); Get-LocalGroupMember $_.Name -ErrorAction SilentlyContinue }"),
+        ("processes", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | Format-List"),
+        ("services", "Get-CimInstance Win32_Service | Select-Object Name,State,StartMode,StartName,PathName | Format-List"),
+        ("scheduled_tasks", "Get-ScheduledTask | Select-Object TaskPath,TaskName,State,Author,Actions,Triggers | Format-List"),
+        ("network", "Get-NetTCPConnection -ErrorAction SilentlyContinue | Format-List; Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Format-List; ipconfig /all"),
+        ("firewall", "Get-NetFirewallProfile -ErrorAction SilentlyContinue | Format-List; Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object Enabled -eq True | Select-Object Name,DisplayName,Direction,Action | Format-List"),
+        ("event_log", "Get-WinEvent -LogName System -MaxEvents 200 -ErrorAction SilentlyContinue | Format-List; Get-WinEvent -LogName Security -MaxEvents 200 -ErrorAction SilentlyContinue | Format-List"),
+        ("powershell_history", "Get-ChildItem -Path 'C:\\Users' -Filter ConsoleHost_history.txt -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ('=== ' + $_.FullName + ' ==='); Get-Content $_.FullName -ErrorAction SilentlyContinue }"),
+        ("run_keys", "Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue; Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue"),
+        ("startup", "Get-ChildItem 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup','C:\\Users\\*\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup' -Force -ErrorAction SilentlyContinue | Format-List FullName,Length,LastWriteTime"),
+        ("web_temp", "Get-ChildItem 'C:\\inetpub','C:\\Windows\\Temp','C:\\Users\\*\\AppData\\Local\\Temp' -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Select-Object FullName,Length,LastWriteTime | Format-List"),
+        ("shares", "Get-SmbShare -ErrorAction SilentlyContinue | Format-List; net share"),
+        ("installed_software", "Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Select-Object DisplayName,DisplayVersion,Publisher,InstallDate | Format-List"),
+    ]
+
+
+def _parse_windows_frames(data: bytes) -> list[tuple[str, bytes]]:
+    """Strictly parse the Windows collector's byte protocol."""
+    if len(data) > _WINDOWS_MAX_PAYLOAD:
+        raise ValueError("Windows collection too large")
+    if not data.startswith(WINDOWS_FRAME_MAGIC):
+        raise ValueError("missing Windows collector magic")
+    pos = len(WINDOWS_FRAME_MAGIC)
+    seen: set[str] = set()
+    records: list[tuple[str, bytes]] = []
+    while True:
+        end = data.find(b"\n", pos)
+        if end < 0:
+            raise ValueError("truncated Windows collector header")
+        header = data[pos:end]
+        pos = end + 1
+        if header == WINDOWS_FRAME_END.rstrip(b"\n"):
+            if pos != len(data):
+                raise ValueError("trailing bytes after Windows collector end marker")
+            if not records:
+                raise ValueError("empty Windows collection")
+            return records
+        parts = header.split(b" ")
+        if len(parts) != 3 or parts[0] != b"SECTION":
+            raise ValueError("invalid Windows collector section header")
+        try:
+            name = parts[1].decode("ascii")
+            length = int(parts[2].decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            raise ValueError("invalid Windows collector section header") from None
+        if not _WINDOWS_SECTION_RE.fullmatch(name) or len(name) > _WINDOWS_MAX_SECTION:
+            raise ValueError("unsafe Windows collector section name")
+        if name.lower() in seen:
+            raise ValueError(f"duplicate Windows collector section: {name}")
+        if not re.fullmatch(rb"0|[1-9][0-9]*", parts[2]) or length > _WINDOWS_MAX_PAYLOAD:
+            raise ValueError("invalid Windows collector section length")
+        if pos + length + 1 > len(data):
+            raise ValueError("truncated Windows collector payload")
+        payload = data[pos:pos + length]
+        pos += length
+        if data[pos:pos + 1] != b"\n":
+            raise ValueError("missing Windows collector record terminator")
+        pos += 1
+        payload.decode("utf-8", "strict")
+        if name.lower() in {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1,10)), *(f"lpt{i}" for i in range(1,10))}:
+            raise ValueError("reserved Windows section name")
+        seen.add(name.lower())
+        records.append((name, payload))
+
+
+def _windows_temp_expression(token: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("invalid generated token")
+    return "[IO.Path]::Combine([IO.Path]::GetTempPath(), 'vulnclaw-" + token + ".frames')"
+
+
+def _windows_collector_script(token: str = "0" * 32) -> str:
+    """Trusted code delivered via stdin; only evidence is persisted remotely."""
+    lines = [
+        "$ErrorActionPreference='Stop'",
+        "$utf8=New-Object System.Text.UTF8Encoding($false)",
+        "$path=" + _windows_temp_expression(token),
+        "$out=New-Object IO.FileStream($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)",
+        "function Emit([string]$name,[string]$text) { $b=$utf8.GetBytes($text); $h=[Text.Encoding]::ASCII.GetBytes(('SECTION '+$name+' '+$b.Length+[char]10)); $out.Write($h,0,$h.Length); $out.Write($b,0,$b.Length); $out.WriteByte(10) }",
+        "try {",
+        "$m=[Text.Encoding]::ASCII.GetBytes(('VCLAW-FRAME-1'+[char]10)); $out.Write($m,0,$m.Length)",
+    ]
+    for name, command in _windows_collector_commands():
+        lines.append("try { $v=(& { " + command + " } 2>&1 | Out-String); Emit '" + name + "' $v } catch { Emit '" + name + "' ($_ | Out-String) }")
+    lines += [
+        "$m=[Text.Encoding]::ASCII.GetBytes(('VCLAW-END-1'+[char]10)); $out.Write($m,0,$m.Length)",
+        "} finally { $out.Dispose() }",
+        "[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+WINDOWS_BOOTSTRAP = "& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))))"
+
+
+def _probe_os_result(stdout: bytes, stderr: str, error: str) -> str | None:
+    """Classify a probe result; ambiguity is deliberately not guessed."""
+    text = (stdout or b"").decode("utf-8", "replace").lower()
+    err = (stderr or "").lower()
+    if error:
+        return None
+    windows = any(x in text for x in ("microsoft windows", "windows", "win32_nt"))
+    posix = any(x in text for x in ("linux", "darwin", "freebsd", "openbsd", "sunos"))
+    if windows and not posix:
+        return "windows"
+    if posix and not windows:
+        return "posix"
+    # A successful `ver` probe often writes only to stderr through wrappers.
+    if "microsoft windows" in err and not posix:
+        return "windows"
+    return None
+
 
 #: Shell diagnostics that can only come from a Windows target's cmd.exe. The
 #: competition hands out attack machines whose OS is not published (2026-10-08:
@@ -1293,6 +1425,81 @@ async def execute_remote_tool(agent: Any, tool_name: str, args: dict[str, Any]) 
     return f"[!] Unknown remote tool: {tool_name}"
 
 
+def _probe_remote_os(host: Any, alias: str, *, connect_timeout: float, timeout_s: float = 20.0) -> tuple[str | None, str]:
+    """Run bounded, shell-compatible probes and fail closed on ambiguity."""
+    details: list[str] = []
+    for command in ("uname -s", "cmd /c ver"):
+        stdout, stderr, error = run_command_capture(
+            host, alias, command, connect_timeout=connect_timeout, timeout_s=timeout_s
+        )
+        detail = (error or stderr or stdout.decode("utf-8", "replace")).strip()
+        if detail:
+            details.append(detail[:160])
+        kind = _probe_os_result(stdout, stderr, error)
+        if kind:
+            return kind, detail[:300]
+    return None, "; ".join(details) or "all OS probes returned empty output"
+
+
+def _write_windows_sections(data: bytes, dest: Path, *, overwrite: bool) -> tuple[bool, str, list[str]]:
+    try:
+        records = _parse_windows_frames(data)
+        for part in (dest, *dest.parents):
+            if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+                raise ValueError("symlink/junction local path refused")
+        dest.mkdir(parents=True, exist_ok=True)
+        clashes = [str(dest / f"{name}.txt") for name, _ in records if (dest / f"{name}.txt").exists()]
+        if clashes and not overwrite:
+            return False, f"refusing to overwrite {clashes[0]}", []
+        sections: list[str] = []
+        for name, payload in records:
+            path = dest / f"{name}.txt"
+            if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                raise ValueError("symlink/junction output path refused")
+            path.write_bytes(payload)
+            sections.append(path.name)
+        return True, f"{len(records)} framed sections", sections
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}", []
+
+
+async def _do_collect_windows(
+    agent: Any, config: Any, host: Any, alias: str, out_dir: str,
+    local_dir: Path, keep_remote: bool, overwrite: bool, connect_timeout: float,
+) -> str:
+    started = time.perf_counter()
+    token = uuid.uuid4().hex
+    result = CollectorResult(alias=alias, hostname=str(_hv(host, "hostname")), commands=[c for _, c in _windows_collector_commands()])
+    script = _windows_collector_script(token)
+    bootstrap = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))))\""
+    stdout, stderr, error = await asyncio.to_thread(
+        run_command_capture, host, alias, bootstrap,
+        stdin_data=base64.b64encode(script.encode("utf-8")), connect_timeout=connect_timeout, timeout_s=900.0,
+    )
+    try:
+        if error or stderr.strip():
+            raise ValueError(error or stderr[:500])
+        data = base64.b64decode(stdout, validate=True)
+        ok, msg, sections = _write_windows_sections(data, local_dir, overwrite=overwrite)
+        if not ok:
+            raise ValueError(msg)
+    except Exception as exc:
+        result.errors.append(f"Windows frame parse/write failed: {exc}; generated remote file may remain")
+        result.duration_s = time.perf_counter() - started
+        return result.render()
+    result.archive_path, result.archive_bytes, result.sections = str(local_dir), len(data), sections
+    if not keep_remote:
+        path_expr = _windows_temp_expression(token)
+        cleanup = f"$p={path_expr}; Remove-Item -LiteralPath $p -Force; if (Test-Path -LiteralPath $p) {{ throw 'cleanup failed' }}; [Console]::Out.Write('CLEANED')"
+        out, err, cerr = await asyncio.to_thread(run_command_capture, host, alias, cleanup, connect_timeout=connect_timeout, timeout_s=60.0)
+        if cerr or err.strip() or out.strip() != b"CLEANED":
+            result.errors.append("remote Windows cleanup did not confirm; generated file may remain")
+        else:
+            result.remote_cleaned = True
+    result.duration_s = time.perf_counter() - started
+    return result.render()
+
+
 async def _do_collect(
     agent: Any,
     config: Any,
@@ -1334,22 +1541,41 @@ async def _do_collect(
             "pick a new/empty directory."
         )
 
-    # Approve the batch ONCE, showing every remote step AND the local destination.
+    # One approval covers bounded probes and both conditional collection branches.
+    windows_commands = "\n".join(f"  {name}: {cmd}" for name, cmd in _windows_collector_commands())
+    approval_text = (
+        "AUTOMATIC OS DETECTION (runs only after approval): uname -s; cmd /c ver; "
+        "empty/unknown/contradictory results fail closed.\n"
+        "CONDITIONAL POSIX BRANCH:\n" + collect_plan(
+            config, out_dir=out_dir, local_dir=local_dir,
+            keep_remote=keep_remote, overwrite=overwrite,
+        ) + "\nCONDITIONAL WINDOWS BRANCH (read-only PowerShell 5.1+):\n" + windows_commands
+        + "\nWindows returns strict UTF-8 length-framed sections; no tar/zip. "
+        + ("Keep the generated exact temporary file." if keep_remote else
+           "After local parse/write, remove only the generated exact temporary file and confirm absence.")
+    )
     outcome = await _authorize(
-        agent, config, host, alias,
-        collect_plan(
-            config,
-            out_dir=out_dir,
-            local_dir=local_dir,
-            keep_remote=keep_remote,
-            overwrite=overwrite,
-        ),
-        f"batch collection | remote scratch dir {out_dir} | local unpack dir "
-        f"{local_dir} | keep_remote={keep_remote}",
+        agent, config, host, alias, approval_text,
+        f"batch collection | automatic OS detection | local dir {local_dir} | keep_remote={keep_remote}",
     )
     if not outcome.approved:
         return outcome.refusal_text("remote_collect")
 
+    os_kind, probe_detail = await asyncio.to_thread(
+        _probe_remote_os, host, alias, connect_timeout=connect_timeout
+    )
+    if os_kind is None:
+        return (
+            f"[!] remote_collect: could not determine target OS safely ({probe_detail}). "
+            "Use remote_exec with an explicit read-only command, or remote_fetch."
+        )
+    if os_kind == "windows":
+        return await _do_collect_windows(
+            agent, config, host, alias, out_dir, local_dir, keep_remote,
+            overwrite, connect_timeout,
+        )
+
+    # POSIX path: retain the established approval and tar.gz implementation below.
     started = time.perf_counter()
     result = CollectorResult(
         alias=alias,

@@ -91,7 +91,7 @@ $b = [System.IO.File]::ReadAllBytes($f.FullName)[0..15]
 
 ### 2.1 用工具一键采集（推荐）
 
-agent 有 `remote_collect` 工具，对已配置的主机跑 33 段只读采集并打包回来：
+agent 有 `remote_collect` 工具，对已配置的主机执行一次性 33 段只读采集并拉回本地：Linux 使用现有 POSIX/tar.gz 路径；Windows 自动改走只读 PowerShell 的 UTF-8 长度帧**单文件**回传（不使用 zip/tar）。Windows 分支要求可达 SSH + PowerShell；VPN 只提供路由，不会创建 SSH，也不会启用 WinRM/RDP。真实 Windows SSH/PowerShell 端到端仍未验证。
 
 ```
 remote_hosts                     # 先看有哪些主机别名
@@ -111,7 +111,7 @@ systemd、启动项、`ld.so.preload`、历史命令、Web 根目录与上传目
 
 ### 2.2 手工采集（没有工具时）
 
-`remote_collect` 的采集脚本本身就是一份可读的清单。核心几条手工版：
+`remote_collect` 的采集脚本本身就是一份可读的清单。以下核心手工版是 **Linux/POSIX-only fallback**：
 
 ```bash
 # 现场固化：把关键目录打包（⚠️ 不要打包整个 /）
