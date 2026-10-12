@@ -4365,18 +4365,6 @@ def feedback(
     )
 
 
-def _print_cli_manual(topic: Optional[str], output_format: str) -> None:
-    """Print the packaged CLI manual, normalizing user-facing errors."""
-    try:
-        console.out(render_manual(output_format, topic), end="")
-    except ValueError as exc:
-        err_console.print(f"[!] {exc}")
-        err_console.print(f"    Available topics: {', '.join(available_topics())}")
-        raise typer.Exit(1) from exc
-
-
-
-
 def _emit_op_result(result: "experience_ops.OpResult") -> None:
     """Print a shared-op result, routing failures to typer.Exit(1)."""
     if result.ok:
