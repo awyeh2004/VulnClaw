@@ -123,6 +123,17 @@ def is_placeholder_flag(flag: str) -> bool:
         return True
     if body and not re.search(r"[A-Za-z0-9]", body):
         return True
+    # Code/CSS/JS bodies, with or without a prefix. The flag regex matches CSS
+    # declarations and JS blocks verbatim (`root{--paper:#f4ecdc;...}`,
+    # `h1{font-size:2.1em;...}`, `try{out(atob(f.body));}`), and on the
+    # 2026-10-12 runs those filled the solve report's key-evidence list as
+    # "flag-like tokens". No real flag body carries statement separators,
+    # parens or a CSS custom-property prefix — they would break every shell
+    # quoting convention flags are designed to survive.
+    if body.startswith("--"):
+        return True
+    if re.search(r"[;()]", body):
+        return True
     return False
 
 

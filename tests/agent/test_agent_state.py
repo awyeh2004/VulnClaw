@@ -1,4 +1,5 @@
-from vulnclaw.agent.agent_state import AgentState, extract_flags
+from vulnclaw.agent.agent_state import AgentState, extract_flags, is_placeholder_flag
+
 
 
 def test_agent_state_records_raw_evidence_and_preview():
@@ -144,3 +145,37 @@ def test_agent_state_detects_redundant_evidence_view_ranges():
     assert state.evidence_view_redundancy_reason(
         {"evidence_id": "e001", "offset": 12000, "limit": 5000}
     ) == ""
+
+
+class TestPlaceholderFlag:
+    """CSS/JS blocks match the flag shape and used to pass as real flags.
+
+    Live regression (2026-10-12): a target's stylesheet produced four
+    "Observed flag-like token" entries (`root{--paper:#f4ecdc;...}`,
+    `h1{font-size:...}`, `sub{...}`, `try{out(atob(f.body));}`) that filled the
+    solve report's key-evidence list. Real flag bodies never carry statement
+    separators or parens.
+    """
+
+    def test_css_and_js_bodies_are_placeholders(self):
+        for token in (
+            "root{--paper:#f4ecdc;--ink:#241d12}",
+            "h1{font-size:2.1em;margin:0;letter-spacing:.04em}",
+            "sub{font-style:italic;color:#5c5140}",
+            "try{out(atob(f.body));}",
+        ):
+            assert is_placeholder_flag(token) is True, token
+
+    def test_real_flag_shapes_survive(self):
+        for token in (
+            "CTF2{15fa2750-6c1e-46bd-ac4c-3dc45293d8a1}",
+            "flag{c4a91f0e7b25d83a60fe4b19ac72d5b3}",
+            "n1book{851939e4e90b864b8d20fe6228564522}",
+            "flag{PbzrPuvan}",
+            "DASCTF{f3d279e1-dead-beef}",
+        ):
+            assert is_placeholder_flag(token) is False, token
+
+    def test_template_flags_still_rejected(self):
+        for token in ("flag{...}", "{uuid}", "<flag>", "flag{}", "flag{your_flag_here}"):
+            assert is_placeholder_flag(token) is True, token

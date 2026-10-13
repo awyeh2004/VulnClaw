@@ -155,3 +155,74 @@ class TestRound5Tightening:
         evidence = "md5sum abcdef /tmp/x"
         assert _witnessed_in_evidence(fact, evidence) is False
 
+
+
+class TestNarrationGluedToQuotedObservation:
+    """Live CTF regression (2026-10-12): every candidate fact was refused because
+    the fact glues the model's narration to a *verbatim* quote, and tool output
+    interleaves punctuation or CJK the clause does not reproduce byte-for-byte.
+    Three consecutive runs ended with an unverifiable board (only the flag token
+    ever confirmed), because the whole clause -- narration included -- had to
+    match. The shared contiguous span is the witness now, not the whole clause.
+    """
+
+    def test_quoted_banner_plus_narration(self):
+        fact = (
+            'REPL banner: "=== MDM 策略审查器 v2.6 (Policy REPL) ===" with '
+            "commands config/certs/spki/try/submit; reachable only over TLS"
+        )
+        evidence = (
+            "trytls=True BANNER: '=== MDM 策略审查器 v2.6 (Policy REPL) ===\n"
+            "某加固 App 的 TLS 策略层被导出到本引擎。\n'"
+        )
+        assert _witnessed_in_evidence(fact, evidence) is True
+
+    def test_spki_pin_quoted_with_differing_separators(self):
+        pin = "VavPInyCtffT0H19c/LteQIqOZ+ZIY3+AUwmoSFawHI"
+        fact = f"spki 1 = spki 2 = {pin} (matches primary pin)"
+        evidence = f"### spki 1:\npin-sha256={pin}\n\npolicy> \n"
+        assert _witnessed_in_evidence(fact, evidence) is True
+
+    def test_json_snippet_quoted_inside_a_clause(self):
+        fact = (
+            'submitting a1=/portal returns "Q1 ok, Q2 wrong"; '
+            "a1=portal returns \"Q1 wrong\" — the first document request is /portal"
+        )
+        evidence = (
+            '/portal 200 {"ok": false, "why": "Q1 ok, Q2 wrong"}\n'
+            'portal 200 {"ok": false, "why": "Q1 wrong"}'
+        )
+        assert _witnessed_in_evidence(fact, evidence) is True
+
+    def test_cjk_observation_quoted_with_prefix(self):
+        fact = "try 1: pin 匹配主 pin,但 pin-set expiration=2025-01-01 已过"
+        evidence = (
+            "=== try 1 ===\n"
+            "pin 匹配主 pin,但 pin-set expiration=2025-01-01 已过 -> 整个 pin-set 失效。\n"
+        )
+        assert _witnessed_in_evidence(fact, evidence) is True
+
+    def test_bare_id_alone_still_does_not_confirm(self):
+        """The shared-span tier must not resurrect the round-5 hole: a fact whose
+        only shared span is an id/timestamp run is not witnessed."""
+        fact = "job id 1758432000123456 proves the payload executed on the host"
+        evidence = "2026-09-21 cron.daily finished, job id 1758432000123456"
+        assert _witnessed_in_evidence(fact, evidence) is False
+
+    def test_narrative_wrapped_hash_is_still_rejected(self):
+        digest = "851939e4e90b864b8d20fe6228564522"
+        fact = (
+            f"the dropped file with md5 {digest} is an APT implant that "
+            "persists via LD_PRELOAD"
+        )
+        evidence = f"/tmp/.cache; md5={digest}"
+        assert _witnessed_in_evidence(fact, evidence) is False
+
+    def test_short_common_words_still_do_not_confirm(self):
+        assert (
+            _witnessed_in_evidence(
+                "this that with from the data was true and false",
+                "the from with this that true false",
+            )
+            is False
+        )

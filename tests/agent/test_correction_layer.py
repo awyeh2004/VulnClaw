@@ -316,3 +316,79 @@ def test_correction_layer_falls_back_to_markers_without_structured_signal():
     )
 
     assert signal.ok is False
+
+
+def test_validation_rejection_is_not_tool_failure():
+    """A tool that declines its input ran fine: no degraded status, no hint.
+
+    Live regression (2026-10-12): `blackboard_verify_fact` returning its normal
+    "cannot verify ... keep it as candidate" reply and `save_playbook` rejecting
+    a low-quality save both counted as tool failures. The tools went "degraded"
+    and the "account for this tool-health signal" hint pushed the model off
+    working tools mid-run.
+    """
+    cases = (
+        "blackboard_verify_fact",
+        "blackboard_add_fact",
+        "save_playbook",
+    )
+    raws = (
+        "[!] cannot verify fact n2: description not witnessed in evidence e003; keep it as candidate",
+        "[!] blackboard_add_fact requires 'description'",
+        "[!] save_playbook rejected: missing structured headings (LOCK / CONFIRMED / ANGLES)",
+    )
+    for tool, raw in zip(cases, raws):
+        agent = _agent()
+        record = _record(agent, raw)
+        signal = after_tool_call(
+            agent,
+            tool=tool,
+            arguments={},
+            raw_output=raw,
+            duration_ms=10,
+            evidence=record,
+        )
+        assert signal.ok is True, raw
+        assert agent.context.state.agent_state.tool_health[tool].status == "healthy", raw
+
+
+def test_genuine_execution_error_is_still_degraded():
+    agent = _agent()
+    raw = "[!] Python execution error: ConnectionAbortedError: [WinError 10053]"
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="python_execute",
+        arguments={"code": "print('x')"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    assert signal.ok is False
+    assert agent.context.state.agent_state.tool_health["python_execute"].status == "degraded"
+
+
+def test_rejection_words_in_target_output_do_not_hide_failures():
+    """Target output merely containing "requires" must not mask a real failure."""
+    agent = _agent()
+    raw = (
+        "Command: curl http://target\n"
+        "Exit code: 7\n"
+        "Output:\n"
+        "curl: (7) Failed to connect — the target requires authentication"
+    )
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="shell_command",
+        arguments={"command": "curl http://target"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    # Exit code 7 is the explicit structured signal; it outranks everything.
+    assert signal.ok is False

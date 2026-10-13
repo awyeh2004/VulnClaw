@@ -504,6 +504,20 @@ class Blackboard:
 
 _MIN_SEGMENT_CHARS = 24
 
+# Verbatim-span corroboration bar. A fact is written as the model's narration glued
+# to a quoted observation ('Submitting /portal returned {"ok": false...} — Q1 ok'),
+# so the whole clause is *by construction* absent from the evidence even when the
+# quoted part is verbatim. Requiring the whole clause (or a >= 90% token overlap)
+# rejected plainly witnessed facts whenever the tool output interleaved different
+# punctuation or CJK prose: measured live, `blackboard_verify_fact` refused every
+# candidate fact in three consecutive CTF runs (banner, spki pin, memo hex), which
+# is why the completion gate then demanded more facts the model could not supply.
+# The middle ground: the fact and the evidence share a contiguous normalized span of
+# at least this many characters that also carries a real content token (a substantive
+# word, or a CJK run). A fabricated narrative shares no such span -- see the
+# fabrication tests, which pin this.
+_SHARED_SPAN_MIN_CHARS = 8
+
 # High-signal literals that only a witness could reproduce: a flag-shaped value, a
 # UUID, or a hex run. If the fact and the evidence share one, the fact's
 # observation was genuinely seen -- and a fabricated claim cannot contain one.
@@ -661,11 +675,79 @@ def _clause_witnessed(
     if norm_fact in norm_chunk:
         return True
 
+    # Shared contiguous span: the observation was quoted from real output even
+    # though the clause also carries the model's own narration or punctuation
+    # that differs from the stored bytes (see ``_SHARED_SPAN_MIN_CHARS``).
+    span = _longest_common_substring(norm_fact, norm_chunk)
+    if len(span) >= _SHARED_SPAN_MIN_CHARS and _span_carries_content(
+        candidate, span, evidence_tokens, evidence_fp
+    ):
+        return True
+
     tokens = _substantive_tokens(candidate)
     if len(tokens) < _MIN_OVERLAP_TOKENS:
         return False
     hit = len(tokens & evidence_tokens)
     return hit / len(tokens) >= _OVERLAP_THRESHOLD
+
+
+def _longest_common_substring(a: str, b: str) -> str:
+    """Longest contiguous run of characters shared by *a* and *b*."""
+    if not a or not b:
+        return ""
+    previous = [0] * (len(b) + 1)
+    best = 0
+    end = 0
+    for i in range(1, len(a) + 1):
+        current = [0] * (len(b) + 1)
+        char = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if char == b[j - 1]:
+                current[j] = previous[j - 1] + 1
+                if current[j] > best:
+                    best = current[j]
+                    end = i
+        previous = current
+    return a[end - best : end]
+
+
+def _is_corroborating_only(token: str) -> bool:
+    """True for a bare digit/hex run: an id or hash proves nothing on its own.
+
+    Matches the corroborating-not-definitive decision already made for
+    ``_FINGERPRINT_PATTERNS`` (a decimal timestamp or a bare hex blob can appear
+    in unrelated output, so sharing one must not confirm a claim by itself).
+    """
+    import re as _re
+
+    return bool(_re.fullmatch(r"[0-9]{12,}", token)) or bool(
+        _re.fullmatch(r"[0-9a-f]{16,}", token)
+    )
+
+
+def _span_carries_content(
+    candidate: str, span: str, evidence_tokens: set[str], evidence_fp: set[str]
+) -> bool:
+    """Whether a shared span corroborates the clause rather than just echoing an id.
+
+    A CJK run inside the span is content by itself. Otherwise the clause must own
+    a substantive word (>= 5 chars, not a stop token, not a bare id/hash) that the
+    span carries into the evidence -- so "job id 1758432000123456 proves ..." still
+    fails while a quoted `spki 1 = <pin>` or a quoted response line passes.
+    """
+    import re as _re
+
+    if _re.search(r"[\u4e00-\u9fff]{2,}", span):
+        return True
+    for token in _substantive_tokens(candidate):
+        if (
+            len(token) >= 5
+            and token in evidence_tokens
+            and token not in evidence_fp
+            and not _is_corroborating_only(token)
+        ):
+            return True
+    return False
 
 
 def reasoning_graph_enabled(config: Any = None) -> bool:

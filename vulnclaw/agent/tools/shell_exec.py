@@ -104,6 +104,21 @@ def _validate_command_url_scope(agent: AgentContext, command: str) -> str | None
     return None
 
 
+# Prepended to every PowerShell -Command so the pipe and file cmdlets speak
+# UTF-8. Windows PowerShell 5.1 reads BOM-less files (Get-Content/Set-Content/
+# Out-File) with the ANSI codepage and writes its pipe with the OEM codepage —
+# on a zh-CN host both are GBK, so `Get-Content -Raw notes.md` over a UTF-8
+# file returns mojibake before our utf-8 decode ever runs (measured live on
+# the 2026-10-12 run: the agent burned three recovery calls re-reading the
+# file with [System.IO.File]::ReadAllBytes before it got clean text). The
+# preamble is framework-fixed text, never derived from the model's command.
+_PS_UTF8_PREAMBLE = (
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+    "$OutputEncoding=[System.Text.Encoding]::UTF8;"
+    "$PSDefaultParameterValues['*:Encoding']='utf8';"
+)
+
+
 def _shell_argv(command: str, shell_name: str) -> list[str]:
     """Build a fully-specified argv for one shell invocation.
 
@@ -118,10 +133,17 @@ def _shell_argv(command: str, shell_name: str) -> list[str]:
         if normalized in {"pwsh", "pwsh.exe"}:
             # pwsh is operator-installed: PATH lookup is acceptable here, the
             # binary location is an operator decision, not attacker-controlled.
-            return ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+            return [
+                "pwsh.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                _PS_UTF8_PREAMBLE + command,
+            ]
         powershell = system_dir / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         exe = str(powershell) if powershell.is_file() else "powershell.exe"
-        return [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        return [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _PS_UTF8_PREAMBLE + command]
     return ["/bin/sh", "-c", command]
 
 

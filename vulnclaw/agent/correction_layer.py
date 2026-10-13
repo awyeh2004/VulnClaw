@@ -73,6 +73,44 @@ _HTTP_STATUS_RE = re.compile(
     r"""(?im)(?:^|[\s;])(?:http\s*status|http_status|status_code|status)\s*[:=]\s*([1-5][0-9]{2})\b"""
 )
 
+# A tool that *declines* its input — missing argument, guard/quality-gate
+# rejection, policy refusal, a lookup miss on a model-supplied reference —
+# executed fine; the model must fix the call, not learn to avoid the tool.
+# Measured on the 2026-10-12 CTF2 runs: every ``blackboard_verify_fact`` reply
+# ("cannot verify fact ... keep it as candidate") and the ``save_playbook``
+# quality-gate rejection ("rejected: missing structured headings") was counted
+# as a tool *failure*, the tool went "degraded", and the resulting
+# "account for this tool-health signal" hint pushed the model off a working
+# tool — it concluded verify_fact was broken, abandoned verification, and the
+# run burned a whole extra turn satisfying the completion gate without it.
+# These replies are recognisable rejections rather than transport/execution
+# failures, so they must not count against tool health. Matched only on a line
+# carrying the framework's own ``[!]`` verdict prefix, so target output that
+# merely contains one of these words is unaffected.
+_REJECTION_LINE_RE = re.compile(
+    r"(?im)^\s*\[!\][^\n]*?"
+    r"(?:"
+    r"cannot verify"
+    r"|keep it as candidate"
+    r"|rejected:"
+    r"|execution refused"
+    r"|requires\b"
+    r"|missing structured headings"
+    r"|code exceeds the max"
+    r"|code is empty"
+    r"|blocked operation"
+    r"|sandbox bypass detected"
+    r"|unknown \S+ tool"
+    r"|缺少必需参数"
+    r"|未找到"
+    r")"
+)
+
+
+def _is_validation_rejection(raw: str) -> bool:
+    """True when the output is a tool-level decline, not a broken tool."""
+    return bool(_REJECTION_LINE_RE.search(str(raw or "")))
+
 
 def _explicit_tool_ok(raw: str) -> bool | None:
     r"""Return success when the tool output carries an explicit signal.
@@ -225,6 +263,10 @@ def after_tool_call(
         ok = False
     elif explicit is not None:
         ok = explicit
+    elif _is_validation_rejection(raw):
+        # The tool ran and declined the input (see _REJECTION_LINE_RE): healthy,
+        # and the model-visible output already says what to fix.
+        ok = True
     else:
         ok = not any(marker in lower for marker in _FAILURE_MARKERS)
     evidence_id = evidence.id if evidence is not None else ""
@@ -327,6 +369,12 @@ def _extract_progress(raw: str) -> list[str]:
     progress: list[str] = []
 
     flags = extract_flags(text)
+    # CSS rules and JS blocks match the flag shape (`root{--paper:#f4ecdc;...}`);
+    # reporting them as "flag-like token observed" filled the solve report's
+    # key-evidence list with stylesheet noise on the 2026-10-12 runs.
+    from vulnclaw.agent.agent_state import is_placeholder_flag
+
+    flags = [f for f in flags if not is_placeholder_flag(f)]
     for flag in flags[:3]:
         progress.append(f"flag-like token observed: {flag}")
 

@@ -1,4 +1,18 @@
 <details open>
+<summary><strong>Unreleased</strong> — 三场 CTF 实战日志暴露问题修复：verify_fact 误拒（共享原文片段层）· 拒绝型回复误记工具 degraded · PowerShell 中文乱码 · CSS/JS 伪 flag</summary>
+
+- **修（高·复现于三场连跑）：`blackboard_verify_fact`/`add_fact` 对"叙述+原样引用"型 fact 全量误拒** — 2026-10-12 三场 CTF2 连跑（Packet Yard / MDM pin-set / OrbitPay 重放）中，模型的 fact 均为"自己的话 + 原样引用的工具输出"，而既有校验要求整段子句逐字命中或 ≥90% 词元重合；工具输出只要混入不同标点或中文（`=== MDM 策略审查器 v2.6 (Policy REPL) ===`、`pin-sha256=<base64>`、`recovered: <32hex>`），引用即失配 → 每场全部 candidate，完成门随后索要更多无法提供的已证实 fact，每场多烧一整轮。新增**共享原样片段层**：fact 与证据的最长公共归一化片段 ≥8 字符、且片段携带真实内容（中文连串，或 ≥5 字符非停用词且非纯 id/hash 的实词）即证实。防伪造底线逐条钉死：裸时间戳/id（`job id 1758432000123456`）、借真 hash 编造叙事（APT implant）、停用词袋、部分词匹配（config≠configuration）、未见字面量——全部仍拒。新增 7 例回归（`test_blackboard_witnessing.py::TestNarrationGluedToQuotedObservation`）。
+- **修（高）：验证性拒绝被记成工具故障** — `blackboard_verify_fact` 的正常否定回复（"cannot verify … keep it as candidate"）与 `save_playbook` 质量门拒绝（"rejected: missing structured headings"）都以 `[!]` 开头，撞上 `_FAILURE_MARKERS` 的 `[!]` → 工具被记 degraded，"is currently degraded after N failure(s)" 提示接着劝模型远离一个**工作正常的工具**（实测：模型认定 verify_fact 坏了、放弃验证，被迫空烧一轮补黑板仪式）。新增 `_REJECTION_LINE_RE`：仅在框架自产 `[!]` 行上识别拒绝语义（cannot verify / rejected: / execution refused / requires / blocked operation / 缺少必需参数 / 未找到等），分类为 ok=True 不再计入工具健康；真实故障（traceback / timed out / 执行错误 / 未安装）仍 degraded，Exit code 与 HTTP 状态显式信号优先级不变。
+- **修（中）：CSS/JS 被当 flag 上报告** — 目标页面样式表使 `root{--paper:#f4ecdc;…}`、`h1{font-size:…}`、`sub{…}`、`try{out(atob(f.body));}` 全部命中 flag 形正则，solve report "关键证据"被四条样式表噪音填满。`is_placeholder_flag` 增补代码体判定（体含 `;`/`(`/`)` 或以 `--` 开头 → 占位符），`_extract_progress` 的 "flag-like token observed" 一并过滤占位符；真 flag 形状（`CTF2{uuid}`、`n1book{32hex}`、`flag{PbzrPuvan}` 等）实测全存活，完成门的证据 flag 白名单同步受益。
+- **修（中·端到端实测）：Windows PowerShell 中文乱码** — PS 5.1 对无 BOM 文件按 ANSI 码页读、管道按 OEM 码页写；中文 Windows 上两者皆 GBK，`Get-Content -Raw notes.md`（UTF-8）直接吐 `杩愮淮澶囧繕`，实战中模型烧了 3 次调用（ReadAllBytes + GB18030/UTF8 试错）才拿到干净文本。`_shell_argv` 对 powershell/pwsh 统一前缀固定 UTF-8 序言（`[Console]::OutputEncoding` + `$OutputEncoding` + `$PSDefaultParameterValues['*:Encoding']='utf8'`，框架固定文本、不来自模型命令）。本机 zh-CN Windows 实测：同一读取加序言得干净原文、去序言复现日志同款乱码；cmd 分支不动。
+- **测试** — 全量 **4966 passed / 17 skipped / 0 failed**（ witnessing 26 / correction_layer 14 / agent_state 12 / spawn_hardening 全绿）。已知环境项：`TestWindowsTreeKill` 2 例偶发单跑失败（`stdout=None`），已实测 git 干净基线同样失败，与本批无关。
+- **过程教训（并行会话）** — 本批工作区曾遭并行 cli 重构会话覆盖（`blackboard.py` 与 witnessing 测试被还原至 HEAD，另 5 文件幸存），已重放修复并全量复跑；多会话并行期未提交改动有被吞风险，修复批应及时落库。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — TECH-DEBT 两条真债清偿：技能库 references 去重（−3,751 行）· 两个上帝文件拆分（builtin_tools 5,473→2,853 / cli.main 5,355→845）</summary>
 
 - **技能库 references 去重（TECH-DEBT ①，commit `86322a6`）** — 新增 `vulnclaw/skills/_shared/references/` 固定共享根 + SKILL.md frontmatter `shared_references` 声明机制：声明是**操作员写盘的静态清单、非模型输入**，`resolve_skill_reference` 先查本技能 `references/`（原逻辑原路径），声明过的名字才回退共享根，且**复用同一套 symlink-aware containment（穿越面零放松）**；本技能同名文件优先 = 保留本地覆盖。声明清洗把 `..`、绝对路径、盘符、反斜杠、非字符串全部丢弃。13 组重复（web 域 3 + android 域 9 + `upstream-source.md` ×34 包）全部迁移，剩余重复 **0 组**，净删约 3,751 行。防回潮：`test_no_duplicate_references.py`（任意两份逐字节相同即 fail，含 `_shared`）+ `test_shared_references.py` 14 条契约用例。
