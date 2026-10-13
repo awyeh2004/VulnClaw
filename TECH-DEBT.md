@@ -109,9 +109,11 @@ flag 正则副本曾漂移到 3/17）。
   `commands_platform.py`（741）+ `commands_admin.py`（467）+ `commands_config.py`（242），
   `main.py` 只留 typer 入口与装配。原"拆时顺手修 `_print_cli_manual` 双定义"已随之完成
   （`52d7689` 删旧定义，现 1 个定义 + 3 个调用点）。
-- ⚠️ **拆分遗留（后续清理项，round19 审计发现）**：`cli/_helpers.py`（690 行，带 UTF-8 BOM）
-  与 `cli/__init__.py` 存在约 16 个同名 helper 双定义（搬迁期中间态，早于 main.py 拆分窗口）。
-  当前各调用点各取其一、无行为冲突；合并前先跑 `tests/cli/` 全量，顺手去 BOM。
+- ✅ **拆分遗留已收口（2026-10-12，commit `64d80c6`）**：`cli/__init__.py` 与 `cli/_helpers.py`
+  的双定义实测为 **12 个同名 helper、其中 8 个已漂移**（`_run_cli_orchestrated_task`
+  60 行 vs 41 行，同名不同行为；BOM 实际在 `__init__.py` 而非 `_helpers.py`）。所有消费方
+  均从 `_helpers` 导入、包级零引用零 patch 锚点 ⇒ `__init__.py` 改为全部从正典 re-export
+  （same-object 实测），BOM 一并去掉。全量 4953 passed / 17 skipped。
 
 以下为原始记录（留存供对照）：
 

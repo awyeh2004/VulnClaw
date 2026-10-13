@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — TECH-DEBT 两条真债清偿：技能库 references 去重（−3,751 行）· 两个上帝文件拆分（builtin_tools 5,473→2,853 / cli.main 5,355→845）</summary>
+
+- **技能库 references 去重（TECH-DEBT ①，commit `86322a6`）** — 新增 `vulnclaw/skills/_shared/references/` 固定共享根 + SKILL.md frontmatter `shared_references` 声明机制：声明是**操作员写盘的静态清单、非模型输入**，`resolve_skill_reference` 先查本技能 `references/`（原逻辑原路径），声明过的名字才回退共享根，且**复用同一套 symlink-aware containment（穿越面零放松）**；本技能同名文件优先 = 保留本地覆盖。声明清洗把 `..`、绝对路径、盘符、反斜杠、非字符串全部丢弃。13 组重复（web 域 3 + android 域 9 + `upstream-source.md` ×34 包）全部迁移，剩余重复 **0 组**，净删约 3,751 行。防回潮：`test_no_duplicate_references.py`（任意两份逐字节相同即 fail，含 `_shared`）+ `test_shared_references.py` 14 条契约用例。
+- **`builtin_tools.py` 按工具族拆分（TECH-DEBT ② 前半，9 笔提交）** — 5,473 → 2,853 行，拆出 `vulnclaw/agent/tools/` 子包：`shell_exec` / `python_exec` / `nmap` / `http_probe` / `brute_force` / `runtime_diff` / `ocr` / `pyc` / `pdf` / `subprocess_util` / `_shared`（跨族 `_runtime_config`）。`builtin_tools.py` 保留 gating/policy/dispatch 与 schema 注册并**原样 re-export 每个搬走的名字（含私有名）**，旧 import 路径与测试的属性访问（含 `monkeypatch.setattr(builtin_tools.subprocess/shutil/httpx/time, …)` 这类模块对象 patch）全部不变。两个坑已成文（TECH-DEBT ②）：搬走的代码需自补 stdlib import；`verify_execution_boundary.py` 的 spawn 白名单键含文件路径，**必须同笔提交删旧键加新键**。`_bg_*` 后台任务族**刻意不拆**（模块级可变状态 `_bg_tasks`/`_bg_seq`/`_bg_lock` + 测试属性访问，属单独设计任务）。
+- **`cli/main.py` 拆分（TECH-DEBT ② 后半，6 笔提交）** — 5,355 → 845 行（−84%）：`cli/repl.py`（REPL 循环 + 目标识别 9 helper + `_from_main` 调用时解析设施）、`commands_run.py`（run/solve/go/persistent/recon/scan/network-scan/exploit/report）、`commands_platform.py`（ctf2/gcs/competition）、`commands_config.py`（config 组）、`commands_admin.py`（kb/experience/target-state/plugins + learn/feedback）。`app` 仍是 main.py 唯一装配点，**命令数 24 / 子组 7 全程零变化**；测试从 `cli.main` 导入的名字全部 re-export 保活。顺手修 `_print_cli_manual` 双定义（`52d7689`）。**本轮核心教训**：CLI 拆分的真坑是测试大量 `monkeypatch.setattr(cli_main, "X", …)` 打在 facade 上——搬走的代码读自己模块的 import 副本会让 patch **静默 no-op**（曾致 16 例 `--stream`/solve 默认值测试失败），唯一可靠解法是被 patch 的名字一律经 `_from_main` 调用时解析。
+- **`cli/__init__.py` 去重（拆分遗留收口，commit `64d80c6`）** — 与 `_helpers.py` 双定义的 12 个 helper 中 **8 个已漂移**（`_run_cli_orchestrated_task` 60 行 vs 41 行同名不同行为），且 `__init__.py` 是仓库唯一带 UTF-8 BOM 的源文件。所有消费方均从 `_helpers` 导入、包级零引用零 patch 锚点 ⇒ 改为全部从正典 re-export（same-object 实测），BOM 一并去掉。
+- **测试基线** — 全量 **4953 passed / 17 skipped / 0 failed**（拆分全程逐笔跑全量，基线 4933→4949→4953 随新增护栏测试递增，零回归）；`execution-boundary OK`（27 spawn 站点全在白名单）；CLI 表面逐笔核对 24/7 不变。已知环境项（非本次引入）：`test_spawn_hardening::TestWindowsTreeKill` 2 例在本机单跑失败（`tasklist` 返回 `stdout=None`），已实测在重构前基线同样失败。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — round19 审计收口：共享引用回到提示词广告窗口 · Windows bootstrap 单源化 · 采集段名去重大小写对称</summary>
 
 - **修（中低·可发现性）：声明的共享引用重新进入提示词的广告窗口** — `86322a6` 去重落地后，`loader.py` 把声明的共享名**追加**在技能自有引用列表末尾，而提示词只展示 `references[:10]`（`skill_context.py:250/:289`）。实测 `client-reverse`（11 自有 + 9 个 android 共享）：共享引用全部落在索引 11–19，广告窗口 **0 条**——去重前按 `reference_sort_key` 全序时 9 条全部在窗（该排序键的注释本就写明它是为"前 10 条窗口"设计的，追加队尾违背设计意图）。缓解因素（SKILL.md 正文逐条点名）保住了可加载性，但广告列表名存实亡。现共享名并入**同一排序键**统一重排，恢复去重前语义：实测 9 条 android 引用全部回到前 10；全库 56 个技能（39 个声明者）列表全序校验零违规、声明即存在的名字全部被广告。
