@@ -256,11 +256,19 @@ def _parse_skill_directory(skill_dir: Path) -> dict[str, Any]:
     # so the model can discover them; only names whose shared file actually
     # exists are listed, keeping the advertised list truthful. Resolution order
     # is the skill's own references/ first, so an own copy overrides shared.
+    added_shared = False
     for shared_name in result.get("shared_references", []):
         if shared_name in ref_files:
             continue
         if (_SHARED_REFERENCES_DIR / shared_name).is_file():
             ref_files.append(shared_name)
+            added_shared = True
+    if added_shared:
+        # Shared names must join the same ordering as the skill's own files,
+        # not trail it: the prompt advertises only the first ten refs (see
+        # reference_sort_key), so appending shared names last hides them from
+        # every skill with more own references than that window shows.
+        ref_files.sort(key=reference_sort_key)
 
     result["references"] = ref_files
     result["references_dir"] = str(references_dir)

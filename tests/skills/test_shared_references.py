@@ -161,3 +161,65 @@ def test_directory_parse_without_declaration_is_unchanged(tmp_path, monkeypatch)
     parsed = loader._parse_skill_directory(skill_dir)
     assert parsed["references"] == ["local.md"]
     assert parsed["shared_references"] == []
+
+
+def test_shared_names_join_the_sorted_order(tmp_path, monkeypatch):
+    """Shared references interleave with own files instead of trailing them.
+
+    The prompt advertises only the first ten refs of this list
+    (agent.skill_context), so appending shared names after the own files
+    hides them from every skill with more own references than that window
+    shows — client-reverse lost all nine android refs this way right after
+    the dedup landed.
+    """
+    shared = tmp_path / "shared-root"
+    shared.mkdir()
+    (shared / "android-triage.md").write_text("S", encoding="utf-8")
+    monkeypatch.setattr(loader, "_SHARED_REFERENCES_DIR", shared)
+
+    skill_dir = tmp_path / "bigskill"
+    refs = skill_dir / "references"
+    refs.mkdir(parents=True)
+    for i in range(10):
+        (refs / f"z-own-{i:02d}.md").write_text("L", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: bigskill\n"
+        "description: t\n"
+        "shared_references:\n"
+        "  - android-triage.md\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    parsed = loader._parse_skill_directory(skill_dir)
+    assert parsed["references"].index("android-triage.md") == 0
+    assert "android-triage.md" in parsed["references"][:10]
+    assert parsed["references"] == sorted(
+        parsed["references"], key=loader.reference_sort_key
+    )
+
+
+def test_real_library_reference_lists_stay_sorted():
+    """Every real skill's advertised list obeys reference_sort_key.
+
+    The sorted order is what makes the first-ten advertisement window
+    deterministic across platforms (see reference_sort_key's own contract);
+    any skill whose combined own+shared list breaks it regresses what the
+    model gets to see.
+    """
+    from pathlib import Path
+
+    pkg = Path(loader.__file__).parent
+    checked = 0
+    for sub in ("core", "specialized"):
+        for skill_dir in sorted((pkg / sub).iterdir()):
+            if not (skill_dir / "SKILL.md").is_file():
+                continue
+            refs = loader._parse_skill_directory(skill_dir)["references"]
+            assert refs == sorted(refs, key=loader.reference_sort_key), (
+                f"{skill_dir.name}: references not in reference_sort_key order"
+            )
+            checked += 1
+    assert checked > 50, f"expected the package skills, found {checked}"
