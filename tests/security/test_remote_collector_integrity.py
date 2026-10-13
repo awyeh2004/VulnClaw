@@ -188,6 +188,33 @@ class TestCommandInvariants:
         )
         assert any("duplicate" in p for p in remote.validate_collector_commands())
 
+    def test_duplicate_section_name_ignores_case(self, monkeypatch):
+        """The check compares lowercased names, so casing must not dodge it."""
+        monkeypatch.setattr(
+            remote, "collector_commands",
+            lambda: [("identity", "id"), ("Identity", "whoami")],
+        )
+        assert any("duplicate" in p for p in remote.validate_collector_commands())
+
+
+class TestWindowsBootstrapSingleSource:
+    """The PowerShell bootstrap payload must live only in WINDOWS_BOOTSTRAP.
+
+    ``_do_collect_windows`` builds its command line from the constant; a
+    second inline copy of the payload would drift silently because the
+    constant has no other consumer to keep it honest.
+    """
+
+    def test_scriptblock_payload_appears_once(self):
+        import inspect
+
+        source = inspect.getsource(remote)
+        marker = "[Convert]::FromBase64String([Console]::In.ReadToEnd())"
+        assert source.count(marker) == 1, (
+            "the bootstrap payload is inlined somewhere instead of reusing "
+            "WINDOWS_BOOTSTRAP"
+        )
+
     def test_unsafe_section_name_is_rejected(self, monkeypatch):
         monkeypatch.setattr(
             remote, "collector_commands",

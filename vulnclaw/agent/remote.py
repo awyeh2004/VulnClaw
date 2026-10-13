@@ -651,7 +651,7 @@ def validate_collector_commands() -> list[str]:
             problems.append(f"{name!r}: command spans multiple lines")
         if name.lower() in seen:
             problems.append(f"duplicate section name: {name!r}")
-        seen.add(name)
+        seen.add(name.lower())
         if not re.fullmatch(r"[A-Za-z0-9_]+", name):
             problems.append(f"{name!r}: section name must be [A-Za-z0-9_]+")
     return problems
@@ -1471,7 +1471,7 @@ async def _do_collect_windows(
     token = uuid.uuid4().hex
     result = CollectorResult(alias=alias, hostname=str(_hv(host, "hostname")), commands=[c for _, c in _windows_collector_commands()])
     script = _windows_collector_script(token)
-    bootstrap = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))))\""
+    bootstrap = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{WINDOWS_BOOTSTRAP}"'
     stdout, stderr, error = await asyncio.to_thread(
         run_command_capture, host, alias, bootstrap,
         stdin_data=base64.b64encode(script.encode("utf-8")), connect_timeout=connect_timeout, timeout_s=900.0,
