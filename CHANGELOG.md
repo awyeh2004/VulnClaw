@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — round19 审计收口：共享引用回到提示词广告窗口 · Windows bootstrap 单源化 · 采集段名去重大小写对称</summary>
+
+- **修（中低·可发现性）：声明的共享引用重新进入提示词的广告窗口** — `86322a6` 去重落地后，`loader.py` 把声明的共享名**追加**在技能自有引用列表末尾，而提示词只展示 `references[:10]`（`skill_context.py:250/:289`）。实测 `client-reverse`（11 自有 + 9 个 android 共享）：共享引用全部落在索引 11–19，广告窗口 **0 条**——去重前按 `reference_sort_key` 全序时 9 条全部在窗（该排序键的注释本就写明它是为"前 10 条窗口"设计的，追加队尾违背设计意图）。缓解因素（SKILL.md 正文逐条点名）保住了可加载性，但广告列表名存实亡。现共享名并入**同一排序键**统一重排，恢复去重前语义：实测 9 条 android 引用全部回到前 10；全库 56 个技能（39 个声明者）列表全序校验零违规、声明即存在的名字全部被广告。
+- **修（低）：`WINDOWS_BOOTSTRAP` 不再是死常量** — `remote.py` 定义后零引用，`_do_collect_windows` 调用点又内联了一份逐字相同的 ScriptBlock 载荷，两份拷贝迟早漂移。现调用点改为 `f'powershell.exe … -Command "{WINDOWS_BOOTSTRAP}"'`，实测与原字符串**逐字节相同**；新增源级防回潮测试断言该载荷全文在 `remote.py` 里只出现一次。
+- **修（低）：`validate_collector_commands` 段名去重大小写对称** — 判定用 `name.lower() in seen` 却 `seen.add(name)`（存原大小写），混合大小写重名会漏报。当前 33 段名全小写故无实际影响，属堵潜伏；现统一存小写，新增 `("identity","Identity")` 用例。
+- **测试** — `tests/skills/test_shared_references.py` +2（合成用例钉"共享名并入排序而非队尾、入窗且全序"；真库全技能 `reference_sort_key` 全序守护）、`tests/security/test_remote_collector_integrity.py` +2（大小写重名拒收 / bootstrap 载荷单源）。目标测试 39 passed / 1 skipped（PowerShell 环境跳过，既有）；全量 **4953 passed / 17 skipped / 0 failed**。
+- **TECH-DEBT** — 条目 ② 的"⏳ main.py 仍待拆"已过期（窗口内已拆完 5,355→845 行，`_print_cli_manual` 双定义随 `52d7689` 清除），更正为已拆完；并记入拆分遗留（`cli/_helpers.py` 与 `cli/__init__.py` 约 16 个同名 helper 双定义、`_helpers.py` 带 UTF-8 BOM，后续清理项）。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — remote_collect 自动 OS 探测与 Windows 只读 framed 单文件回传</summary>
 
 - **新增**：`remote_collect` 在单次批量审批后先执行有界 OS probe；Linux 保持既有 33 段 POSIX/tar.gz collector，Windows 改走只读 PowerShell collector，不依赖 zip/tar。
