@@ -23,6 +23,16 @@ Why this module exists (2026-10-14 CTF2 自主解题巡航，24 轮实测)
 证据口径：已记录的工具证据，**扣除自证工具**（黑板书 / 笔记 / 提交动词自身）。
 ``_completion_gate`` 的注释已写明原因："grounding can be satisfied by the model's
 own note (the evidence face includes tool results that merely echo model text)"。
+
+落地陷阱（2026-10-14 实测踩到，务必别再犯）
+-----------------------------------------
+
+``agent.context.state`` 是 **ContextManager 的 SessionState**；真正的 AgentState
+（``evidence`` 所在）挂在 ``state.agent_state``。第一版直接读了前者，拿到的是空证据
+链 —— 于是门把**每一次**提交都判成"无证据"：真 flag ``sun{bu...lol}``
+（明明已出现在 e007 的 python 输出里）被连拒，靠有界拒绝（``MAX_REFUSALS``）兜底
+才交出去，白烧约 4 轮推理。规范取法见 ``vulnclaw/agent/blackboard.py:862`` 与
+``context_budget._state_for``。
 """
 
 from __future__ import annotations
@@ -144,6 +154,24 @@ def assess(flag: str, *, evidence: Iterable[Any], goal_text: str = "") -> Ground
     return GroundingVerdict(False, "none", "")
 
 
+def resolve_agent_state(agent: Any) -> Any:
+    """取出真正的 :class:`AgentState`（``evidence`` / ``goal`` 所在）。
+
+    两条形状都认：
+      * ``agent.context.state.agent_state`` —— 运行时（ContextManager 的 SessionState
+        里挂着 AgentState，规范取法见 ``blackboard.py`` / ``context_budget._state_for``）；
+      * 直接就是 AgentState（测试替身 / 程序化调用）。
+    取不到返回 ``None``（调用方据此 fail-open）。
+    """
+    session = getattr(getattr(agent, "context", None), "state", None)
+    if session is None:
+        return None
+    inner = getattr(session, "agent_state", None)
+    if inner is not None:
+        return inner
+    return session if hasattr(session, "evidence") else None
+
+
 def _candidate_key(flag: str) -> str:
     return _strip(flag) or flag
 
@@ -169,7 +197,7 @@ def submission_refusal(agent: Any, args: dict[str, Any]) -> Optional[str]:
     if not isinstance(flag, str) or not flag.strip():
         return None  # 参数问题交给平台自己的 schema 报错
 
-    state = getattr(getattr(agent, "context", None), "state", None)
+    state = resolve_agent_state(agent)
     if state is None:
         return None
 

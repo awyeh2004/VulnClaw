@@ -1,4 +1,15 @@
 <details open>
+<summary><strong>Fix</strong> — 提交证据门第一版读错状态对象：真 flag 被连拒（BigMak 轮实测）</summary>
+
+- **修（高）：`agent.context.state` 是 ContextManager 的 SessionState，不是 AgentState** — 真正的证据链挂在 `state.agent_state` 上（规范取法见 `blackboard.py:862` / `context_budget._state_for`）。第一版直接读了前者 → 门拿到**空证据链** → 每一次提交都被判"无证据"：2026-10-14 14:25 的 BigMak 轮里，真 flag `sun{bu...lol}`（早已出现在 e007 的 python 输出里）被连拒 4 次，靠**有界拒绝**（`MAX_REFUSALS=2`）兜底才在第 3 次放行并被平台接受（100 分）—— 那 4 轮推理是白烧的。修复：新增 `resolve_agent_state()` 统一解包（两种形状都认，取不到则 fail-open）。
+- **验收（真实数据 + 运行时形状）** — BigMak 轮 77 条证据 × 10 个提交点回放：**误伤 0**（`sun{bu...lol}` 从首个提交点即放行）；run21 的补全型 `flag{ch4ll3ng3_n4m3}` 仍**拦下**。新增 3 例回归测试钉住运行时形状（`SessionState(agent_state=AgentState)`）：`test_submit_evidence_gate.py + test_tool_face_precedence.py` → 31 passed。
+- **教训（已写进模块 docstring）** — 上一版验收只用"直接塞 AgentState"的替身，形状与运行时不一致，于是 20 例单测全绿而线上全错；此后凡读取 `agent.*` 状态的门，验收必须至少有一例走**运行时形状**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 第 6 轮审查：见证门可被"借一个真 token"绕过 · 验证热路径 87 s→O(n) · 拒绝正则不再吞环境故障 · PS 编码逃逸口写进工具描述</summary>
 
 - **修（高·实测驱动）：共享片段层可被"借真 token 编造叙事"绕过** — 2026-10-14 第 6 轮只读审查（回放 459 场会话、160 组真实 `pinned_fact × evidence`）实测三个洞：① 载体实词只需"出现在证据任意位置"，不必落在共享片段内 —— `I confirmed <复制的 UUID> which proves the internal admin panel qzxwvu exposes scoring` 被见证，载体词是别处的 `admin`（实测 `INSIDE_SPAN=False`）；② UUID 分段不是 hex run，`_is_corroborating_only` 的 `[0-9a-f]{16,}` 漏掉 `c37ccae980c3` 这类分段；③ CJK 分支只要片段含 2 个汉字即算"有内容"，借 5 个汉字 + 编造中文断言即通过。**修法**：`_span_carries_content` 要求载体词**落在片段内**（这本是它 docstring 的原意）、`_is_corroborating_only(token, span)` 把 UUID 分段按指纹处理、CJK 分支提到 ≥8 字符；并因 21 MB 级证据下"任意英文子句都能凑出 8 字符公共段"而把固定门槛改为**随子句长度伸缩**（`_SHARED_SPAN_MIN_COVERAGE=0.30`，按 200 条真实被见证事实标定：覆盖率最低 0.333 / p05 0.361）。**真实语料零损失**：同一 160 组回放 151 组仍被见证（打补丁前仅 9 组），旧模块（`git show HEAD:`）跑同一批断言 4 例红。

@@ -25,6 +25,7 @@ from vulnclaw.agent.submit_gate import (
     MAX_REFUSALS,
     assess,
     flag_body,
+    resolve_agent_state,
     submission_refusal,
 )
 
@@ -152,6 +153,39 @@ def test_refusal_counts_persist_on_state():
     agent = make_agent(make_state([item("shell_command", "flag{")]))
     submission_refusal(agent, {"flag": PADDED})
     assert agent.context.state.submit_gate_refusals.get(PADDED) == 1
+
+
+# ── 回归：运行时状态形状（2026-10-14 BigMak 实测的误伤根因）───────────────────
+#
+# 第一版把 ``agent.context.state`` 当成 AgentState 来读 —— 那其实是 ContextManager
+# 的 SessionState，真正的证据链在 ``.agent_state`` 里。结果门拿到空证据链表：真 flag
+# （已在 e007 的 python 输出里）被连拒，靠有界拒绝兜底才交出去，白烧约 4 轮。
+
+
+def session_of(agent_state: AgentState):
+    """运行时形状：``agent.context.state`` 是 SessionState，AgentState 在其 ``.agent_state``。"""
+    from vulnclaw.agent.context import SessionState
+
+    return SessionState(agent_state=agent_state)
+
+
+def test_resolve_agent_state_unwraps_the_session_state():
+    state = make_state([item("shell_command", "no flag here")])
+    agent = SimpleNamespace(context=SimpleNamespace(state=session_of(state)))
+    assert resolve_agent_state(agent) is state
+
+
+def test_gate_reads_evidence_through_the_runtime_shape():
+    """回归（BigMak）：真 flag 已在 python 输出里 → 必须放行。"""
+    state = make_state([item("python_execute", f"DECODED FLAG = {OBSERVED}")])
+    agent = SimpleNamespace(context=SimpleNamespace(state=session_of(state)))
+    assert submission_refusal(agent, {"flag": OBSERVED}) is None
+
+
+def test_gate_still_refuses_a_padded_candidate_through_the_runtime_shape():
+    state = make_state([item("ctf2_get_practice_challenge", "artifact shows rlk{ with no brace")])
+    agent = SimpleNamespace(context=SimpleNamespace(state=session_of(state)))
+    assert submission_refusal(agent, {"flag": PADDED}).startswith("[submit-gate]")
 
 
 # ── 集成：dispatch 层真的拦下 ────────────────────────────────────────────────
