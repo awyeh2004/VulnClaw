@@ -1599,6 +1599,25 @@ def build_openai_tools(
         ):
             tools.append(tool)
 
+    def append_operator_tool(tool: dict[str, Any]) -> None:
+        """Append a tool the operator configured, bypassing goal-text pruning.
+
+        `allowed_tools` is a keyword heuristic over the goal text, and it prunes
+        anything it does not recognise -- including whole MCP servers the
+        operator explicitly enabled in config. Measured 2026-10-13: a goal about
+        solving CTF2 practice challenges pruned every ``ctf2_*`` agent tool
+        (``ctf2_agent_next_challenges`` and ``ctf2_submit_flag`` were absent
+        from the built schema), so the model could not see the platform's own
+        provisioned channel and re-implemented the platform client by hand
+        instead. That is the same silent failure the platform-core pin above
+        documents; a keyword guess must not undo an explicit configuration
+        decision. Role gating still applies, and the server list is bounded by
+        config, so the token cost stays finite.
+        """
+        name = str(tool.get("function", {}).get("name", ""))
+        if role_allows_tool(active_role, name):
+            tools.append(tool)
+
     append_builtin_tool_schemas(append_tool)
 
     # ── Pwn local replay (Docker) ────────────────────────────────────
@@ -2052,7 +2071,7 @@ def build_openai_tools(
 
     if mcp_manager:
         for schema in mcp_manager.get_tool_schemas():
-            append_tool(
+            append_operator_tool(
                 {
                     "type": "function",
                     "function": {

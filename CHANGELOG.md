@@ -1,4 +1,14 @@
 <details open>
+<summary><strong>Unreleased</strong> — MCP 工具不再被目标文本裁剪（ctf2 agent 面实测被隐藏）</summary>
+
+- **修（中·可发现性，实测坐实）：按目标关键词裁剪工具表把运维启用的 MCP 服务器整体裁掉** — 2026-10-13 驱动一次 CTF2 自主解题时实测：目标文本经 `_infer_allowed_tools` 判定后，构建出的 schema 里 **`ctf2_agent_next_challenges` / `ctf2_submit_flag` 等 ctf2 MCP 工具全部缺席**（`platform_*` 中性工具因核心钉列表保留），模型看不到平台自带的 agent 通道（读题/起环境/提交/笔记/服务端配额），只能手工用 python 重造 Open API 客户端完成全流程——该次仍解出并提交成功（`accepted:true, is_solved:true`），但多花步数且绕开了平台侧审计面。这与 `_ALWAYS_KEEP_TOOLS` 注释记录的静默失败同类，当时的钉子只钉了中性 `platform_*`。**修法**：`build_openai_tools` 新增 `append_operator_tool` —— MCP 服务器提供的工具绕过目标关键词裁剪（角色门控保留；服务器集合由运维配置约束，token 成本有限），内置重型工具仍照旧裁剪。**回归**：`tests/agent/test_builtin_tools.py::TestMcpToolsSurviveGoalPruning` 双向钉住（MCP 工具在裁剪集外仍存活 / 内置工具仍被裁剪）。
+- **测试** — 定向 647 passed（builtin_tools + blackboard_dispatch + model_ablation + platforms）；tests/agent + tests/security 全绿。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 三场 CTF 实战日志暴露问题修复：verify_fact 误拒（共享原文片段层）· 拒绝型回复误记工具 degraded · PowerShell 中文乱码 · CSS/JS 伪 flag</summary>
 
 - **修（高·复现于三场连跑）：`blackboard_verify_fact`/`add_fact` 对"叙述+原样引用"型 fact 全量误拒** — 2026-10-12 三场 CTF2 连跑（Packet Yard / MDM pin-set / OrbitPay 重放）中，模型的 fact 均为"自己的话 + 原样引用的工具输出"，而既有校验要求整段子句逐字命中或 ≥90% 词元重合；工具输出只要混入不同标点或中文（`=== MDM 策略审查器 v2.6 (Policy REPL) ===`、`pin-sha256=<base64>`、`recovered: <32hex>`），引用即失配 → 每场全部 candidate，完成门随后索要更多无法提供的已证实 fact，每场多烧一整轮。新增**共享原样片段层**：fact 与证据的最长公共归一化片段 ≥8 字符、且片段携带真实内容（中文连串，或 ≥5 字符非停用词且非纯 id/hash 的实词）即证实。防伪造底线逐条钉死：裸时间戳/id（`job id 1758432000123456`）、借真 hash 编造叙事（APT implant）、停用词袋、部分词匹配（config≠configuration）、未见字面量——全部仍拒。新增 7 例回归（`test_blackboard_witnessing.py::TestNarrationGluedToQuotedObservation`）。

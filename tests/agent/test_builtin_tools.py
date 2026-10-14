@@ -971,6 +971,55 @@ class TestInferAllowedToolsQuiz:
         assert "fetch" not in tools
 
 
+class TestMcpToolsSurviveGoalPruning:
+    """Operator-enabled MCP servers must not be hidden by the goal heuristic.
+
+    Measured 2026-10-13 while driving a live CTF2 solve: the goal text pruned
+    every ``ctf2_*`` MCP tool out of the built schema
+    (``ctf2_agent_next_challenges`` / ``ctf2_submit_flag`` absent), so the model
+    could not see the platform's provisioned agent channel and re-implemented
+    the platform client by hand. Same silent-failure class the platform-core pin
+    in ``builtin_tools`` documents.
+    """
+
+    class _Mcp:
+        def get_tool_schemas(self):
+            return [
+                {
+                    "name": "ctf2_agent_next_challenges",
+                    "description": "next",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "ctf2_submit_flag",
+                    "description": "submit",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
+            ]
+
+    def _names(self, tools):
+        return [t["function"]["name"] for t in tools]
+
+    def test_mcp_tools_are_kept_even_when_not_in_the_pruned_set(self):
+        from vulnclaw.agent.builtin_tools import build_openai_tools
+
+        tools = build_openai_tools(
+            self._Mcp(), allowed_tools={"python_execute", "platform_list"}
+        )
+        names = self._names(tools)
+        assert "ctf2_agent_next_challenges" in names
+        assert "ctf2_submit_flag" in names
+
+    def test_builtin_tools_are_still_pruned_by_the_same_set(self):
+        from vulnclaw.agent.builtin_tools import build_openai_tools
+
+        tools = build_openai_tools(self._Mcp(), allowed_tools={"python_execute"})
+        names = self._names(tools)
+        # The pruning still applies to built-ins: a heavy web tool stays out.
+        assert "dir_enum" not in names
+        assert "python_execute" in names
+
+
 class TestSolveScratchWorkdir:
     """session.solve_work_root: solve tools run in <root>/<run_id>/, not the repo."""
 
