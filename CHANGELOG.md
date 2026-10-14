@@ -1,4 +1,18 @@
 <details open>
+<summary><strong>Unreleased</strong> — 第 6 轮审查：见证门可被"借一个真 token"绕过 · 验证热路径 87 s→O(n) · 拒绝正则不再吞环境故障 · PS 编码逃逸口写进工具描述</summary>
+
+- **修（高·实测驱动）：共享片段层可被"借真 token 编造叙事"绕过** — 2026-10-14 第 6 轮只读审查（回放 459 场会话、160 组真实 `pinned_fact × evidence`）实测三个洞：① 载体实词只需"出现在证据任意位置"，不必落在共享片段内 —— `I confirmed <复制的 UUID> which proves the internal admin panel qzxwvu exposes scoring` 被见证，载体词是别处的 `admin`（实测 `INSIDE_SPAN=False`）；② UUID 分段不是 hex run，`_is_corroborating_only` 的 `[0-9a-f]{16,}` 漏掉 `c37ccae980c3` 这类分段；③ CJK 分支只要片段含 2 个汉字即算"有内容"，借 5 个汉字 + 编造中文断言即通过。**修法**：`_span_carries_content` 要求载体词**落在片段内**（这本是它 docstring 的原意）、`_is_corroborating_only(token, span)` 把 UUID 分段按指纹处理、CJK 分支提到 ≥8 字符；并因 21 MB 级证据下"任意英文子句都能凑出 8 字符公共段"而把固定门槛改为**随子句长度伸缩**（`_SHARED_SPAN_MIN_COVERAGE=0.30`，按 200 条真实被见证事实标定：覆盖率最低 0.333 / p05 0.361）。**真实语料零损失**：同一 160 组回放 151 组仍被见证（打补丁前仅 9 组），旧模块（`git show HEAD:`）跑同一批断言 4 例红。
+- **修（高·实测驱动）：`_longest_common_substring` 在事实验证热路径上 O(n·m)、无缓存、无上限** — 实测单次调用 64 KB 证据 371 ms、**21.7 MB 证据 87 s**（真实会话存在 21,760,693 字符的 evidence 记录，`_run_blackboard_review` 对每条 fact × 每块证据都调）；另实测我一次 870 次调用的扫描 600 s 未跑完。**修法**：加 8-gram 必要条件快速否决（`_has_shared_ngram`，O(n+m)，语义上是纯必要条件）＋证据只归一化一次（此前每个候选子句各归一化一遍 64 KB）。**实测**：216 KB 用例 1148 ms → 60 ms（19×）；21 MB 用例 87 s → 525 ms。新增性能守卫断言（216 KB 证据单次 <1 s，旧代码实测 1148 ms 会红）。
+- **修（中·实测驱动）：拒绝正则把环境故障当"验证性拒绝"，工具健康信号失真** — 扫全仓 202 条框架自产 `[!]` 字面量：HEAD 判"工具健康"58 条，含 `runtime_diff_probe php_serialize mode requires php in PATH`（依赖缺失 = 真故障，被 `requires\b` 吞掉）。**修法**：`requires` 收窄为参数形状、新增 `_HARD_FAILURE_LINE_RE`（`in PATH` / `command not found` / `is not recognized` / `WinError` / `Traceback` / `timed out` / `permission denied`）优先判定、`未找到` 收窄为 `参考文档未找到`。**前后对照**：58 → 57 条健康，唯一翻转即那条真故障；37 条 `requires` 参数校验全部保持健康（含反引号形态 `requires \`local_path\`` —— 首版收窄漏了反引号，靠"捕获完整字面量"的扫描抓回）。该函数此前**零测试覆盖**，本轮补 3 例。
+- **文档（低）：把 PowerShell 编码逃逸口写进 `shell_command` 工具描述** — 窗口内新增的 `_PS_UTF8_PREAMBLE` 使 cmdlet 写文件带 UTF-8 BOM（实测 PS 写 JSON → `json.load` 抛 `Unexpected UTF-8 BOM`），读侧对 GBK 旧文件转乱码。实测 2213 次 shell 调用"读 379 / 写 73"，且写入多为 `cmd > file` 重定向（不受 `$PSDefaultParameterValues` 影响）→ **保留全局设置**，改为在模型可见处说明：结构化文件用 `python_execute` 或 `[IO.File]::WriteAllText($p,$s,[Text.UTF8Encoding]::new($false))`，读旧 GBK 文件用 `-Encoding Default`。
+- **测试** — `tests/agent + tests/security + tests/skills` → **2687 passed / 14 skipped / 1 failed**，唯一红为既有的 `test_bg_tasks.py::test_bg_launch_and_result_lifecycle`（HEAD 同红，与本批无关）；新增 13 例（见证门反例表 6 · 必要条件/性能守卫 3 · 拒绝正则 4）。
+- **边界（未做，明确留口）** — ① 21 MB 级证据仍有 ~525 ms 扫描，进一步需按证据长度分窗（属语义变更）；② CJK 只做到 ≥8 字符，借 8+ 汉字 + 长编造尾巴仍可通过，要按"片段占子句比例"收口需中文证据语料定标；③ `pwsh` 的 `utf8NoBOM` 未落地（本机无 PS7，无法验证）；④ 未动 `is_placeholder_flag`（缺真实反例，仅给出收窄方案）与 MCP 角色门控（保持收紧，仅补用例与可见性）。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 提交走证据门：`ctf2_submit_flag` 此前是唯一没有任何证据检查的路径（本地拒绝，不清耗尝试）</summary>
 
 - **修（高·实测驱动）：平台提交没有任何证据检查，"补全型猜测"直接花掉尝试** — 2026-10-14 CTF2 巡航 24 轮实测账号 `attempt_count 86 / correct_count 77`（9 次白花）。`_completion_gate`（`solver.py:1639`）确实按证据校验 flag，但**只在模型喊 FINAL 时跑**（唯一调用点 `solver.py:2622`），而平台提交是**解题中途**发生的：`builtin_tools.execute_mcp_tool` 里提交动词只过角色/约束门 + 危险工具门 + 运维总开关，随后 `yield to the MCP manager` —— 门在终点、提交在半路，两不相遇。被拒候选签名一致：附件里只观察到 `flag{`（无 `}`），**body 与闭括号由模型自己补出**，补完形态完全合法，连 FINAL 的 shape 检查（`ctf_mode.flag_completeness_issues`，2026-10-09 鸡公煲产物）也看不出破绽。
