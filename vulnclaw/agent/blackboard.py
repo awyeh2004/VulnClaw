@@ -17,6 +17,7 @@ traces the reasoning process end-to-end.
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -518,6 +519,16 @@ _MIN_SEGMENT_CHARS = 24
 # fabrication tests, which pin this.
 _SHARED_SPAN_MIN_CHARS = 8
 
+# ...and the bar scales with the clause. A fixed eight characters cannot
+# corroborate a ninety-character claim, and against multi-megabyte evidence (real
+# sessions carry 21 MB evidence records) almost any English clause shares *some*
+# eight-character run with the blob -- so "<copied token> which proves the admin
+# panel is open" passed on a generic word. Calibrated on 200 real accepted facts:
+# their span coverage never fell below 0.33 (p05 0.36, median 0.77), so 0.30 keeps
+# every one of them while rejecting a borrowed quote plus an invented tail. Thin
+# margin by construction -- lower it only against new replay evidence.
+_SHARED_SPAN_MIN_COVERAGE = 0.30
+
 # High-signal literals that only a witness could reproduce: a flag-shaped value, a
 # UUID, or a hex run. If the fact and the evidence share one, the fact's
 # observation was genuinely seen -- and a fabricated claim cannot contain one.
@@ -536,6 +547,13 @@ _FINGERPRINT_PATTERNS = (
 # have seen it: nobody derives a flag, and a fact that names two flags has to
 # have observed both.
 _FLAG_PATTERN = r"[A-Za-z0-9_]{2,32}\{[^}\s]{8,}\}"
+
+# A hyphenated UUID is a fingerprint (see ``_FINGERPRINT_PATTERNS``), but each of
+# its segments is not a hex run, so a clause that copies a UUID used to be able to
+# cite "1dff1955" / "c37ccae980c3" as *content* and witness an invented claim.
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 # Wording corroboration bar. Whole-token matching (not substring) plus a higher
 # ratio than the old 0.8 bag-of-common-words test, because the bag let a clause
@@ -651,18 +669,30 @@ def _witnessed_in_evidence(fact_text: str, chunk: str) -> bool:
 
     # Tier 2: wording corroboration, with any cited literal tied to its clause.
     evidence_tokens = _substantive_tokens(evidence)
+    # Normalising the evidence is a regex pass over the whole blob and every
+    # candidate clause compares against the same bytes, so do it once per fact
+    # instead of once per candidate (real sessions carry 64 KB evidence records
+    # and up to four candidates per fact).
+    norm_evidence = _norm_text(evidence)
     for candidate in [fact_text, *_fact_segments(fact_text)]:
-        if _clause_witnessed(candidate, evidence, evidence_tokens, evidence_fp):
+        if _clause_witnessed(
+            candidate, evidence, evidence_tokens, evidence_fp, norm_chunk=norm_evidence
+        ):
             return True
     return False
 
 
 def _clause_witnessed(
-    candidate: str, evidence: str, evidence_tokens: set[str], evidence_fp: set[str]
+    candidate: str,
+    evidence: str,
+    evidence_tokens: set[str],
+    evidence_fp: set[str],
+    norm_chunk: str | None = None,
 ) -> bool:
     """Whether one clause of a fact is corroborated by the evidence."""
     norm_fact = _norm_text(candidate)
-    norm_chunk = _norm_text(evidence)
+    if norm_chunk is None:
+        norm_chunk = _norm_text(evidence)
     if not norm_fact or not norm_chunk:
         return False
 
@@ -678,8 +708,21 @@ def _clause_witnessed(
     # Shared contiguous span: the observation was quoted from real output even
     # though the clause also carries the model's own narration or punctuation
     # that differs from the stored bytes (see ``_SHARED_SPAN_MIN_CHARS``).
+    #
+    # The bar grows with the clause (``_SHARED_SPAN_MIN_COVERAGE``): a fixed eight
+    # characters cannot corroborate a long claim, and quoting one real word out of a
+    # multi-megabyte evidence blob is not an observation.
+    #
+    # The scan below is the hot path of fact verification (measured 371 ms for a
+    # single 64 KB evidence chunk, 87 s for one 21 MB record), and it cannot succeed
+    # unless the two strings share a run of *span_bar* characters at all. Reject on
+    # that necessary condition first -- it is O(len(chunk)) and allocates nothing.
+    span_bar = max(_SHARED_SPAN_MIN_CHARS, math.ceil(_SHARED_SPAN_MIN_COVERAGE * len(norm_fact)))
+    if not _has_shared_ngram(norm_fact, norm_chunk, size=span_bar):
+        return False
+
     span = _longest_common_substring(norm_fact, norm_chunk)
-    if len(span) >= _SHARED_SPAN_MIN_CHARS and _span_carries_content(
+    if len(span) >= span_bar and _span_carries_content(
         candidate, span, evidence_tokens, evidence_fp
     ):
         return True
@@ -689,6 +732,23 @@ def _clause_witnessed(
         return False
     hit = len(tokens & evidence_tokens)
     return hit / len(tokens) >= _OVERLAP_THRESHOLD
+
+
+def _has_shared_ngram(a: str, b: str, size: int = _SHARED_SPAN_MIN_CHARS) -> bool:
+    """Whether *a* and *b* share any *size*-character run at all.
+
+    A necessary condition for ``_longest_common_substring`` to reach *size*, so it
+    can only ever turn a "longest common substring" answer into a no-op. Built for
+    the negative case, which dominates in practice: the DP below walks
+    len(a)*len(b) cells (measured 371 ms for a 64 KB evidence chunk and a 130-char
+    clause) just to discover that the longest shared run is a handful of
+    characters. This scan is O(len(b)) over an 8-character window and allocates one
+    set of the (short) clause side.
+    """
+    if len(a) < size or len(b) < size:
+        return False
+    grams = {a[i : i + size] for i in range(len(a) - size + 1)}
+    return any(b[i : i + size] in grams for i in range(len(b) - size + 1))
 
 
 def _longest_common_substring(a: str, b: str) -> str:
@@ -711,18 +771,22 @@ def _longest_common_substring(a: str, b: str) -> str:
     return a[end - best : end]
 
 
-def _is_corroborating_only(token: str) -> bool:
+def _is_corroborating_only(token: str, span: str = "") -> bool:
     """True for a bare digit/hex run: an id or hash proves nothing on its own.
 
     Matches the corroborating-not-definitive decision already made for
     ``_FINGERPRINT_PATTERNS`` (a decimal timestamp or a bare hex blob can appear
     in unrelated output, so sharing one must not confirm a claim by itself).
+
+    *span* is the shared run the token was carried by. A UUID's segments are not
+    hex runs, so without this a clause that copied a real UUID could cite
+    "1dff1955" as its substantive word.
     """
     import re as _re
 
-    return bool(_re.fullmatch(r"[0-9]{12,}", token)) or bool(
-        _re.fullmatch(r"[0-9a-f]{16,}", token)
-    )
+    if _re.fullmatch(r"[0-9]{12,}", token) or _re.fullmatch(r"[0-9a-f]{16,}", token):
+        return True
+    return any(token in match.group(0) for match in _UUID_RE.finditer(span or ""))
 
 
 def _span_carries_content(
@@ -730,21 +794,32 @@ def _span_carries_content(
 ) -> bool:
     """Whether a shared span corroborates the clause rather than just echoing an id.
 
-    A CJK run inside the span is content by itself. Otherwise the clause must own
-    a substantive word (>= 5 chars, not a stop token, not a bare id/hash) that the
-    span carries into the evidence -- so "job id 1758432000123456 proves ..." still
-    fails while a quoted `spki 1 = <pin>` or a quoted response line passes.
+    A CJK run of at least ``_SHARED_SPAN_MIN_CHARS`` inside the span is content by
+    itself. Otherwise the clause must own a substantive word (>= 5 chars, not a
+    stop token, not a bare id/hash) *carried by the span* -- so
+    "job id 1758432000123456 proves ..." still fails while a quoted
+    `spki 1 = <pin>` or a quoted response line passes.
+
+    Round-6 review (replay over 160 real pinned_fact/evidence pairs) closed two
+    holes that let a copied token witness an invented claim: the substantive word
+    only had to appear *somewhere* in the evidence rather than inside the shared
+    span ("<copied UUID> which proves the admin panel is open" passed on the word
+    "admin" appearing elsewhere in a large blob), and a UUID's segments counted as
+    content because they are not hex runs. Both are fixed here; on the real corpus
+    the 151 witnessed facts are unchanged.
     """
     import re as _re
 
-    if _re.search(r"[\u4e00-\u9fff]{2,}", span):
+    cjk_run = _re.search(r"[\u4e00-\u9fff]{2,}", span)
+    if cjk_run and len(cjk_run.group(0)) >= _SHARED_SPAN_MIN_CHARS:
         return True
     for token in _substantive_tokens(candidate):
         if (
             len(token) >= 5
+            and token in span
             and token in evidence_tokens
             and token not in evidence_fp
-            and not _is_corroborating_only(token)
+            and not _is_corroborating_only(token, span)
         ):
             return True
     return False

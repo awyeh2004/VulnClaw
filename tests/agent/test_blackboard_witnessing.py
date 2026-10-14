@@ -19,7 +19,12 @@ match, not by accepting a loose bag of common words.
 from __future__ import annotations
 
 from vulnclaw.agent.blackboard import (
+    _SHARED_SPAN_MIN_CHARS,
     _fingerprints,
+    _has_shared_ngram,
+    _is_corroborating_only,
+    _longest_common_substring,
+    _norm_text,
     _unescape_evidence,
     _witnessed_in_evidence,
 )
@@ -226,3 +231,102 @@ class TestNarrationGluedToQuotedObservation:
             )
             is False
         )
+
+
+class TestRound6CopiedTokenCannotWitness:
+    """A *copied* token must not carry an invented claim.
+
+    Three holes were measured on live sessions (round-6 audit) and are pinned here:
+
+    * the substantive word only had to appear *somewhere* in the evidence instead of
+      inside the shared span, so copying a real id and adding "which proves ..."
+      passed on a generic word appearing elsewhere in a 64 KB blob;
+    * a UUID's segments are not hex runs, so they counted as content;
+    * a CJK run of two characters inside the span counted as content by itself, so a
+      borrowed five-character run witnessed an invented Chinese sentence.
+
+    The fourth test guards the opposite direction: the bar scales with the clause, so
+    a real observation quoted with a little narration must still be witnessed.
+    """
+
+    EVIDENCE = (
+        "GET /admin HTTP/1.1 200 OK\n"
+        "set-cookie: sid=1dff1955-496b-40be-81f7-c37ccae980c3; Path=/\n"
+        "状态码code=404服务器内错 请重试\n"
+    )
+
+    def test_borrowed_uuid_plus_invented_claim_is_rejected(self):
+        fact = (
+            "I confirmed 1dff1955-496b-40be-81f7-c37ccae980c3 which proves the "
+            "internal admin panel qzxwvu exposes scoring"
+        )
+        assert _witnessed_in_evidence(fact, self.EVIDENCE) is False
+
+    def test_uuid_verbatim_with_invented_tail_is_rejected(self):
+        fact = (
+            "sid 1dff1955-496b-40be-81f7-c37ccae980c3 proves the admin panel "
+            "trusts unsigned session cookies from any host"
+        )
+        assert _witnessed_in_evidence(fact, self.EVIDENCE) is False
+
+    def test_short_cjk_run_in_the_span_is_not_content(self):
+        fact = "错误码code=404服务器内错说明后台未鉴权"
+        assert _witnessed_in_evidence(fact, self.EVIDENCE) is False
+
+    def test_long_cjk_observation_is_still_witnessed(self):
+        fact = "note: 服务器返回登录成功请重试 -> 说明未鉴权"
+        evidence = "note: 服务器返回登录成功请重试\n"
+        assert _witnessed_in_evidence(fact, evidence) is True
+
+    def test_one_quoted_word_does_not_carry_a_long_invented_tail(self):
+        evidence = "response header x-powered-by: PHP/7.4.3\n"
+        fact = (
+            "x-powered-by is PHP/7.4.3 which proves the upload endpoint accepts "
+            "arbitrary files and the scoring service trusts whatever it is handed"
+        )
+        assert _witnessed_in_evidence(fact, evidence) is False
+
+    def test_uuid_fragments_are_not_substantive_content(self):
+        span = "1dff1955-496b-40be-81f7-c37ccae980c3"
+        assert _is_corroborating_only("1dff1955", span) is True
+        assert _is_corroborating_only("c37ccae980c3", span) is True
+        # Outside a UUID the same word is ordinary content.
+        assert _is_corroborating_only("powered", "x-powered-by:php/7.4.3") is False
+
+
+class TestSpanSearchStaysCheap:
+    """The span search is on the fact-verification hot path.
+
+    Real sessions carry 64 KB and 21 MB evidence records; the quadratic scan cost
+    371 ms and 87 s respectively per clause. The n-gram prefilter must be a pure
+    necessary condition and must keep large evidence off the quadratic path.
+    """
+
+    def test_prefilter_is_a_necessary_condition(self):
+        cases = [
+            ("abc", "abc"),
+            ("abcdefgh", "zzzzzzzz"),
+            ("the quick brown fox", "a quick brown fox jumps"),
+            ("", "anything"),
+            ("x" * 40, "y" * 40),
+            ("normalised span here", "prefix normalised span here suffix"),
+        ]
+        for a, b in cases:
+            na, nb = _norm_text(a), _norm_text(b)
+            long_enough = len(_longest_common_substring(na, nb)) >= _SHARED_SPAN_MIN_CHARS
+            assert _has_shared_ngram(na, nb) is long_enough
+
+    def test_large_evidence_is_not_quadratic(self):
+        import time
+
+        evidence = ("GET /admin HTTP/1.1 200 OK\n" * 8000)  # ~216 KB
+        fact = "I confirmed the internal admin panel qzxwvu exposes scoring to anyone"
+        start = time.perf_counter()
+        assert _witnessed_in_evidence(fact, evidence) is False
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"span search too slow on large evidence: {elapsed:.2f}s"
+
+    def test_verbatim_long_evidence_clause_is_still_witnessed(self):
+        witness = "response body: login succeeded and the session cookie is accepted"
+        evidence = ("noise line\n" * 500) + witness + ("\ntrailing noise" * 500)
+        assert _witnessed_in_evidence(witness, evidence) is True
