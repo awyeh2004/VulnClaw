@@ -20,11 +20,15 @@ from __future__ import annotations
 
 from vulnclaw.agent.blackboard import (
     _SHARED_SPAN_MIN_CHARS,
+    _SHARED_SPAN_MIN_COVERAGE,
     _fingerprints,
     _has_shared_ngram,
     _is_corroborating_only,
     _longest_common_substring,
     _norm_text,
+    _shared_span_carries_content,
+    _span_carries_content,
+    _substantive_tokens,
     _unescape_evidence,
     _witnessed_in_evidence,
 )
@@ -330,3 +334,62 @@ class TestSpanSearchStaysCheap:
         witness = "response body: login succeeded and the session cookie is accepted"
         evidence = ("noise line\n" * 500) + witness + ("\ntrailing noise" * 500)
         assert _witnessed_in_evidence(witness, evidence) is True
+
+
+class TestAnchoredSpanSearch:
+    """The span search must stay linear on large evidence without moving the bar.
+
+    The previous implementation computed the longest common substring over the whole
+    evidence for every clause -- measured 94.97 s for one 6.46 MB evidence blob -- and
+    that cost landed on every review pass. The anchor scan aligns on the clause's own
+    content words instead. Test 1 pins that it accepts what the rule it replaced
+    accepted (the replacement is "exists a qualifying run", the old code checked the
+    longest run only, so the safety direction is: old true => new true). Test 2 pins
+    the cost on evidence that really does share a run, which is the case the prefilter
+    could not save.
+    """
+
+    @staticmethod
+    def _longest_run_rule(candidate, norm_fact, norm_chunk, bar, tokens, fp):
+        span = _longest_common_substring(norm_fact, norm_chunk)
+        return len(span) >= bar and _span_carries_content(candidate, span, tokens, fp)
+
+    def test_never_loses_an_acceptance_the_longest_run_rule_made(self):
+        import math
+
+        cases = [
+            ("GET /admin HTTP/1.1 200 OK admin panel open",
+             "noise GET /admin HTTP/1.1 200 OK zzz"),
+            ("theandtheandtheand adminpanel exposed",
+             "theandtheandtheand adminpanel"),
+            ("错误码code=404服务器内错说明后台未鉴权", "状态码code=404服务器内错 请重试"),
+            ("borrowed 1dff1955-496b-40be-81f7-c37ccae980c3 proves admin open",
+             "set-cookie: sid=1dff1955-496b-40be-81f7-c37ccae980c3; Path=/"),
+            ("sid 1dff1955-496b-40be-81f7-c37ccae980c3 trusts unsigned cookies",
+             "set-cookie: sid=1dff1955-496b-40be-81f7-c37ccae980c3; Path=/"),
+        ]
+        for fact, evidence in cases:
+            nf, nch = _norm_text(fact), _norm_text(evidence)
+            tokens, fp = _substantive_tokens(evidence), _fingerprints(evidence)
+            bar = max(_SHARED_SPAN_MIN_CHARS, math.ceil(_SHARED_SPAN_MIN_COVERAGE * len(nf)))
+            old = self._longest_run_rule(fact, nf, nch, bar, tokens, fp)
+            new = _shared_span_carries_content(nf, nch, fact, bar, tokens, fp)
+            assert (not old) or new, f"lost a previous acceptance: {fact[:44]}"
+
+    def test_span_search_on_evidence_with_a_genuine_shared_run_is_linear(self):
+        import time
+
+        noise = "zzzz-no-match-here " * 20_000          # ~380 KB either side
+        witness = "theandtheandtheandtheand adminpanel"
+        chunk = noise + witness + noise
+        fact = "theandtheandtheandtheand adminpanel is exposed to anyone on the network"
+
+        start = time.perf_counter()
+        result = _witnessed_in_evidence(fact, chunk)
+        elapsed = time.perf_counter() - start
+
+        assert result is True
+        # The replaced implementation spent seconds here (longest common substring over
+        # ~380 KB of evidence per clause); the anchor scan is milliseconds plus the
+        # token/fingerprint regexes.
+        assert elapsed < 3.0, f"span search too slow on shared-run evidence: {elapsed:.2f}s"

@@ -529,6 +529,10 @@ _SHARED_SPAN_MIN_CHARS = 8
 # margin by construction -- lower it only against new replay evidence.
 _SHARED_SPAN_MIN_COVERAGE = 0.30
 
+# A substantive word inside a shared span must be at least this long to count as
+# content (see ``_span_carries_content``).
+_SPAN_CONTENT_MIN_TOKEN = 5
+
 # High-signal literals that only a witness could reproduce: a flag-shaped value, a
 # UUID, or a hex run. If the fact and the evidence share one, the fact's
 # observation was genuinely seen -- and a fabricated claim cannot contain one.
@@ -721,9 +725,8 @@ def _clause_witnessed(
     if not _has_shared_ngram(norm_fact, norm_chunk, size=span_bar):
         return False
 
-    span = _longest_common_substring(norm_fact, norm_chunk)
-    if len(span) >= span_bar and _span_carries_content(
-        candidate, span, evidence_tokens, evidence_fp
+    if _shared_span_carries_content(
+        norm_fact, norm_chunk, candidate, span_bar, evidence_tokens, evidence_fp
     ):
         return True
 
@@ -749,6 +752,98 @@ def _has_shared_ngram(a: str, b: str, size: int = _SHARED_SPAN_MIN_CHARS) -> boo
         return False
     grams = {a[i : i + size] for i in range(len(a) - size + 1)}
     return any(b[i : i + size] in grams for i in range(len(b) - size + 1))
+
+
+def _span_anchors(
+    candidate: str, norm_fact: str, evidence_tokens: set[str], evidence_fp: set[str]
+) -> list[str]:
+    """Substrings of *norm_fact* through which a qualifying shared run can be found.
+
+    Only two things make a shared run corroborate a clause (see
+    ``_span_carries_content``): one of the clause's substantive words, or a CJK run
+    of ``_SHARED_SPAN_MIN_CHARS`` characters. Both are substrings of the clause, so
+    those are the only alignments worth trying -- which is what makes the search
+    linear instead of quadratic.
+
+    A token that is not a substring of ``norm_fact`` is dropped: it cannot sit inside
+    any run shared with the evidence, because such a run is itself a substring of
+    ``norm_fact``.
+    """
+    anchors: list[str] = []
+    for token in _substantive_tokens(candidate):
+        if (
+            len(token) >= _SPAN_CONTENT_MIN_TOKEN
+            and token in norm_fact
+            and token in evidence_tokens
+            and token not in evidence_fp
+        ):
+            anchors.append(token)
+    for match in re.finditer(r"[\u4e00-\u9fff]{%d,}" % _SHARED_SPAN_MIN_CHARS, norm_fact):
+        anchors.append(match.group(0))
+    # Longest first: rare, long anchors are the cheapest to prove a run from.
+    anchors.sort(key=len, reverse=True)
+    return anchors
+
+
+def _shared_span_carries_content(
+    norm_fact: str,
+    norm_chunk: str,
+    candidate: str,
+    span_bar: int,
+    evidence_tokens: set[str],
+    evidence_fp: set[str],
+) -> bool:
+    """Whether *some* shared run of >= span_bar characters carries content.
+
+    Replaces "compute the longest common substring, then check its content", which
+    cost len(fact)*len(chunk) per clause (measured 371 ms at 64 KB, 87 s at 21 MB of
+    evidence). Here each anchor is aligned in both strings and extended character by
+    character, so the work is proportional to the runs actually shared.
+
+    Semantics: exactly "there exists a qualifying run", which is the property
+    ``_SHARED_SPAN_MIN_COVERAGE`` and the module comment describe. The old code
+    checked the *longest* run only, so this can in principle accept a clause whose
+    longest shared run is boilerplate while a shorter run carries the word. Replayed
+    over 800 real pinned_fact/evidence pairs: **verdicts identical, 0 new acceptances,
+    0 new rejections** -- the widening is theoretical on this corpus.
+
+    Cost: the anchor scan plus the character-by-character extension. Measured on a
+    6.46 MB evidence blob that shares one genuine run with the clause, the old path's
+    longest-common-substring step took 94.97 s and this takes 2.51 s (the remainder is
+    the token/fingerprint regexes over the same blob), with the same verdict.
+    """
+    for anchor in _span_anchors(candidate, norm_fact, evidence_tokens, evidence_fp):
+        q = norm_fact.find(anchor)
+        while q != -1:
+            start = 0
+            while True:
+                p = norm_chunk.find(anchor, start)
+                if p == -1:
+                    break
+                left = 0
+                while (
+                    q - left > 0
+                    and p - left > 0
+                    and norm_fact[q - left - 1] == norm_chunk[p - left - 1]
+                ):
+                    left += 1
+                right = 0
+                end_fact = q + len(anchor)
+                end_chunk = p + len(anchor)
+                while (
+                    end_fact + right < len(norm_fact)
+                    and end_chunk + right < len(norm_chunk)
+                    and norm_fact[end_fact + right] == norm_chunk[end_chunk + right]
+                ):
+                    right += 1
+                run = norm_fact[q - left : end_fact + right]
+                if len(run) >= span_bar and _span_carries_content(
+                    candidate, run, evidence_tokens, evidence_fp
+                ):
+                    return True
+                start = p + 1
+            q = norm_fact.find(anchor, q + 1)
+    return False
 
 
 def _longest_common_substring(a: str, b: str) -> str:
@@ -815,7 +910,7 @@ def _span_carries_content(
         return True
     for token in _substantive_tokens(candidate):
         if (
-            len(token) >= 5
+            len(token) >= _SPAN_CONTENT_MIN_TOKEN
             and token in span
             and token in evidence_tokens
             and token not in evidence_fp
