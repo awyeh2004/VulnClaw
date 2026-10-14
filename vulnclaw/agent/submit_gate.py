@@ -29,7 +29,7 @@ own note (the evidence face includes tool results that merely echo model text)"�
 
 ``agent.context.state`` 是 **ContextManager 的 SessionState**；真正的 AgentState
 （``evidence`` 所在）挂在 ``state.agent_state``。第一版直接读了前者，拿到的是空证据
-链 —— 于是门把**每一次**提交都判成"无证据"：真 flag ``sun{bu...lol}``
+链 —— 于是门把**每一次**提交都判成"无证据"：真 flag ``sun{bu…lol}``（指纹形）
 （明明已出现在 e007 的 python 输出里）被连拒，靠有界拒绝（``MAX_REFUSALS``）兜底
 才交出去，白烧约 4 轮推理。规范取法见 ``vulnclaw/agent/blackboard.py:862`` 与
 ``context_budget._state_for``。

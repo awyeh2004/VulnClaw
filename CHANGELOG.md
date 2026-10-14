@@ -1,8 +1,8 @@
 <details open>
 <summary><strong>Fix</strong> — 提交证据门第一版读错状态对象：真 flag 被连拒（BigMak 轮实测）</summary>
 
-- **修（高）：`agent.context.state` 是 ContextManager 的 SessionState，不是 AgentState** — 真正的证据链挂在 `state.agent_state` 上（规范取法见 `blackboard.py:862` / `context_budget._state_for`）。第一版直接读了前者 → 门拿到**空证据链** → 每一次提交都被判"无证据"：2026-10-14 14:25 的 BigMak 轮里，真 flag `sun{bu...lol}`（早已出现在 e007 的 python 输出里）被连拒 4 次，靠**有界拒绝**（`MAX_REFUSALS=2`）兜底才在第 3 次放行并被平台接受（100 分）—— 那 4 轮推理是白烧的。修复：新增 `resolve_agent_state()` 统一解包（两种形状都认，取不到则 fail-open）。
-- **验收（真实数据 + 运行时形状）** — BigMak 轮 77 条证据 × 10 个提交点回放：**误伤 0**（`sun{bu...lol}` 从首个提交点即放行）；run21 的补全型 `flag{ch4ll3ng3_n4m3}` 仍**拦下**。新增 3 例回归测试钉住运行时形状（`SessionState(agent_state=AgentState)`）：`test_submit_evidence_gate.py + test_tool_face_precedence.py` → 31 passed。
+- **修（高）：`agent.context.state` 是 ContextManager 的 SessionState，不是 AgentState** — 真正的证据链挂在 `state.agent_state` 上（规范取法见 `blackboard.py:862` / `context_budget._state_for`）。第一版直接读了前者 → 门拿到**空证据链** → 每一次提交都被判"无证据"：2026-10-14 14:25 的 BigMak 轮里，真 flag `sun{bu…lol}`（早已出现在 e007 的 python 输出里）被连拒 4 次，靠**有界拒绝**（`MAX_REFUSALS=2`）兜底才在第 3 次放行并被平台接受（100 分）—— 那 4 轮推理是白烧的。修复：新增 `resolve_agent_state()` 统一解包（两种形状都认，取不到则 fail-open）。
+- **验收（真实数据 + 运行时形状）** — BigMak 轮 77 条证据 × 10 个提交点回放：**误伤 0**（`sun{bu…lol}` 从首个提交点即放行）；run21 的补全型 `flag{<题名式>}` 仍**拦下**。新增 3 例回归测试钉住运行时形状（`SessionState(agent_state=AgentState)`）：`test_submit_evidence_gate.py + test_tool_face_precedence.py` → 31 passed。
 - **教训（已写进模块 docstring）** — 上一版验收只用"直接塞 AgentState"的替身，形状与运行时不一致，于是 20 例单测全绿而线上全错；此后凡读取 `agent.*` 状态的门，验收必须至少有一例走**运行时形状**。
 
 </details>

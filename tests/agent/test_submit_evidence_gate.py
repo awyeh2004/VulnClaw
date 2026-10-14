@@ -29,8 +29,8 @@ from vulnclaw.agent.submit_gate import (
     submission_refusal,
 )
 
-OBSERVED = "flag{syn7h3t1c_0bs3rv3d}"          # 附件里真实观测到的完整 flag
-PADDED = "flag{ch4ll3ng3_n4m3}"                   # run21：只有 `flag{`，body 按题名补的
+OBSERVED = "flag{syn7h3t1c_0bs3rv3d}"        # 合成值：代表"附件里真实观测到的完整 flag"
+PADDED = "flag{ch4ll3ng3_n4m3}"             # 合成值：代表"只有 `flag{`，body 按题名补出来"的补全型候选
 
 
 def item(tool: str, content: str) -> SimpleNamespace:
