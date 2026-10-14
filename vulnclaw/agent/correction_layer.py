@@ -87,6 +87,27 @@ _HTTP_STATUS_RE = re.compile(
 # failures, so they must not count against tool health. Matched only on a line
 # carrying the framework's own ``[!]`` verdict prefix, so target output that
 # merely contains one of these words is unaffected.
+#
+# Round-6 review: the keyword list was wide enough to silence real breakage -- a
+# scan of every framework-authored ``[!]`` literal (236 of them) showed 58 landing
+# in the healthy branch, including "php_serialize mode requires php in PATH" and
+# "nmap_scan requires nmap in PATH". A missing dependency is a broken tool, not bad
+# input. Environment failures are now excluded explicitly below, and "requires" is
+# narrowed to its argument-shaped form.
+_HARD_FAILURE_LINE_RE = re.compile(
+    r"(?im)^\s*\[!\][^\n]*?(?:"
+    r"\bin PATH\b"
+    r"|command not found"
+    r"|is not recognized"
+    r"|not installed"
+    r"|no such file"
+    r"|WinError"
+    r"|Traceback"
+    r"|timed out"
+    r"|permission denied"
+    r")"
+)
+
 _REJECTION_LINE_RE = re.compile(
     r"(?im)^\s*\[!\][^\n]*?"
     r"(?:"
@@ -94,7 +115,7 @@ _REJECTION_LINE_RE = re.compile(
     r"|keep it as candidate"
     r"|rejected:"
     r"|execution refused"
-    r"|requires\b"
+    r"|requires\s+[A-Za-z_'\"`-]"
     r"|missing structured headings"
     r"|code exceeds the max"
     r"|code is empty"
@@ -102,14 +123,17 @@ _REJECTION_LINE_RE = re.compile(
     r"|sandbox bypass detected"
     r"|unknown \S+ tool"
     r"|缺少必需参数"
-    r"|未找到"
+    r"|参考文档未找到"
     r")"
 )
 
 
 def _is_validation_rejection(raw: str) -> bool:
     """True when the output is a tool-level decline, not a broken tool."""
-    return bool(_REJECTION_LINE_RE.search(str(raw or "")))
+    text = str(raw or "")
+    if _HARD_FAILURE_LINE_RE.search(text):
+        return False
+    return bool(_REJECTION_LINE_RE.search(text))
 
 
 def _explicit_tool_ok(raw: str) -> bool | None:

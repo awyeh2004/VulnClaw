@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from vulnclaw.agent.context import ContextManager
-from vulnclaw.agent.correction_layer import after_tool_call
+from vulnclaw.agent.correction_layer import _is_validation_rejection, after_tool_call
 
 
 def _agent():
@@ -392,3 +392,52 @@ def test_rejection_words_in_target_output_do_not_hide_failures():
 
     # Exit code 7 is the explicit structured signal; it outranks everything.
     assert signal.ok is False
+
+
+def test_only_framework_verdict_lines_are_read_as_declines():
+    """Round-6 audit: the decline keyword list was wide enough to silence real
+    breakage (`requires\\b` matched "requires php in PATH", `未找到` matched any
+    missing executable). Only the framework's own ``[!]`` verdict lines count."""
+    assert _is_validation_rejection("[!] nmap_scan requires nmap in PATH") is False
+    assert _is_validation_rejection("[!] runtime_diff_probe requires php in PATH") is False
+    assert _is_validation_rejection("Exception: requires more memory than available") is False
+    assert _is_validation_rejection("未找到可执行文件: nmap") is False
+    assert _is_validation_rejection("Traceback (most recent call last): requires php") is False
+    # ...while genuine input declines stay healthy.
+    assert _is_validation_rejection("[!] shell_command requires command") is True
+    assert _is_validation_rejection("[!] remote_fetch requires local_path") is True
+    assert _is_validation_rejection("[!] cannot verify fact n12: not witnessed") is True
+
+
+def test_missing_dependency_counts_against_tool_health():
+    agent = _agent()
+    raw = "[!] runtime_diff_probe php_serialize mode requires php in PATH"
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="runtime_diff_probe",
+        arguments={},
+        raw_output=raw,
+        duration_ms=5,
+        evidence=record,
+    )
+
+    assert signal.ok is False
+
+
+def test_argument_decline_does_not_count_against_tool_health():
+    agent = _agent()
+    raw = "[!] shell_command requires command"
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="shell_command",
+        arguments={"command": ""},
+        raw_output=raw,
+        duration_ms=5,
+        evidence=record,
+    )
+
+    assert signal.ok is True
