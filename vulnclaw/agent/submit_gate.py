@@ -37,10 +37,16 @@ own note (the evidence face includes tool results that merely echo model text)"�
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional
+
+logger = logging.getLogger(__name__)
+
+#: 只在进程内首次发现"有 session 但解不出 AgentState"时告警（见 submission_refusal）。
+_state_warning_emitted = False
 
 # ── 自证工具：它们的内容来自模型自己的话，不能当作"观测" ─────────────────────
 SELF_WITNESS_TOOL_PREFIXES: tuple[str, ...] = ("blackboard_",)
@@ -199,6 +205,20 @@ def submission_refusal(agent: Any, args: dict[str, Any]) -> Optional[str]:
 
     state = resolve_agent_state(agent)
     if state is None:
+        # Fail-open is deliberate (没有观测面就不下判断), but it must not be SILENT: the
+        # first version of this module read the wrong state object and refused every
+        # submission, and nobody noticed for four rounds. A runtime agent always has a
+        # session, so "a session exists but no AgentState can be resolved" means the
+        # shape drifted and the gate is off for the whole run.
+        global _state_warning_emitted
+        session = getattr(getattr(agent, "context", None), "state", None)
+        if session is not None and not _state_warning_emitted:
+            _state_warning_emitted = True
+            logger.warning(
+                "submit gate is INACTIVE: %s.context.state has no resolvable agent_state; "
+                "flag submissions will not be evidence-checked in this session",
+                type(agent).__name__,
+            )
         return None
 
     from vulnclaw.agent.agent_state import is_placeholder_flag
@@ -222,6 +242,12 @@ def submission_refusal(agent: Any, args: dict[str, Any]) -> Optional[str]:
     counts = _refusal_counts(state)
     key = _candidate_key(flag)
     counts[key] = counts.get(key, 0) + 1
+    logger.debug(
+        "submit gate refused %s (attempt %d of %d before release, no observation matches)",
+        _mask(flag),
+        counts[key],
+        MAX_REFUSALS + 1,
+    )
     if counts[key] > MAX_REFUSALS:
         # 有界拒绝：模型反复坚持同一候选 → 放行（真 flag 不能被永久关在门外），
         # 但把这件事记在 state 里，运行摘要与后续复盘都看得见。

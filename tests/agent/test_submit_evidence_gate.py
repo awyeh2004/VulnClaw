@@ -155,6 +155,58 @@ def test_refusal_counts_persist_on_state():
     assert agent.context.state.submit_gate_refusals.get(PADDED) == 1
 
 
+# ── 可见性：门"静默失效"曾经是真实事故（2026-10-14 BigMak 读错状态对象）────────
+
+
+def test_unresolvable_state_warns_instead_of_silently_ungating(monkeypatch, caplog):
+    """拿不到 AgentState 时放行是对的，但**不能无声**。
+
+    运行时 agent 一定有 session；有 session 却解不出 AgentState = 状态形状漂移、
+    整轮的门都关着。上一版正是读错状态对象而没人发现，直到白烧 4 轮。
+    """
+    import logging
+
+    import vulnclaw.agent.submit_gate as gate
+
+    monkeypatch.setattr(gate, "_state_warning_emitted", False)
+    stale_session = SimpleNamespace()  # 有 session，但没有 agent_state
+    agent = SimpleNamespace(context=SimpleNamespace(state=stale_session), active_role=None)
+
+    with caplog.at_level(logging.WARNING, logger="vulnclaw.agent.submit_gate"):
+        assert submission_refusal(agent, {"flag": PADDED}) is None
+        assert submission_refusal(agent, {"flag": PADDED}) is None
+
+    assert "submit gate is INACTIVE" in caplog.text
+    # 每次提交都打会刷屏：只告警一次。
+    assert caplog.text.count("submit gate is INACTIVE") == 1
+
+
+def test_missing_session_does_not_warn(caplog):
+    """程序化调用/测试替身没有 session，不该被当成"形状漂移"告警。"""
+    import logging
+
+    import vulnclaw.agent.submit_gate as gate
+
+    with caplog.at_level(logging.WARNING, logger="vulnclaw.agent.submit_gate"):
+        assert submission_refusal(make_agent(None), {"flag": PADDED}) is None
+
+    assert "submit gate is INACTIVE" not in caplog.text
+    assert gate is not None
+
+
+def test_refusal_is_logged_with_a_masked_candidate(caplog):
+    """拒绝要留下可检索的痕迹，但日志里不能出现完整候选值。"""
+    import logging
+
+    agent = make_agent(make_state([item("shell_command", "flag{ ... Anaconda")]))
+
+    with caplog.at_level(logging.DEBUG, logger="vulnclaw.agent.submit_gate"):
+        assert submission_refusal(agent, {"flag": PADDED}) is not None
+
+    assert "submit gate refused" in caplog.text
+    assert PADDED not in caplog.text  # 只有掩码形
+
+
 # ── 回归：运行时状态形状（2026-10-14 BigMak 实测的误伤根因）───────────────────
 #
 # 第一版把 ``agent.context.state`` 当成 AgentState 来读 —— 那其实是 ContextManager
