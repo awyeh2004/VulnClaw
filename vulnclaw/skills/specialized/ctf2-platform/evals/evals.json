@@ -48,7 +48,8 @@
 			"assertions": [
 				"The output uses or references ctf2_agent_whoami before solving",
 				"The output uses or references ctf2_agent_next_challenges or ctf2_list_practice_challenges to choose a challenge",
-				"The output uses or references ctf2_agent_log_note and keeps flags out of notes"
+				"The output uses or references ctf2_agent_log_note and keeps flags out of notes",
+				"The output reads ctf2_agent_whoami stats (attempt_count/correct_count) as its accuracy baseline and submits only flags traceable to a concrete derivation"
 			]
 		},
 		{

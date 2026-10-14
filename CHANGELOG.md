@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — CTF2 agent 面把"正确率"提为提交纪律：whoami 的 attempt/correct 不再只是展示数</summary>
+
+- **修（中·实测驱动）：ctf2 agent 面此前明确写着"正确率不计权重"，等于告诉模型可以拿提交次数换机会** — 2026-10-14 CTF2 自主解题巡航（24 轮）实测账号 `attempt_count 86 / correct_count 77`，即 9 次尝试白花，其中单轮连提 3 个猜测 flag（题名联想、类别陈词、`flag{xxxx}` 占位符）全部被拒，正确率为此永久下沉。而平台侧 `ctf2_agent_whoami` 一直返回 `stats.attempt_count` 与 `stats.correct_count` —— **工具本来就看得见自己的正确率**，缺的是任何一处让模型去看、去算、去在乎：`references/agent-play.md` 的 "What counts" 反而写着 "Accuracy is shown but not weighted"。
+- **修法（三层引导，零代码分支）** — ① `references/agent-play.md`：改写 "What counts" 的正确率表述，新增 **Accuracy** 一节（正确率 = `correct_count / attempt_count`；每次提交必涨 attempt、只有通过才涨 correct；错提不可回滚；提交前须能一句话说清推导来源；提交后回读 whoami 比对基线；比率下滑是方法信号，应加深推导而不是换变体），并把 play loop 第 1 步（记基线）与第 6 步（提交限定 + 提交后复检）接上；② `SKILL.md` 的 Agent play mode 段落补一句"从 whoami 的 stats 推自己的正确率"；③ `vulnclaw/agent/prompts_{zh,en}.py` 的 CTF 强制规则各加一条"提交次数是消耗品，正确率是成绩"（含"尝试数涨而正确数没涨 = 上一个 flag 是错的，回去补推导"）。技能版本 `1.4.0 → 1.5.0`，eval 5 增 1 条断言（whoami stats 作正确率基线 + 只提交可追溯 flag）。
+- **顺带修复两处环境缺陷（否则技能层根本不加载，本次改动无法生效）** — Anaconda base 的 PyYAML 是 **3.11**（2011 年版，被无关包 `rabbit 1.2.0` 的 `PyYAML==3.11` 钉子拖住），而 `pyproject.toml:36` 声明 `pyyaml>=6.0`：3.11 在 py3.12 上 `yaml.safe_load` 抛 `AttributeError: module 'collections' has no attribute 'Hashable'`，而 `skills/loader.py::_parse_skill_file` 只捕 `yaml.YAMLError` → **任何带 frontmatter 的技能一加载就崩**（实测 `load_skill_by_name('web-security-advanced')` 直接抛错）；已升到 **PyYAML 6.0.3**（同时满足 `kubernetes` 的 `>=6.0.3`），升级后 56 个 specialized 技能全部正常解析。另一处：base 里 `pluggy.py` 是远古单文件版（<0.4），pytest 9.1.1 要 `pluggy>=1.5` → **pytest 一行都跑不了**；已装 pluggy 1.6.0（落点 `site-packages/pluggy/__init__.py`，未被旧单文件遮蔽）。两者都是"恢复到项目 declared 依赖"，非功能改动。
+- **测试** — `scripts/verify_vulnclaw_skill.py ctf2-platform` → `RESULT: OK`（loads、≥1 reference、zero routing warnings、no routing regressions）；`pytest tests/skills/` **611 passed**（4.89s）；`tests/agent + tests/i18n + tests/meta` **1508 passed / 7 skipped / 1 failed**，唯一红为 `test_bg_tasks.py::test_bg_launch_and_result_lifecycle`（断言后台结果含标记串，实际被 `builtin_tools.py:2756` 的 `[!] REMINDER` 段截断）——该文件与本次改动无关，HEAD 同样为红（工作树仅本批 5 文件改动）。
+- **边界（未做）** — 没动提交门的代码路径：本地 `ctf2_submit_flag` 只做 `confirmation:true` 转发，准入判断在平台 MCP 侧；本轮走"引导三层"而非阈值硬闸。若之后要硬拦"正确率已经很低还继续提交"，需在 agent 侧另加门（当前按"不改语义优先"处理）。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — MCP 工具不再被目标文本裁剪（ctf2 agent 面实测被隐藏）</summary>
 
 - **修（中·可发现性，实测坐实）：按目标关键词裁剪工具表把运维启用的 MCP 服务器整体裁掉** — 2026-10-13 驱动一次 CTF2 自主解题时实测：目标文本经 `_infer_allowed_tools` 判定后，构建出的 schema 里 **`ctf2_agent_next_challenges` / `ctf2_submit_flag` 等 ctf2 MCP 工具全部缺席**（`platform_*` 中性工具因核心钉列表保留），模型看不到平台自带的 agent 通道（读题/起环境/提交/笔记/服务端配额），只能手工用 python 重造 Open API 客户端完成全流程——该次仍解出并提交成功（`accepted:true, is_solved:true`），但多花步数且绕开了平台侧审计面。这与 `_ALWAYS_KEEP_TOOLS` 注释记录的静默失败同类，当时的钉子只钉了中性 `platform_*`。**修法**：`build_openai_tools` 新增 `append_operator_tool` —— MCP 服务器提供的工具绕过目标关键词裁剪（角色门控保留；服务器集合由运维配置约束，token 成本有限），内置重型工具仍照旧裁剪。**回归**：`tests/agent/test_builtin_tools.py::TestMcpToolsSurviveGoalPruning` 双向钉住（MCP 工具在裁剪集外仍存活 / 内置工具仍被裁剪）。

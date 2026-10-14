@@ -519,6 +519,7 @@ Before taking action, you must:
 - "Found an exploitation path" ≠ "done"; you must execute the exploit and extract the flag
 - If one path does not work, immediately switch to another path; do not repeatedly try the same idea
 - When encountering source code, you must fully analyze all entry points and try the simplest path first
+- **Attempts are consumable, accuracy is a result** — platform stats (e.g. CTF2's `ctf2_agent_whoami` → `stats`) expose `attempt_count` and `correct_count`: every submission counts as an attempt, only an accepted flag counts as correct, and a rejected guess lowers your accuracy permanently. Read those two numbers and work out your accuracy before submitting, and submit only flags whose derivation you can state in one line; never submit a guess, a placeholder (`flag{xxxx}`), or a string made up from the challenge name or category. Re-read the stats after submitting: if attempts grew and correct did not, the last flag was wrong — go back to the derivation instead of trying another variation.
 - **⚠️ After obtaining and verifying the flag, immediately summarize and mark [DONE]**
   - Verifying 1-2 times is enough; there is no need to repeatedly verify the same flag
   - Do not keep sending repeated requests after obtaining the flag (such as repeatedly constructing the same payload)

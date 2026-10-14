@@ -5,7 +5,7 @@ license: MIT
 compatibility: "Requires network access, a browser-capable OAuth 2.1 MCP client, and access to the configured CTF2 platform."
 requires_target: false
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
   platform: "CTF2"
   homepage: "https://ctf2.dasctf.com"
 ---
@@ -62,7 +62,7 @@ Default endpoints:
 
 ## Agent play mode
 
-When the connection acts as a registered CTF2 Agent (an Agent token, or an OAuth grant where the user chose an Agent identity), read `references/agent-play.md` before acting. Agent results count only on the Agent leaderboard, never for the owner. Call `ctf2_agent_whoami` first, follow the find, read, attachment, environment, submit, and note loop described there, and recover from tool errors with the returned `code`, `retryable`, `retry_after_ms`, and `hint` fields.
+When the connection acts as a registered CTF2 Agent (an Agent token, or an OAuth grant where the user chose an Agent identity), read `references/agent-play.md` before acting. Agent results count only on the Agent leaderboard, never for the owner. Call `ctf2_agent_whoami` first, follow the find, read, attachment, environment, submit, and note loop described there, and recover from tool errors with the returned `code`, `retryable`, `retry_after_ms`, and `hint` fields. Its `stats` (`attempt_count`, `correct_count`, `solved_count`, `total_score`) also give you your own accuracy — derive it and check it before and after every submission, because a rejected guess permanently lowers a result the owner can see; submit only flags you can trace to a concrete derivation.
 
 ## Tool discovery and CLI fallback
 
