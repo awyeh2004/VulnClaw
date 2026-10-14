@@ -1,4 +1,18 @@
 <details open>
+<summary><strong>Unreleased</strong> — 第 6 轮审查复核：热路径成本表述修正（仅部分修复）· 大证据回放零损失 · flag 反例搜索无命中 · MCP 角色门控可见化</summary>
+
+- **修正（重要）：上一批把热路径成本说满了 —— 只修掉"无长公共片段"那一半** — 上一条记的 "21 MB 87 s → 525 ms" 成立于 8-gram 必要条件**被拒**的分支（当时的反例正是编造事实）。本轮对 53 组 >300 KB 的证据做分类回放：**抽样 12 组里 11 组的必要条件通过** → `_longest_common_substring` 照旧跑，3.16 MB 证据上估算 3–27 s/候选（bar 越大越久）。分母是"证据里有没有 ≥bar 的公共片段"，而真实事实通常有，所以真实场景仍是 O(n·m)，只是不再为"根本不可能命中"的调用白烧。有界化方案（先定位事实侧内容 token 在证据中的出现位置，再只在 ±bar 窗口内做 DP —— A1 既已要求载体词必须落在片段内，等价性可证）未落地，属边界变更，留口。
+- **复核（零损失）：大证据子集没有因本批改动丢失见证** — 300–700 KB 范围做完整差分（`62ce9c3` 旧模块 vs 当前）：2/2 组两边均 True、损失 0；与此前 ≤300 KB 的 160 组（151 组仍被见证）结论一致。本轮起"窗口前"基线固定用 `62ce9c3` —— 我的提交 SHA 在审查期间被一次历史重写换掉（`b679886`→`dd211e3` 等），而 `62ce9c3` 早于重写点。
+- **复核（反例搜索）：`is_placeholder_flag` 仍未找到真实反例** — 460 场会话里 87 条真实提交候选（63 条被平台接受）中**只有 1 条**命中新规则（`pie{bi;st;…}`，平台亦未接受，属猜测型提交）；命中规则的 67 条全是页面里的 CSS/JS 伪 flag（如 `try{$dec=[System.Text.Enco`）。结论：**暂不改**；E1 收窄方案（要求 body 内 `:` 与 `;` 同现）在本地噪声语料上仍保 146/198 过滤力、会放过 19/198，等真实反例再动。
+- **复核（样本不足）：CJK 分支无法在本机定标** — 带证据的真实中文事实仅 22 条，按"依赖 CJK 捷径"计只有 2 条（CJK run 均 7 字符、覆盖率 0.18，且实测走的是别的路径）；被见证中文事实的覆盖率最小 0.395，高于现门槛 0.30。样本量不足以给 CJK 分支定"分支局部门槛"，需中文靶或中文证据语料。
+- **修（低·可见性）：MCP 工具的角色门控不再静默** — `build_openai_tools` 记录被角色拦下的运维工具，MCP 段结束后打 debug 日志；补 `TestMcpToolsSurviveGoalPruning::test_mcp_tools_are_withheld_when_the_active_role_denies_them` 钉住"角色门控优先于运维绕过"。实测 `role=None` → 工具保留且无日志；`active_role='researcher'` → `MCP tools withheld by role 'researcher': ctf2_agent_next_challenges, ctf2_submit_flag`。
+- **本次复核自身的边界** — 53 组大证据里只抽样 12 组做分类、2 组做完整差分（其余因 DP 成本未跑）；单测未覆盖超大证据路径。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Fix</strong> — 提交证据门第一版读错状态对象：真 flag 被连拒（BigMak 轮实测）</summary>
 
 - **修（高）：`agent.context.state` 是 ContextManager 的 SessionState，不是 AgentState** — 真正的证据链挂在 `state.agent_state` 上（规范取法见 `blackboard.py:862` / `context_budget._state_for`）。第一版直接读了前者 → 门拿到**空证据链** → 每一次提交都被判"无证据"：2026-10-14 14:25 的 BigMak 轮里，真 flag `sun{bu…lol}`（早已出现在 e007 的 python 输出里）被连拒 4 次，靠**有界拒绝**（`MAX_REFUSALS=2`）兜底才在第 3 次放行并被平台接受（100 分）—— 那 4 轮推理是白烧的。修复：新增 `resolve_agent_state()` 统一解包（两种形状都认，取不到则 fail-open）。
