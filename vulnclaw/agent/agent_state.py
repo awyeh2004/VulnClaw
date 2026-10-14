@@ -385,6 +385,9 @@ class AgentState(BaseModel):
     blackboard_nudged: bool = False
     pwn_local_reminded: bool = False
     lock_nudge_count: int = 0
+    # 提交证据门（``vulnclaw/agent/submit_gate.py``）：候选 flag → 已被本地拒绝的
+    # 次数。有界拒绝用 —— 同一候选被拒超过上限就放行，避免把真 flag 永久关在门外。
+    submit_gate_refusals: dict[str, int] = Field(default_factory=dict)
     evidence_seq: int = Field(default=0, exclude=True)
     step_seq: int = Field(default=0, exclude=True)
     claim_seq: int = Field(default=0, exclude=True)

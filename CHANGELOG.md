@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — 提交走证据门：`ctf2_submit_flag` 此前是唯一没有任何证据检查的路径（本地拒绝，不清耗尝试）</summary>
+
+- **修（高·实测驱动）：平台提交没有任何证据检查，"补全型猜测"直接花掉尝试** — 2026-10-14 CTF2 巡航 24 轮实测账号 `attempt_count 86 / correct_count 77`（9 次白花）。`_completion_gate`（`solver.py:1639`）确实按证据校验 flag，但**只在模型喊 FINAL 时跑**（唯一调用点 `solver.py:2622`），而平台提交是**解题中途**发生的：`builtin_tools.execute_mcp_tool` 里提交动词只过角色/约束门 + 危险工具门 + 运维总开关，随后 `yield to the MCP manager` —— 门在终点、提交在半路，两不相遇。被拒候选签名一致：附件里只观察到 `flag{`（无 `}`），**body 与闭括号由模型自己补出**，补完形态完全合法，连 FINAL 的 shape 检查（`ctf_mode.flag_completeness_issues`，2026-10-09 鸡公煲产物）也看不出破绽。
+- **修法（新增 `vulnclaw/agent/submit_gate.py`，接在两条"让给 MCP"的提交路由上）** — 把同一套证据标准**前移到花掉尝试的那一刻**：`assess()` 只认**观测证据**（`state.evidence` 中剔除自证工具：黑板书 / 笔记 / 提交动词自身 —— `_completion_gate` 注释早已写明 *"grounding can be satisfied by the model's own note"*），通过条件三选一：整串逐字出现 / body 出现在花括号语境 / 与已观测的"花括号后 body 片段"最长公共子串 ≥ `MIN_FRAGMENT_OVERLAP`（12，按 30 次真实提交标定，覆盖合法片段拼接）。**本地拒绝不清耗平台尝试数**，且是**有界拒绝**（`MAX_REFUSALS=2`，第 3 次提交同一候选即放行，真 flag 不会被永久关在门外）；形态门（花括号不闭合 / body 为空）永远拒 —— 补壳的串平台不可能接受。AgentState 增 `submit_gate_refusals` 记档（可复盘）。
+- **实测验收（回放 2026-10-14 全天 30 次真实提交）** — 26 次 accepted 中 **22 次直接放行**（whole-flag 18 / brace-context 3 / fragment 1），4 次被拒 1 次（本地拒绝不消耗尝试，代价只是一轮重试）；**run21 的 2 次被拒补全型候选 + 1 次 schema 无效提交全部被拦**（`reason=none`）。判别边界清晰：真实成功者要么整串出现、要么 body 在花括号语境里；补全型只有"裸词恰好命中"（8 字符题名词），三类证据全不满足。
+- **测试** — 新增 `tests/agent/test_submit_evidence_gate.py`（三类放行 · 补全型/自证笔记/占位符/花括号不闭合拒绝 · 有界拒绝后放行 · 拿不到 AgentState 时 fail-open · 集成层拦下与放行两条）；`tests/agent + tests/platforms + tests/ctf_platform + tests/skills` → **2766 passed / 7 skipped / 1 failed**，唯一红是既有的 `test_bg_tasks.py::test_bg_launch_and_result_lifecycle`（HEAD 同样为红）；`test_tool_face_precedence.py` 的内置 face 契约不变。
+- **边界** — 只拦"让给平台 MCP"这条提交路径（内置 face 路由与程序化调用者语义不变）；`MIN_FRAGMENT_OVERLAP` 是按本机实测标定的启发式，后续巡航若出现误伤（真 flag 被拒 1 次）按数据调整。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — CTF2 agent 面把"正确率"提为提交纪律：whoami 的 attempt/correct 不再只是展示数</summary>
 
 - **修（中·实测驱动）：ctf2 agent 面此前明确写着"正确率不计权重"，等于告诉模型可以拿提交次数换机会** — 2026-10-14 CTF2 自主解题巡航（24 轮）实测账号 `attempt_count 86 / correct_count 77`，即 9 次尝试白花，其中单轮连提 3 个猜测 flag（题名联想、类别陈词、`flag{xxxx}` 占位符）全部被拒，正确率为此永久下沉。而平台侧 `ctf2_agent_whoami` 一直返回 `stats.attempt_count` 与 `stats.correct_count` —— **工具本来就看得见自己的正确率**，缺的是任何一处让模型去看、去算、去在乎：`references/agent-play.md` 的 "What counts" 反而写着 "Accuracy is shown but not weighted"。

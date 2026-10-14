@@ -1018,8 +1018,20 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             agent, tool_name, ctf2_tools_enabled(_runtime_config(agent))
         ):
             return await dispatch_ctf2_tool(tool_name, args)
-        if tool_name in _GATED_SUBMIT_TOOL_NAMES and not _flag_submission_enabled():
-            return _submission_disabled_message()
+        if tool_name in _GATED_SUBMIT_TOOL_NAMES:
+            if not _flag_submission_enabled():
+                return _submission_disabled_message()
+            # 提交证据门（``vulnclaw/agent/submit_gate.py``）：这条"让给平台 MCP"的
+            # 路此前是唯一没有任何证据检查的提交路径 —— 2026-10-14 巡航实测 9 次白花
+            # 尝试全部经由此路，被拒候选签名一致（附件只有 `flag{`，body 与闭括号由
+            # 模型自己补出，补完形态合法，连 FINAL 的 shape 检查也看不出）。本地拒绝
+            # **不消耗平台尝试数**；有界拒绝（见 submit_gate.MAX_REFUSALS），真 flag
+            # 不会被永久关在门外。
+            from vulnclaw.agent.submit_gate import submission_refusal
+
+            refusal = submission_refusal(agent, args)
+            if refusal is not None:
+                return refusal
         # else: yield to the MCP manager at the bottom of this function.
 
     if tool_name in GCS_TOOL_NAMES:
@@ -1027,8 +1039,14 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             agent, tool_name, gcs_tools_enabled(_runtime_config(agent))
         ):
             return await dispatch_gcs_tool(tool_name, args)
-        if tool_name in _GATED_SUBMIT_TOOL_NAMES and not _flag_submission_enabled():
-            return _submission_disabled_message()
+        if tool_name in _GATED_SUBMIT_TOOL_NAMES:
+            if not _flag_submission_enabled():
+                return _submission_disabled_message()
+            from vulnclaw.agent.submit_gate import submission_refusal
+
+            refusal = submission_refusal(agent, args)
+            if refusal is not None:
+                return refusal
 
     if tool_name in TRAFFIC_TOOL_NAMES:
         store = resolve_traffic_store(agent)
