@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
 
 from urllib.parse import quote, urljoin, urlparse
+
+logger = logging.getLogger(__name__)
 
 import httpx
 
@@ -1609,6 +1612,10 @@ def build_openai_tools(
     the config file here. Optional so the tool-face tests can keep calling it bare.
     """
     tools: list[dict[str, Any]] = []
+    # Operator-configured tools the active role withheld; logged once at the end of the
+    # MCP pass. Measured 2026-10-14: with any registry role, `role_allows_tool` denies
+    # every `ctf2_*` name, so the operator bypass above silently does nothing.
+    withheld_operator_tools: list[str] = []
 
     def append_tool(tool: dict[str, Any]) -> None:
         name = str(tool.get("function", {}).get("name", ""))
@@ -1635,6 +1642,8 @@ def build_openai_tools(
         name = str(tool.get("function", {}).get("name", ""))
         if role_allows_tool(active_role, name):
             tools.append(tool)
+        else:
+            withheld_operator_tools.append(name)
 
     append_builtin_tool_schemas(append_tool)
 
@@ -2101,6 +2110,15 @@ def build_openai_tools(
             },
         }
     )
+        if withheld_operator_tools:
+            # Silence is how this class of failure went unnoticed (see the docstring
+            # above): a whole operator-enabled MCP server can be dropped by role
+            # gating, which is correct but must be visible somewhere.
+            logger.debug(
+                "MCP tools withheld by role %r: %s",
+                active_role,
+                ", ".join(sorted(withheld_operator_tools)),
+            )
     append_tool(
         {
             "type": "function",

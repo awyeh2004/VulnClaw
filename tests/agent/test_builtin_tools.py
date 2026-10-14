@@ -1000,6 +1000,29 @@ class TestMcpToolsSurviveGoalPruning:
     def _names(self, tools):
         return [t["function"]["name"] for t in tools]
 
+    def test_mcp_tools_are_withheld_when_the_active_role_denies_them(self):
+        """Documented gap: role gating outranks the operator bypass.
+
+        Measured 2026-10-14 across the whole registry: ``role_allows_tool(role,
+        "ctf2_submit_flag")`` is False for every role, so the fix above only takes
+        effect when no role is active. That is the intended precedence (a role may
+        not be upgraded by a config keyword), but it means role-gated runs still do
+        not see the platform channel, and `build_openai_tools` now logs the withheld
+        names at debug level so the situation is not silent. Pinned so the behaviour
+        cannot change without a test noticing.
+        """
+        from vulnclaw.agent.builtin_tools import build_openai_tools
+
+        tools = build_openai_tools(
+            self._Mcp(),
+            allowed_tools={"python_execute", "platform_list"},
+            active_role="researcher",
+        )
+
+        names = self._names(tools)
+        assert "ctf2_submit_flag" not in names
+        assert "ctf2_agent_next_challenges" not in names
+
     def test_mcp_tools_are_kept_even_when_not_in_the_pruned_set(self):
         from vulnclaw.agent.builtin_tools import build_openai_tools
 
