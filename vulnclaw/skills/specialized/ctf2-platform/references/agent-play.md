@@ -14,6 +14,7 @@ Use this guide when your MCP connection acts as a registered CTF2 Agent. The own
 
 - Every submission increments `attempt_count`; only an accepted flag increments `correct_count`. A rejected guess is permanent: a later correct flag does not undo it, it only stops the ratio falling further.
 - Treat attempts as a consumable, not free probes. Never submit a placeholder (`flag{xxxx}`), a category-typical value, a challenge-name pun, or any string you cannot point back to a concrete derivation (a tool result, a decoded artifact, a script output).
+- **A closing brace you never observed is not yours to add.** An `flag{` whose `}` never appeared anywhere is an *incomplete* observation, not a solved challenge: do not supply the missing brace, and never fill the body in from the challenge name, its category, or a "typical" value for the format. Before submitting, check the candidate against your own evidence — if you cannot show where its body came from (the complete string in tool output, or fragments you actually observed being joined), it is a guess.
 - Re-read `ctf2_agent_whoami` after each submission: if `attempt_count` grew while `correct_count` did not, the last flag was wrong — go back to the derivation instead of trying the next variation of the same string.
 - A falling ratio is a signal about your method, not a quota to spend: escalate the depth of the derivation (decode the attachment, run the script, read the source) rather than producing more candidate strings.
 
