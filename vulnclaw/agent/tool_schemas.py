@@ -262,7 +262,13 @@ def append_builtin_tool_schemas(
                     "evidence; large active-context observations are bounded high-signal previews. "
                     "IMPORTANT: the default shell on this host is Windows PowerShell: `&&` and "
                     "Linux-style paths like /tmp are invalid; use `;` to chain, PowerShell cmdlets "
-                    "or `python_execute` for file/zip generation, and quote paths with spaces."
+                    "or `python_execute` for file/zip generation, and quote paths with spaces. "
+                    "IMPORTANT (encoding): PowerShell on this host is configured for UTF-8, so "
+                    "cmdlet-written files (Set-Content/Out-File) start with a UTF-8 BOM and other "
+                    "tools may choke on it (python `json.load` fails with 'Unexpected UTF-8 BOM'); "
+                    "write structured files with `python_execute` instead, or BOM-less with "
+                    "`[IO.File]::WriteAllText($p,$s,[Text.UTF8Encoding]::new($false))`. Reading a "
+                    "legacy GBK/ANSI file needs `-Encoding Default`, since UTF-8 is now the default."
                 ),
                 "parameters": {
                     "type": "object",
