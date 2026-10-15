@@ -32,6 +32,7 @@ from vulnclaw import headless
 from vulnclaw.agent.input_analysis import (
     _citation_url_spans,
     _is_cited_candidate,
+    _is_plausible_host,
     detect_target,
 )
 from vulnclaw.agent.solver import _looks_like_quiz
@@ -1734,22 +1735,39 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
 
     # 3) A bare token with a file-ish extension (zip, tar, gz, png, txt, …)
     #    is a local file target, not a domain.
-    file_like_match = re.search(
+    #    ``\w`` matches CJK, so this shape also fires inside Chinese prose that
+    #    glues an ASCII word to text — "…建议使用console.log；" matched here and
+    #    became a bogus *local file* target: measured 2026-10-15, pasting an
+    #    engagement brief retargeted a live session to "建议使用console.log" and
+    #    reset its context. A CJK→ASCII-letter junction inside the stem ("用c")
+    #    is prose; real names are ASCII ("misc2.zip") or have a purely
+    #    non-ASCII stem ("报告.pdf"). Skip prose and keep scanning.
+    for file_like_match in re.finditer(
         r"(?<![A-Za-z0-9])([\w\-. ]+\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf))\b",
         stripped,
         flags=re.IGNORECASE,
-    )
-    if file_like_match:
-        return file_like_match.group(1).strip()
+    ):
+        candidate = file_like_match.group(1).strip()
+        if re.search(r"[\u4e00-\u9fff][A-Za-z]", candidate.rsplit(".", 1)[0]):
+            continue
+        return candidate
 
     # 4) IP address
     ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", stripped)
     if ip_match:
         return ip_match.group(1)
-    # 5) Domain
-    domain_match = re.search(r"([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)", stripped)
-    if domain_match:
-        return domain_match.group(1)
+    # 5) Domain — same two guards the agent layer's ``detect_target`` already
+    #    carries (input_analysis): the lookbehind refuses a candidate that is
+    #    the tail of a bigger word (CJK counts as \w, so "…使用console.log"
+    #    never mines a "host"), and ``_is_plausible_host`` rejects version
+    #    strings ("glibc 2.27"). The REPL copy lacked both — measured
+    #    2026-10-15, a pasted brief's "建议使用console.log" retargeted a session.
+    for domain_match in re.finditer(
+        r"(?<![\w*.])([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)", stripped
+    ):
+        candidate = domain_match.group(1)
+        if _is_plausible_host(candidate):
+            return candidate
     return None
 
 
