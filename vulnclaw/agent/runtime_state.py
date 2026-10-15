@@ -54,6 +54,11 @@ class RuntimeState:
     """Per-run mutable state for autonomous/persistent loops."""
 
     auto_skill_input: str = ""
+    #: The goal of the LATEST solve call. ``auto_skill_input`` accumulates across
+    #: turns (solver joins with " | "); the general-pentest escape in
+    #: ``builtin_tools._infer_allowed_tools`` is judged on this field alone so a
+    #: polluted history cannot pin the tool face for the session's lifetime.
+    current_goal: str = ""
     user_vuln_hint: str = ""
     user_vuln_hint_rounds: int = 0
     task_constraints: TaskConstraints = field(default_factory=TaskConstraints)

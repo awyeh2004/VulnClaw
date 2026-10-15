@@ -1564,10 +1564,17 @@ _TASK_KEYWORDS: dict[str, list[str]] = {
 }
 
 
-def _infer_allowed_tools(user_input: str) -> set[str] | None:
+def _infer_allowed_tools(user_input: str, *, latest_goal: str = "") -> set[str] | None:
     """Infer a task-specific tool subset from the user's request.
 
     Returns None when the request looks like a general pentest (keep all tools).
+
+    ``user_input`` is the session-accumulated goal text (solver joins each turn
+    as ``prev | goal``); ``latest_goal`` is the current turn's goal when the
+    caller has it. The general-pentest escape below is judged on the latest goal
+    alone: a pasted brief's "Web应用"/"http://" must not permanently disqualify
+    every later goal — measured 2026-10-15, that pinned a live session to task
+    bundles (and silently pruned the report surface) for its whole lifetime.
     """
     if not user_input:
         return None
@@ -1592,9 +1599,12 @@ def _infer_allowed_tools(user_input: str) -> set[str] | None:
         bundle |= _TASK_TOOL_BUNDLES["crypto"]
         return bundle
 
-    # General/ambiguous pentest goals keep the full toolset.
-    if any(k in text for k in ("渗透", "pentest", "测试目标", "全面", "综合", "exploit", "exp", "漏洞挖掘")):
-        if not any(k in text for k in ("http", "web", "登录", "密码", "decode", "rot", "端口")):
+    # General/ambiguous pentest goals keep the full toolset. Judged on the
+    # latest goal when one was supplied (see docstring); bundle matching below
+    # still reads the full accumulated text so continuation turns stay stable.
+    escape_text = (latest_goal or user_input).lower()
+    if any(k in escape_text for k in ("渗透", "pentest", "测试目标", "全面", "综合", "exploit", "exp", "漏洞挖掘")):
+        if not any(k in escape_text for k in ("http", "web", "登录", "密码", "decode", "rot", "端口")):
             return None
 
     for task_type, keywords in _TASK_KEYWORDS.items():

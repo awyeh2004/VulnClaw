@@ -2259,6 +2259,12 @@ async def _solve_impl(
                 runtime.auto_skill_input = f"{prev} | {goal}"
             else:
                 runtime.auto_skill_input = goal
+            # Kept separately: the accumulated text above is for pruning
+            # *stability* across continued turns, while the escape branch of
+            # _infer_allowed_tools must be judged on the current goal only
+            # (measured 2026-10-15: a brief's "Web应用" in the history pinned a
+            # session to task bundles and kept heavy tools pruned).
+            runtime.current_goal = goal
             # Deterministic playbook reuse — code-guaranteed, not left to model
             # initiative (past runs skipped lookup_playbook entirely).
             try:

@@ -1027,7 +1027,9 @@ class AgentCore:
     def _build_openai_tools(self) -> list[dict]:
         """Build OpenAI function calling schema from MCP tools + built-in tools."""
         user_input = getattr(self.runtime, "auto_skill_input", "") or ""
-        allowed = _infer_allowed_tools(user_input)
+        allowed = _infer_allowed_tools(
+            user_input, latest_goal=getattr(self.runtime, "current_goal", "") or ""
+        )
         cfg = getattr(self.config, "subagent", None)
         session_kind = str(
             getattr(getattr(self.context, "state", None), "session_kind", "")

@@ -1070,6 +1070,24 @@ class TestMcpToolsSurviveGoalPruning:
         ):
             assert name in allowed, f"{name} was pruned from the tool face"
 
+    def test_pentest_escape_is_judged_on_the_latest_goal(self):
+        """A poisoned history must not kill the general-pentest escape.
+
+        Measured 2026-10-15: the accumulated goal text (``prev | goal``) kept a
+        pasted engagement brief's "Web应用" (bare "web") forever, so every later
+        goal — even an explicit "漏洞挖掘" one — matched a task bundle instead of
+        returning None, and the heavy tools stayed pruned for the session.
+        """
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        poisoned = "资产范围 二、边缘业务 1. Web应用：www.imou.com | 漏洞挖掘收尾 全面"
+        # Without a latest goal the history still pins a bundle…
+        assert _infer_allowed_tools(poisoned) is not None
+        # …but the current turn's explicit pentest goal restores the full face.
+        assert _infer_allowed_tools(poisoned, latest_goal="漏洞挖掘收尾 全面") is None
+        # A terse continuation keeps the accumulated bundle (stability).
+        assert _infer_allowed_tools("Web应用 目标站点 测试", latest_goal="继续") is not None
+
 
 class TestSolveScratchWorkdir:
     """session.solve_work_root: solve tools run in <root>/<run_id>/, not the repo."""
