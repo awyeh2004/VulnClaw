@@ -138,7 +138,25 @@ OCR / pyc / pdf / 证据 / 报告 等十余种工具的执行逻辑；`main.py` 
 
 ---
 
-## 3. 非问题（记录以免后人重复怀疑）
+## 3. REPL 路径的两个待修缺口（2026-10-15 实战实测，未修）
+
+同日已修并入库的三批（`682978b` 上报/证据面钉入 always-keep；`b2b7678` 目标抽取中文误判；
+`ffaab8c` 逃生分支按最新 goal 判定）不列在此。以下是同一路径上剩下的两处——都**不影响正确性**，
+但会误导现场判断：
+
+**① REPL 直连 solve 不做 run_complete 落盘**（中）：`orchestrator.py` 的 `checkpoint("run_complete")`
+只在命令路径触发；REPL 里 `agent.solve()` 跑完后目标状态仍停在 run_start——实测
+`targets/<id>/state.json` 的 `completed=False`、`findings` 为 0，而屏幕上 Solve 面板显示"目标达成"。
+后果：重开 REPL 用 `target X` "恢复历史状态"拿到的是旧快照（2026-10-15 乐橙 ISRC 战报据此误判过一次）。
+修法：REPL solve 结束回调调用 `target_state.store.save_target_state`（参数照 orchestrator 的
+checkpoint），先补失败复现测试（面板达成 ⇒ state 必须更新）。
+
+**② 每轮 `asyncio.run` 的事件循环 GC 收尾噪声**（低）：Windows proactor 循环被 GC 时 `__del__`
+二次 close → `AttributeError: 'NoneType' object has no attribute 'close'`（前缀 "Exception ignored"，
+无害，但会夹进 REPL 输出、干扰"命令是否生效"的判断——判 `chat` 是否生效要看提示符有无 `AUTO` 前缀）。
+修法：复用单一事件循环，或显式丢弃引用避免 GC 二次关闭。
+
+## 4. 非问题（记录以免后人重复怀疑）
 
 - **`tests/` 占 24%（64,957 行）**：对 9.2 万行核心代码，测试/代码 ≈ 70%，属**健康**，不是臃肿。
 - **`vulnclaw/skills/` 占 30%**：技能库是产品资产（内容即能力），不是代码债。
