@@ -17,6 +17,7 @@ Contents:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -284,12 +285,102 @@ def _prepare_repl_target(
 
     restore_result = _from_main("apply_target_state_to_agent")(agent, target)
     current_phase = restore_result.phase or agent.session_state.phase.value
+    # The restore REPLACED the state object; re-arm persistence.
+    _ensure_repl_checkpoint_callback(agent)
     return target, current_phase, restore_result.restored
+
+
+#: The task carrying the most recent REPL run, recorded when it ends with the
+#: deliberate CancelledError→KeyboardInterrupt conversion from
+#: ``repl_runner.run_repl_call``. Holding the reference lets the exit path
+#: retrieve the exception (``Task.exception()``) so asyncio does not print
+#: "Task exception was never retrieved" with a full traceback at teardown
+#: (TECH-DEBT ## 3 ②b). Cleared only once a retrieval attempt succeeds.
+_REPL_INTERRUPTED_TASK: Optional["asyncio.Task[Any]"] = None
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _checkpoint_repl_agent(agent: Any, reason: str) -> Optional[str]:
+    """Persist the REPL's live session state to the target store.
+
+    The command path persists at durable boundaries via
+    ``orchestrator.checkpoint`` (installed callback + explicit
+    run_start/run_complete/interrupt calls). REPL solves call ``agent.solve``
+    directly and used to leave ``targets/<id>/state.json`` frozen at run_start —
+    measured 2026-10-15: the Solve panel said 目标达成 while the saved state still
+    had ``completed=False`` and no findings, so restoring that target later
+    produced the stale snapshot (TECH-DEBT ## 3 ①). Never raises: a state-write
+    failure must not kill the REPL.
+    """
+    state = getattr(agent, "session_state", None)
+    target = str(getattr(state, "target", "") or "")
+    if state is None or not target:
+        return None
+    try:
+        from vulnclaw.target_state.store import save_target_state
+
+        path = save_target_state(
+            target,
+            state,
+            command="repl",
+            runtime=getattr(agent, "runtime", None),
+            checkpoint_reason=reason,
+            merge_existing=False,
+        )
+        return str(path)
+    except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+        _LOGGER.debug("repl checkpoint failed (%s): %s", reason, exc)
+        return None
+
+
+def _ensure_repl_checkpoint_callback(agent: Any) -> None:
+    """Install the boundary-checkpoint callback on the agent's CURRENT state.
+
+    ``apply_target_state_to_agent`` REPLACES ``agent.context.state`` on every
+    target restore, so the callback must be (re)installed after restores —
+    idempotent by design. Boundaries mirror the command path (step_complete /
+    finding_added / phase_transition …); each one persists through
+    ``save_target_state``.
+    """
+    state = getattr(agent, "session_state", None)
+    if state is None:
+        return
+    state.set_checkpoint_callback(
+        lambda _state, reason: _checkpoint_repl_agent(agent, reason)
+    )
+
+
+def _retrieve_interrupted_task() -> None:
+    """Retrieve the recorded run task's exception so asyncio stops warning.
+
+    ``Task.exception()`` marks the exception retrieved, which is what stops
+    asyncio from printing "Task exception was never retrieved" at GC. A pending
+    task raises InvalidStateError — the reference is then KEPT so a later
+    (teardown) attempt can retry once the task has finished (TECH-DEBT ## 3 ②b).
+    """
+    global _REPL_INTERRUPTED_TASK
+    task = _REPL_INTERRUPTED_TASK
+    if task is None:
+        return
+    try:
+        task.exception()
+    except Exception:  # pending task — keep the ref for the teardown retry
+        return
+    _REPL_INTERRUPTED_TASK = None
 
 
 async def _run_repl_agent_call(agent, *, call, after_result) -> None:
     """Run a REPL agent call and hand each result back to a caller hook."""
-    await run_repl_call(call=call, after_result=after_result)
+    global _REPL_INTERRUPTED_TASK
+    try:
+        await run_repl_call(call=call, after_result=after_result)
+    except KeyboardInterrupt:
+        # Typically the deliberate CancelledError→KeyboardInterrupt conversion
+        # inside run_repl_call; record the task so the exit path can retrieve
+        # the exception (TECH-DEBT ## 3 ②b), then let the interrupt propagate.
+        _REPL_INTERRUPTED_TASK = asyncio.current_task()
+        raise
 
 
 def _localized_phase_label(phase: Any) -> str:
@@ -641,6 +732,9 @@ def _run_repl() -> None:
 
     # Initialize agent
     agent = AgentCore(config, mcp_manager)
+    # Persist durable boundaries to the target store (TECH-DEBT ## 3 ①); the
+    # restore path replaces the state object, so _prepare_repl_target reinstalls.
+    _ensure_repl_checkpoint_callback(agent)
 
     # ExecutionGate: interactive REPL on a real TTY gets the trusted
     # approval channel; dangerous-tool executions prompt y/N.
@@ -1038,7 +1132,20 @@ def _run_repl() -> None:
 
                             await _run_repl_agent_call(agent, call=call, after_result=after_result)
 
-                        asyncio.run(_run_auto())
+                        _ensure_repl_checkpoint_callback(agent)
+                        try:
+                            asyncio.run(_run_auto())
+                        except KeyboardInterrupt:
+                            # Persist the interrupted run too (the command path
+                            # checkpoints "interrupt"); the exception still
+                            # propagates to the REPL interrupt handling.
+                            _checkpoint_repl_agent(agent, "interrupt")
+                            _retrieve_interrupted_task()
+                            raise
+                        # The panel can say 目标达成 while the saved state sits at
+                        # run_start — persist the finished run. TECH-DEBT ## 3 ①:
+                        # panel-done ⇒ state must update.
+                        _checkpoint_repl_agent(agent, "run_complete")
                         auto_mode_active = True
                         console.print(_("cli.auto_mode_hint"))
                         continue
@@ -1095,7 +1202,14 @@ def _run_repl() -> None:
 
                         await _run_repl_agent_call(agent, call=call, after_result=after_result)
 
-                    asyncio.run(_run_auto())
+                    _ensure_repl_checkpoint_callback(agent)
+                    try:
+                        asyncio.run(_run_auto())
+                    except KeyboardInterrupt:
+                        _checkpoint_repl_agent(agent, "interrupt")
+                        _retrieve_interrupted_task()
+                        raise
+                    _checkpoint_repl_agent(agent, "run_complete")
                     auto_mode_active = True
                     # The run finished on its own (not interrupted), so there is
                     # nothing to resume: clearing the launch text is what stops a
@@ -1131,7 +1245,9 @@ def _run_repl() -> None:
 
                         await _run_repl_agent_call(agent, call=call, after_result=after_result)
 
+                    _ensure_repl_checkpoint_callback(agent)
                     asyncio.run(_run_agent())
+                    _checkpoint_repl_agent(agent, "chat_complete")
 
             except KeyboardInterrupt:
                 if is_auto_mode:
@@ -1163,6 +1279,10 @@ def _run_repl() -> None:
             console.print(f"\n{_('cli.press_again')}")
         except EOFError:
             break
+
+    # Retrieve any recorded interrupt exception so asyncio does not print
+    # "Task exception was never retrieved" at teardown (TECH-DEBT ## 3 ②b).
+    _retrieve_interrupted_task()
 
     # Cleanup — suppress SIGINT to prevent re-trigger during threading shutdown
     import signal
