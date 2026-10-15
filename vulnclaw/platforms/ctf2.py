@@ -385,7 +385,22 @@ class CTF2Adapter:
             Corpus(ref=CorpusRef(self.name, KIND_DAILY), name="daily challenges")
         )
 
-        for row in extract_rows(await self.client.list_competitions(limit=50)):
+        # Competitions/stages are the *optional* section of this listing, and on a
+        # real deployment they are the one an agent-scoped PAT cannot read at all
+        # (`competition:read` -> 403 agent_scope_forbidden) while the session-JWT
+        # fallback needs a live browser session. Measured 2026-10-15: the 401 from
+        # an expired session JWT propagated out of here and killed the WHOLE
+        # listing, so `platform_list` returned no refs at all -- and without a ref
+        # `platform_submit` cannot even be called, which is exactly how a solved
+        # flag ends up unsubmittable. The practice grounds above are the refs that
+        # matter for practice work, so an unreadable optional section must skip
+        # instead of abort (same tolerance `list_challenges` already applies).
+        try:
+            competition_rows = extract_rows(await self.client.list_competitions(limit=50))
+        except Exception:  # noqa: BLE001 - optional section, keep the rest usable
+            competition_rows = []
+
+        for row in competition_rows:
             for stage in _embedded_children(row):
                 stage_id = _row_id(stage)
                 if not stage_id:

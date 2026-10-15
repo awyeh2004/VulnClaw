@@ -470,6 +470,28 @@ class TestAdapterListing:
         tokens = [corpus.ref.token() for corpus in await CTF2Adapter(client).list_corpora()]
         assert tokens == ["ctf2:practice:p1", "ctf2:daily", "ctf2:stage:s1"]
 
+    async def test_unreadable_stages_do_not_kill_the_whole_listing(self):
+        """The optional stage section must skip, not abort the practice refs.
+
+        Measured 2026-10-15: an expired session JWT made ``list_competitions``
+        raise 401, the exception propagated out of ``list_corpora``, and
+        ``platform_list`` returned no collections at all -- so ``platform_submit``
+        had no ref to be called with, which is how a solved flag ends up
+        unsubmittable. Practice grounds are readable with the agent PAT and are
+        the refs practice work needs, so a section the credential cannot read is
+        skipped (same tolerance ``list_challenges`` already applies).
+        """
+
+        class UnreadableStages(FakeClient):
+            async def list_competitions(self, limit=50):
+                raise RuntimeError("CTF2 API 401: {'code': 'TOKEN_EXPIRED'}")
+
+        client = UnreadableStages(
+            list_practice={"data": [{"id": "p1", "name": "ground one"}]}
+        )
+        tokens = [corpus.ref.token() for corpus in await CTF2Adapter(client).list_corpora()]
+        assert tokens == ["ctf2:practice:p1", "ctf2:daily"]
+
     async def test_list_daily_challenges(self):
         client = FakeClient(list_daily={"data": [{"id": "d1", "name": "day"}]})
         challenges = await CTF2Adapter(client).list_challenges(CorpusRef("ctf2", "daily"))

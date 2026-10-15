@@ -1,4 +1,14 @@
 <details open>
+<summary><strong>Unreleased</strong> — CTF2 列题对不可读分区容错（过期 session 不再让整张题单死掉）</summary>
+
+- **修（中·实测坐实）：`ctf2.list_corpora` 让可选的 competition/stage 分区把整个列题打断** — 2026-10-15 现场日志：用户粘贴靶机 URL 直接解题（无平台 ref），agent 用 `platform_list` 找 ref 时，agent 作用域 PAT 对 `competition:read` 本就 403，回退的浏览器 session JWT 又已过期（401 TOKEN_EXPIRED），异常从 `list_corpora` 冒出去 → **整张题单返回空**；而 `platform_submit` 必须带 challenge ref，于是"flag 已经拿到却提交不了"。修法：competitions/stages 作为可选分区 try/except 跳过（practice 场次仍用 PAT 正常列出，实测过期 session 下仍返回 7 个练习场），与 `list_challenges` 已有的"跳过读不到的集合"容错一致。**遗留说明**：练习场内部的题目枚举仍是 session-only（Open API 无对应路由，实测 `/practice/<pid>/challenges/` 走 `_session_request`），所以过期 session 下"列出练习场"可、"展开场内题目"仍不可——要完整走 ref 流程需刷新浏览器 session，或改用 MCP 面的 `ctf2_*` 工具（Bearer PAT，不依赖 session）。
+- **测试** — 新增 `tests/platforms/test_ctf2_adapter.py::TestAdapterListing::test_unreadable_stages_do_not_kill_the_whole_listing`（competitions 抛错时 practice+daily 仍在）；`tests/platforms` + `tests/ctf_platform` 670 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — submit_gate 只读审查：自证回声可伪造见证（含修法代价实测）· 静默失效已可见化 · 中文残口无法定标</summary>
 
 - **审查对象**：`vulnclaw/agent/submit_gate.py`（窗口外新增、此前未审）。只读审查 + 只落地零语义风险项。
