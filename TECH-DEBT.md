@@ -138,32 +138,31 @@ OCR / pyc / pdf / 证据 / 报告 等十余种工具的执行逻辑；`main.py` 
 
 ---
 
-## 3. REPL 路径的两个待修缺口（2026-10-15 实战实测，未修）
+## 3. REPL 路径的收尾缺口（2026-10-15 实战实测）
 
-同日已修并入库的三批（`682978b` 上报/证据面钉入 always-keep；`b2b7678` 目标抽取中文误判；
-`ffaab8c` 逃生分支按最新 goal 判定）不列在此。以下是同一路径上剩下的两处——都**不影响正确性**，
-但会误导现场判断：
+同日已修并入库的四批（`682978b` 上报/证据面钉入 always-keep；`b2b7678` 目标抽取中文误判；
+`ffaab8c` 逃生分支按最新 goal 判定；`9982115` 收尾落盘 + 中断异常取回）不列在此。剩余一处：
 
-**① REPL 直连 solve 不做 run_complete 落盘**（中）：`orchestrator.py` 的 `checkpoint("run_complete")`
-只在命令路径触发；REPL 里 `agent.solve()` 跑完后目标状态仍停在 run_start——实测
-`targets/<id>/state.json` 的 `completed=False`、`findings` 为 0，而屏幕上 Solve 面板显示"目标达成"。
-后果：重开 REPL 用 `target X` "恢复历史状态"拿到的是旧快照（2026-10-15 乐橙 ISRC 战报据此误判过一次）。
-修法：REPL solve 结束回调调用 `target_state.store.save_target_state`（参数照 orchestrator 的
-checkpoint），先补失败复现测试（面板达成 ⇒ state 必须更新）。
+**① REPL 直连 solve 不做 run_complete 落盘 —— ✅ 已修（2026-10-15，commit `9982115`）**
+原症状：Solve 面板显示"目标达成"（completed=True）而 `targets/<id>/state.json` 停在 run_start
+（`completed=False`、findings 为 0），重开 REPL 用 `target X` 恢复的是旧快照（乐橙 ISRC 战报据此
+误判过一次）。修法=REPL 安装 SessionState 的边界 checkpoint 回调（与 orchestrator.checkpoint
+同机制）+ solve 收尾显式 run_complete / 中断 interrupt / chat 收尾 chat_complete，并在 target
+恢复后重装（apply_target_state_to_agent 会替换 state 对象）；测试 tests/cli/test_repl_checkpoint.py
+（失败复现：面板达成 ⇒ state 必须更新）。
 
-**② 每轮 `asyncio.run` 的事件循环 GC 收尾噪声**（低）：Windows proactor 循环被 GC 时 `__del__`
-二次 close → `AttributeError: 'NoneType' object has no attribute 'close'`（前缀 "Exception ignored"，
-无害，但会夹进 REPL 输出、干扰"命令是否生效"的判断——判 `chat` 是否生效要看提示符有无 `AUTO` 前缀）。
-修法：复用单一事件循环，或显式丢弃引用避免 GC 二次关闭。
+**② 每轮 `asyncio.run` 的事件循环 GC 收尾噪声**（低，未修）：Windows proactor 循环被 GC 时
+`__del__` 二次 close → `AttributeError: 'NoneType' object has no attribute 'close'`（前缀
+"Exception ignored"，无害，但会夹进 REPL 输出、干扰"命令是否生效"的判断——判 `chat` 是否生效
+要看提示符有无 `AUTO` 前缀）。修法：复用单一事件循环，或显式丢弃引用避免 GC 二次关闭
+（CPython proactor 的已知收尾怪癖，非阻塞项）。
 
-**②b 同族第二种表现：退出时 "Task exception was never retrieved"**（低，2026-10-15 现场实测）：
-带着在飞任务退出（求解中按 Ctrl+C，或在循环里触发了退出），`asyncio.run` 的循环清理会取消
-`_run_auto` 任务；`repl_runner.run_repl_call` 按设计把 `CancelledError` 转成 `KeyboardInterrupt`
-（repl_runner.py:49，round15b F-G 的边界处理），而 asyncio 取消清理路径没有取回该异常 →
-任务 GC 时打印整页 traceback（`Task-493 ... exception=KeyboardInterrupt`，出现在 "再见!" /
-"MCP services stopped." 之后）。无害、只在退出瞬间出现；**提示符下 `exit` 正常退出不会触发**
-（无在飞任务可取消）。修法：与 ①/② 同批处理时，让退出路径显式取回任务异常，或让转换后的异常
-在任务层被消费（注意别回退 round15b 的取消→中断转换语义）。
+**②b 退出时 "Task exception was never retrieved"**（低）—— ✅ 已修（2026-10-15，commit `9982115`）
+原症状：带着在飞任务退出时，`asyncio.run` 的取消清理取消 `_run_auto` 任务，`repl_runner` 按设计
+把 `CancelledError` 转成 `KeyboardInterrupt`（round15b F-G 边界），该异常未被取回 → 任务 GC 时
+打印整页 traceback（出现在 "再见!" / "MCP services stopped." 之后；提示符下 `exit` 正常退出不触发）。
+修法=记录被取消任务引用、退出路径 `Task.exception()` 取回（pending 时保留引用供退出期重试），
+未回退 round15b 的取消→中断转换语义。
 
 ## 4. 非问题（记录以免后人重复怀疑）
 
