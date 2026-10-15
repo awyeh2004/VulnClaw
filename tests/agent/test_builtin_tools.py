@@ -1042,6 +1042,34 @@ class TestMcpToolsSurviveGoalPruning:
         assert "dir_enum" not in names
         assert "python_execute" in names
 
+    def test_report_surface_survives_goal_pruning(self):
+        """A bundle-matching goal must not prune the report/evidence surface.
+
+        Measured 2026-10-15: the pruning goal text accumulates across turns
+        (``auto_skill_input = prev | goal``), a pasted engagement brief
+        containing "Web应用" pinned every later goal to a task bundle, and
+        ``report_finding`` / ``traffic_bind_evidence`` silently disappeared from
+        the schema — findings were then recorded as blackboard answer cards,
+        which by design never enter the report. The reporting face must stay
+        unconditional, exactly like the platform verbs pinned above.
+        """
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        # This goal matches the web bundle ("Web应用"/"web"), i.e. it DOES
+        # prune heavy tools…
+        goal = "对 mall.imou.com 做信息收集（Web应用），把发现用 report_finding 上报"
+        allowed = _infer_allowed_tools(goal)
+        assert allowed is not None, "goal should match a task bundle"
+        # …but the report/evidence surface must survive it.
+        for name in (
+            "report_finding",
+            "findings_report",
+            "traffic_list",
+            "traffic_view",
+            "traffic_bind_evidence",
+        ):
+            assert name in allowed, f"{name} was pruned from the tool face"
+
 
 class TestSolveScratchWorkdir:
     """session.solve_work_root: solve tools run in <root>/<run_id>/, not the repo."""

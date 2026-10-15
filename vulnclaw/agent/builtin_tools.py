@@ -1474,6 +1474,21 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "web_map_render",
     "web_map_summary",
     "web_map_reset",
+    # Report/evidence surface — pinned for the same reason as the platform verbs
+    # below, and measured the same way (2026-10-15): the pruning goal text
+    # *accumulates* across turns (`runtime.auto_skill_input = f"{prev} | {goal}"`,
+    # solver.py), so one pasted engagement brief containing "Web应用" (bare
+    # "web") permanently killed the general-pentest escape branch — every later
+    # goal matched a task bundle, and `report_finding` / `traffic_bind_evidence`
+    # silently vanished from the face. The agent then recorded findings as
+    # blackboard answer cards, which by design never enter the findings report,
+    # and the generated report came out empty. Reporting must not depend on the
+    # inferred task type.
+    "report_finding",
+    "findings_report",
+    "traffic_list",
+    "traffic_view",
+    "traffic_bind_evidence",
     # NOTE: the GCS tools used to be pinned here by hand. That list had drifted
     # from reality -- it named 6 of the 9 gcs_* tools, so three were prunable
     # while six were force-kept. The GCS tool face is now controlled by one
