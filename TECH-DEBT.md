@@ -156,6 +156,15 @@ checkpoint），先补失败复现测试（面板达成 ⇒ state 必须更新�
 无害，但会夹进 REPL 输出、干扰"命令是否生效"的判断——判 `chat` 是否生效要看提示符有无 `AUTO` 前缀）。
 修法：复用单一事件循环，或显式丢弃引用避免 GC 二次关闭。
 
+**②b 同族第二种表现：退出时 "Task exception was never retrieved"**（低，2026-10-15 现场实测）：
+带着在飞任务退出（求解中按 Ctrl+C，或在循环里触发了退出），`asyncio.run` 的循环清理会取消
+`_run_auto` 任务；`repl_runner.run_repl_call` 按设计把 `CancelledError` 转成 `KeyboardInterrupt`
+（repl_runner.py:49，round15b F-G 的边界处理），而 asyncio 取消清理路径没有取回该异常 →
+任务 GC 时打印整页 traceback（`Task-493 ... exception=KeyboardInterrupt`，出现在 "再见!" /
+"MCP services stopped." 之后）。无害、只在退出瞬间出现；**提示符下 `exit` 正常退出不会触发**
+（无在飞任务可取消）。修法：与 ①/② 同批处理时，让退出路径显式取回任务异常，或让转换后的异常
+在任务层被消费（注意别回退 round15b 的取消→中断转换语义）。
+
 ## 4. 非问题（记录以免后人重复怀疑）
 
 - **`tests/` 占 24%（64,957 行）**：对 9.2 万行核心代码，测试/代码 ≈ 70%，属**健康**，不是臃肿。
