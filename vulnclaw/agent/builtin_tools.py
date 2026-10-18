@@ -903,6 +903,23 @@ server-side, so re-keeping them from an MCP result would mean parsing rendered
 JSON to duplicate enforcement the platform already applies.
 """
 
+#: EVERY submit verb, across all three routes they can take. The evidence gate
+#: and the local master switch run on this set ONCE, before routing.
+#:
+#: The gate used to be attached inside the "yield to MCP" branch only, which left
+#: two routes uncovered — the builtin early-return (a legacy name whose builtin
+#: face claims it, i.e. the default programmatic/CLI case with no MCP owner) and
+#: ``platform_submit``. Measured 2026-10-16: an ungrounded guessed flag reached
+#: the CTF2 adapter through BOTH of those, while only the MCP-owned route returned
+#: ``[submit-gate]``. ``platform_submit`` matters most: it is the entry point
+#: ``competition-mode`` tells the agent to use, and the platform-neutral migration
+#: target for the legacy verbs.
+#:
+#: One set, one check — running ``submission_refusal`` twice for the same call
+#: would double-count its bounded refusal (``MAX_REFUSALS``), halving the budget
+#: that keeps a real-but-unreadable flag submittable.
+_SUBMIT_TOOL_NAMES = _GATED_SUBMIT_TOOL_NAMES | {"platform_submit"}
+
 
 from vulnclaw.agent.tools._shared import _runtime_config  # noqa: F401 — re-export
 
@@ -978,6 +995,23 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
                 )
             return f"[constraint_violation] {tool_violation}"
 
+    # ── Submit gate: ONE check, before any routing branch ────────────────────
+    #
+    # Attaching this inside the "yield to MCP" branch (the previous shape) missed
+    # the builtin early-return below and ``platform_submit`` entirely — measured
+    # 2026-10-16, an ungrounded guessed flag reached the adapter through both.
+    # Both halves live here now: the local master switch plus the evidence gate
+    # (``vulnclaw/agent/submit_gate.py``), which refuses locally so a rejected
+    # candidate never spends a platform attempt.
+    if tool_name in _SUBMIT_TOOL_NAMES:
+        if not _flag_submission_enabled():
+            return _submission_disabled_message()
+        from vulnclaw.agent.submit_gate import submission_refusal
+
+        refusal = submission_refusal(agent, args)
+        if refusal is not None:
+            return refusal
+
     if tool_name in {"agent_run", "agent_job"}:
         from vulnclaw.agent.subagent.integration import (
             execute_agent_job,
@@ -1021,35 +1055,15 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
             agent, tool_name, ctf2_tools_enabled(_runtime_config(agent))
         ):
             return await dispatch_ctf2_tool(tool_name, args)
-        if tool_name in _GATED_SUBMIT_TOOL_NAMES:
-            if not _flag_submission_enabled():
-                return _submission_disabled_message()
-            # 提交证据门（``vulnclaw/agent/submit_gate.py``）：这条"让给平台 MCP"的
-            # 路此前是唯一没有任何证据检查的提交路径 —— 2026-10-14 巡航实测 9 次白花
-            # 尝试全部经由此路，被拒候选签名一致（附件只有 `flag{`，body 与闭括号由
-            # 模型自己补出，补完形态合法，连 FINAL 的 shape 检查也看不出）。本地拒绝
-            # **不消耗平台尝试数**；有界拒绝（见 submit_gate.MAX_REFUSALS），真 flag
-            # 不会被永久关在门外。
-            from vulnclaw.agent.submit_gate import submission_refusal
-
-            refusal = submission_refusal(agent, args)
-            if refusal is not None:
-                return refusal
-        # else: yield to the MCP manager at the bottom of this function.
+        # else: yield to the MCP manager at the bottom of this function. Submit
+        # verbs already passed the master switch + evidence gate above.
 
     if tool_name in GCS_TOOL_NAMES:
         if _builtin_face_claims(
             agent, tool_name, gcs_tools_enabled(_runtime_config(agent))
         ):
             return await dispatch_gcs_tool(tool_name, args)
-        if tool_name in _GATED_SUBMIT_TOOL_NAMES:
-            if not _flag_submission_enabled():
-                return _submission_disabled_message()
-            from vulnclaw.agent.submit_gate import submission_refusal
-
-            refusal = submission_refusal(agent, args)
-            if refusal is not None:
-                return refusal
+        # else: yield to the MCP manager (submit verbs gated above).
 
     if tool_name in TRAFFIC_TOOL_NAMES:
         store = resolve_traffic_store(agent)

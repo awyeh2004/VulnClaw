@@ -74,7 +74,15 @@ def _exposed(*a, **k):
 
 @pytest.fixture()
 def no_platform_submit_gate(monkeypatch):
-    """The submit tests must not touch the real guard state file."""
+    """The submit tests must not touch the real guard state file.
+
+    Patches BOTH seams: the master switch is one function re-exported under two
+    module names (``builtin_tools._flag_submission_enabled`` is
+    ``platforms.tools._flag_submission_enabled``), and the submit gate now reads
+    it once at the top of ``execute_mcp_tool`` while the shared policy reads the
+    other binding. Patching only one would let the real switch answer.
+    """
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
     monkeypatch.setattr(
         "vulnclaw.platforms.tools._flag_submission_enabled", lambda: True
     )

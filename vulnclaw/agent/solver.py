@@ -65,9 +65,9 @@ _EVIDENCE_ID_RE = re.compile(
     r"|\b(e\d{3,})\s*@",
     re.IGNORECASE,
 )
-_FINAL_MARKERS = ("FINAL:", "Final:", "final:", "DONE:", "[DONE]", "完成：", "最终结果：")
-_ASK_MARKERS = ("ASK_USER:", "Ask user:", "ask_user:", "需要用户：", "请用户确认：")
-_NO_PATH_MARKERS = ("NO_PATH:", "No viable path:", "无法继续：", "没有可继续验证的路径：")
+_FINAL_MARKERS = ("FINAL:", "Final:", "final:", "FINAL：", "FINAL —", "FINAL -", "DONE:", "[DONE]", "完成：", "最终结果：")
+_ASK_MARKERS = ("ASK_USER:", "Ask user:", "ask_user:", "ASK_USER：", "ASK_USER —", "ASK_USER -", "需要用户：", "请用户确认：")
+_NO_PATH_MARKERS = ("NO_PATH:", "No viable path:", "NO_PATH：", "NO_PATH —", "NO_PATH -", "无法继续：", "没有可继续验证的路径：")
 _NEAR_MISS_GUARD_PREFIX = "Near-miss guard:"
 _ASK_USER_GUARD_PREFIX = "Premature ASK_USER guard:"
 _NEAR_MISS_EVIDENCE_MARKERS = (

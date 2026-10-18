@@ -26,6 +26,34 @@ from vulnclaw.targets import Target, legacy_target_state_key, parse_target
 TARGET_STATE_SCHEMA_VERSION = 2
 SNAPSHOT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
 
+#: Newest snapshots kept per target. Snapshot ids start with %Y%m%d_%H%M%S_%f, so
+#: lexical order is chronological order. Without a cap the store grew without
+#: bound: every durable boundary writes one full snapshot, and the REPL installs
+#: the same boundary callback (step_complete / finding_added / phase_transition),
+#: so a long solve writes a snapshot per step with no pruning anywhere.
+MAX_SNAPSHOTS_PER_TARGET = 100
+
+
+def _prune_snapshots(snapshots: Path, keep: int | None = None) -> None:
+    """Keep the *keep* newest snapshots, delete the rest.
+
+    Best-effort by design: a pruning failure must never fail the save that just
+    succeeded. Legacy-imported trees are chmod'd read-only (``_make_tree_read_only``),
+    so ``unlink`` can legitimately raise there.
+    """
+    limit = MAX_SNAPSHOTS_PER_TARGET if keep is None else keep
+    if limit <= 0:
+        return
+    try:
+        files = sorted(snapshots.glob("*.json"))
+    except OSError:
+        return
+    for stale in files[:-limit]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
 
 @dataclass
 class SessionRestoreResult:
@@ -277,6 +305,7 @@ def save_target_state(
     snapshots.mkdir(parents=True, exist_ok=True)
     atomic_write_json(path, raw)
     atomic_write_json(snapshots / f"{snapshot_id}.json", raw)
+    _prune_snapshots(snapshots)
 
     if run_context is not None:
         atomic_write_json(run_context.target_json_path(model), model.to_manifest())

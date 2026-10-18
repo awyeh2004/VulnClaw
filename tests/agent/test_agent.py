@@ -581,6 +581,53 @@ class TestTargetState:
         titles = [f.title for f in restored.findings]
         assert "SQLi" in titles
 
+    def test_snapshot_retention_caps_growth(self, monkeypatch, tmp_path):
+        """每个持久化边界都写一份快照，无上限时会无限增长（2026-10-16）。
+
+        保留策略只删最旧的，最新 N 份与 rollback 语义保持不变。
+        """
+        import vulnclaw.target_state.store as store_mod
+        from vulnclaw.agent.context import SessionState
+
+        monkeypatch.setattr(store_mod, "TARGETS_DIR", tmp_path)
+        monkeypatch.setattr(store_mod, "MAX_SNAPSHOTS_PER_TARGET", 3)
+
+        for i in range(6):
+            state = SessionState(target="https://example.com")
+            state.agent_state.step_seq = i  # 让每份快照内容不同
+            store_mod.save_target_state(
+                "https://example.com", state, command="repl", checkpoint_reason="step_complete"
+            )
+
+        snap_dir = tmp_path / store_mod._target_key("https://example.com") / "snapshots"
+        kept = sorted(p.name for p in snap_dir.glob("*.json"))
+        assert len(kept) == 3, f"expected cap of 3, got {len(kept)}: {kept}"
+
+        # list_target_snapshots is newest-first: the survivors are the newest 3.
+        listed = store_mod.list_target_snapshots("https://example.com")
+        assert len(listed) == 3
+        assert {s["snapshot_id"] + ".json" for s in listed} == set(kept)
+
+    def test_snapshot_retention_keeps_newest(self, monkeypatch, tmp_path):
+        import vulnclaw.target_state.store as store_mod
+        from vulnclaw.agent.context import SessionState
+
+        monkeypatch.setattr(store_mod, "TARGETS_DIR", tmp_path)
+        monkeypatch.setattr(store_mod, "MAX_SNAPSHOTS_PER_TARGET", 2)
+
+        for _ in range(3):
+            store_mod.save_target_state(
+                "https://example.com",
+                SessionState(target="https://example.com"),
+                command="scan",
+            )
+
+        snap_dir = tmp_path / store_mod._target_key("https://example.com") / "snapshots"
+        survivor_ids = {p.stem for p in snap_dir.glob("*.json")}
+        assert len(survivor_ids) == 2
+        listed = store_mod.list_target_snapshots("https://example.com")
+        assert listed[0]["snapshot_id"] in survivor_ids
+
     def test_target_state_schema_preview_and_diff(self, monkeypatch, tmp_path):
         import vulnclaw.target_state.store as store_mod
         from vulnclaw.agent.context import SessionState, VulnerabilityFinding

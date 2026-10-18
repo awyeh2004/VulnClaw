@@ -345,8 +345,8 @@ def extract_task_constraints(user_input: str) -> TaskConstraints:
     detected_target = detect_target(text)
 
     allowed_port_patterns = [
-        r"(?:只测|仅测|只测试|仅测试|仅允许测试|只允许测试)\s*(\d{1,5})(?:\s*端口)?",
-        r"(?:only|just)\s+(?:test|scan)\s+(?:port\s+)?(\d{1,5})",
+        r"(?:只测|仅测|只测试|仅测试|仅允许测试|只允许测试)\s*(\d{1,5})(?![\d.])(?:\s*端口)?",
+        r"(?:only|just)\s+(?:test|scan)\s+(?:port\s+)?(\d{1,5})(?![\d.])",
     ]
     for pattern in allowed_port_patterns:
         for match in re.findall(pattern, text, flags=re.IGNORECASE):

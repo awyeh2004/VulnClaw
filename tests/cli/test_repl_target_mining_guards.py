@@ -23,6 +23,26 @@ class TestCjkProseIsNotATarget:
     def test_version_strings_are_not_hosts(self):
         assert _extract_target_from_input("目标环境 glibc 2.27 崩溃") is None
 
+    def test_space_separated_prose_still_mines_the_real_file(self):
+        # Residual of the same incident class: the adjacent-CJK guard missed the
+        # space-separated form, so the leading prose was absorbed into the stem
+        # ("请分析 target.zip" instead of "target.zip").
+        assert _extract_target_from_input("请分析 target.zip 的漏洞") == "target.zip"
+        assert _extract_target_from_input("下载 misc2.zip 后分析") == "misc2.zip"
+
+    def test_spaced_prose_matches_agent_layer(self):
+        from vulnclaw.agent.input_analysis import detect_target
+
+        text = "请分析 target.zip 的漏洞"
+        assert _extract_target_from_input(text) == detect_target(text)
+
+    def test_domain_glued_to_cjk_is_intentionally_not_mined(self):
+        # Alignment with agent.input_analysis.detect_target: the CJK-aware
+        # lookbehind is what blocks "…使用console.log"; the cost is that a domain
+        # glued straight onto CJK prose is not mined either. Fixing one without
+        # re-breaking the other requires the lookbehind, so this stays None.
+        assert _extract_target_from_input("访问www.example.com看看") is None
+
 
 class TestRealTargetsStillMine:
     def test_ascii_file_target(self):

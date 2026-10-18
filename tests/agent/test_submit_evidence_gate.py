@@ -296,3 +296,146 @@ def test_execute_mcp_tool_lets_a_grounded_submission_reach_the_platform(monkeypa
     result = asyncio.run(bt.execute_mcp_tool(agent, "ctf2_submit_flag", args))
     assert result == "MCP-SENTINEL"
     assert agent.mcp_manager.calls == [("ctf2_submit_flag", args)]
+
+
+# ── 回归（2026-10-16）：证据门必须盖住全部三条提交路由 ────────────────────────
+#
+# 门以前挂在"让给 MCP"分支里，于是两条路漏网：builtin face 命中的早退（无 MCP
+# owner 时的默认 CLI/程序化路径）、以及 platform_submit（competition-mode 技能
+# 明令 agent 使用的平台中立入口）。实测未 grounding 的猜测 flag 经这两条路都打到
+# 了适配器，只有 MCP 拥有的那条返回 [submit-gate]。
+
+
+class _FakeAdapter:
+    def __init__(self):
+        self.calls = []
+
+    async def submit_flag(self, ref, flag):
+        self.calls.append((ref.token(), flag))
+        return SimpleNamespace(accepted=True, message="ok", raw={})
+
+
+def _builtin_agent(state):
+    """无 MCP owner → legacy 名字走 builtin 路由（不再 yield）。"""
+    return SimpleNamespace(
+        context=SimpleNamespace(state=state),
+        active_role=None,
+        config=None,
+        session_state=None,
+        mcp_manager=None,
+    )
+
+
+def test_builtin_route_is_gated_too(monkeypatch):
+    """无 MCP owner 时的 legacy builtin 解析路径也必须过门（此前早退绕过了它）。"""
+    from vulnclaw.agent import builtin_tools as bt
+
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
+    called = []
+    monkeypatch.setattr(
+        bt, "dispatch_ctf2_tool", lambda name, args: called.append(name) or "SENTINEL"
+    )
+    agent = _builtin_agent(make_state([item("shell_command", "no flag here")]))
+
+    result = asyncio.run(
+        bt.execute_mcp_tool(
+            agent,
+            "ctf2_submit_flag",
+            {"practice_id": 1, "challenge_id": 9, "flag": PADDED},
+        )
+    )
+    assert result.startswith("[submit-gate]")
+    assert called == []  # 内置 handler 从未被调用 → 不消耗尝试
+
+
+def _stub_platform_resolution(monkeypatch, platform_tools, fake):
+    """Pin `_resolve` so a grounded/fabricated flag reaches the named adapter."""
+    from vulnclaw.platforms.refs import ChallengeRef
+
+    monkeypatch.setattr(
+        platform_tools,
+        "_resolve",
+        lambda args: (fake, ChallengeRef("ctf2", "practice", "1", "9")),
+    )
+    monkeypatch.setattr(platform_tools, "_flag_submission_enabled", lambda: True)
+
+
+def test_platform_submit_is_gated(monkeypatch):
+    """平台中立入口 platform_submit 此前完全无门 —— 现在必须拦下。"""
+    from vulnclaw.agent import builtin_tools as bt
+    from vulnclaw.platforms import tools as platform_tools
+
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
+    fake = _FakeAdapter()
+    _stub_platform_resolution(monkeypatch, platform_tools, fake)
+    agent = _builtin_agent(make_state([item("shell_command", "no flag here")]))
+
+    result = asyncio.run(
+        bt.execute_mcp_tool(
+            agent, "platform_submit", {"ref": "ctf2:practice:1:9", "flag": PADDED}
+        )
+    )
+    assert result.startswith("[submit-gate]")
+    assert fake.calls == []  # 适配器从未被调用 → 平台从未收到
+
+
+def test_platform_submit_grounded_reaches_adapter(monkeypatch):
+    from vulnclaw.agent import builtin_tools as bt
+    from vulnclaw.platforms import tools as platform_tools
+
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
+    fake = _FakeAdapter()
+    _stub_platform_resolution(monkeypatch, platform_tools, fake)
+    agent = _builtin_agent(make_state([item("shell_command", f"found {OBSERVED}")]))
+
+    result = asyncio.run(
+        bt.execute_mcp_tool(
+            agent, "platform_submit", {"ref": "ctf2:practice:1:9", "flag": OBSERVED}
+        )
+    )
+    assert fake.calls == [("ctf2:practice:1:9", OBSERVED)]
+    assert "ACCEPTED" in result
+
+
+def test_gate_is_not_counted_twice(monkeypatch):
+    """单点门：同一未 grounding 候选被拒恰好 MAX_REFUSALS 次后放行。
+
+    若门在两处各跑一遍（旧形状 + 新形状并存），计数会翻倍，真 flag 的放行预算被腰斩。
+    """
+    from vulnclaw.agent import builtin_tools as bt
+
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: True)
+    state = make_state([item("shell_command", "no flag here")])
+    agent = _builtin_agent(state)
+
+    refusals = 0
+    for _ in range(MAX_REFUSALS + 1):
+        result = asyncio.run(
+            bt.execute_mcp_tool(
+                agent, "platform_submit", {"ref": "ctf2:practice:1:9", "flag": PADDED}
+            )
+        )
+        refusals += result.startswith("[submit-gate]")
+    assert refusals == MAX_REFUSALS
+    assert state.submit_gate_refusals[_candidate_key_of(PADDED)] == MAX_REFUSALS + 1
+
+
+def _candidate_key_of(flag: str) -> str:
+    from vulnclaw.agent.submit_gate import _candidate_key
+
+    return _candidate_key(flag)
+
+
+def test_submit_disabled_switch_still_covers_platform_submit(monkeypatch):
+    """总开关在路由之前，platform_submit 也走它（此前只有 legacy 两处走）。"""
+    from vulnclaw.agent import builtin_tools as bt
+
+    monkeypatch.setattr(bt, "_flag_submission_enabled", lambda: False)
+    agent = _builtin_agent(make_state([item("shell_command", "no flag here")]))
+
+    result = asyncio.run(
+        bt.execute_mcp_tool(
+            agent, "platform_submit", {"ref": "ctf2:practice:1:9", "flag": OBSERVED}
+        )
+    )
+    assert "platform_submit_disabled" in result

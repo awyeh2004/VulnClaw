@@ -39,6 +39,7 @@ case instead of inventing a route.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -67,6 +68,8 @@ KIND_PRACTICE = "practice"
 KIND_DAILY = "daily"
 KIND_STAGE = "stage"
 KINDS = frozenset({KIND_PRACTICE, KIND_DAILY, KIND_STAGE})
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class CTF2Error(RuntimeError):
@@ -397,7 +400,8 @@ class CTF2Adapter:
         # instead of abort (same tolerance `list_challenges` already applies).
         try:
             competition_rows = extract_rows(await self.client.list_competitions(limit=50))
-        except Exception:  # noqa: BLE001 - optional section, keep the rest usable
+        except Exception as exc:  # noqa: BLE001 - optional section, keep the rest usable
+            _LOGGER.warning("ctf2 list_corpora: competitions section skipped: %r", exc)
             competition_rows = []
 
         for row in competition_rows:

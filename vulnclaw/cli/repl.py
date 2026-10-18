@@ -326,7 +326,15 @@ def _checkpoint_repl_agent(agent: Any, reason: str) -> Optional[str]:
             command="repl",
             runtime=getattr(agent, "runtime", None),
             checkpoint_reason=reason,
-            merge_existing=False,
+            # Merging write. The natural-language target-adoption branch
+            # (``_should_switch_target`` / the first-adoption ``elif`` below) sets
+            # ``current_target`` without calling ``apply_target_state_to_agent``, so
+            # the in-memory state can be a strict SUBSET of what is already on disk
+            # for that target. A non-merging write replaced it wholesale -- measured
+            # 2026-10-16: a stored finding went from ``['SQLi in /login']`` to ``[]``.
+            # The command path can use ``merge_existing=False`` because it hydrates
+            # first; this one must not.
+            merge_existing=True,
         )
         return str(path)
     except Exception as exc:  # noqa: BLE001 — persistence is best-effort
@@ -355,9 +363,14 @@ def _retrieve_interrupted_task() -> None:
     """Retrieve the recorded run task's exception so asyncio stops warning.
 
     ``Task.exception()`` marks the exception retrieved, which is what stops
-    asyncio from printing "Task exception was never retrieved" at GC. A pending
-    task raises InvalidStateError — the reference is then KEPT so a later
-    (teardown) attempt can retry once the task has finished (TECH-DEBT ## 3 ②b).
+    asyncio from printing "Task exception was never retrieved" at GC. Two cases
+    must NOT clear the reference, one must:
+
+    * still-pending — ``InvalidStateError``; keep the ref for the teardown retry;
+    * cancelled — ``exception()`` raises ``CancelledError`` (a ``BaseException``,
+      so a bare ``except Exception`` misses it and it would escape the caller).
+      It has already marked the task retrieved by then, so the ref is cleared;
+    * otherwise the exception is returned and the ref is cleared.
     """
     global _REPL_INTERRUPTED_TASK
     task = _REPL_INTERRUPTED_TASK
@@ -365,7 +378,11 @@ def _retrieve_interrupted_task() -> None:
         return
     try:
         task.exception()
-    except Exception:  # pending task — keep the ref for the teardown retry
+    except asyncio.InvalidStateError:
+        return  # pending — keep the ref for the teardown retry
+    except asyncio.CancelledError:
+        pass  # cancelled: already marked retrieved by exception()
+    except Exception:  # pragma: no cover - defensive: never let teardown raise
         return
     _REPL_INTERRUPTED_TASK = None
 
@@ -1855,22 +1872,24 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
 
     # 3) A bare token with a file-ish extension (zip, tar, gz, png, txt, …)
     #    is a local file target, not a domain.
-    #    ``\w`` matches CJK, so this shape also fires inside Chinese prose that
-    #    glues an ASCII word to text — "…建议使用console.log；" matched here and
-    #    became a bogus *local file* target: measured 2026-10-15, pasting an
-    #    engagement brief retargeted a live session to "建议使用console.log" and
-    #    reset its context. A CJK→ASCII-letter junction inside the stem ("用c")
-    #    is prose; real names are ASCII ("misc2.zip") or have a purely
-    #    non-ASCII stem ("报告.pdf"). Skip prose and keep scanning.
+    #    A real filename stem is either ASCII ("misc2.zip") or purely non-ASCII
+    #    ("报告.pdf") — never a CJK/ASCII mix, and never space-glued prose. The
+    #    old ``[\w\-. ]+`` class (``\w`` matches CJK, and the class allowed
+    #    spaces) absorbed the leading Chinese into the stem whenever a space
+    #    separated it from the filename: measured 2026-10-15,
+    #    ``_extract_target_from_input("请分析 target.zip 的漏洞")`` returned
+    #    "请分析 target.zip" — the same bogus *local file* retarget the adjacent
+    #    case fixed, only spaced. The lookbehind likewise refuses a start that is
+    #    the tail of a bigger word/path (CJK counts as ``\w``), so
+    #    "…使用console.log" never mines "console.log" here.
     for file_like_match in re.finditer(
-        r"(?<![A-Za-z0-9])([\w\-. ]+\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf))\b",
+        r"(?<![\w\-.])"
+        r"((?:[A-Za-z0-9_.\-]+|[\u4e00-\u9fff]+)"
+        r"\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf))\b",
         stripped,
         flags=re.IGNORECASE,
     ):
-        candidate = file_like_match.group(1).strip()
-        if re.search(r"[\u4e00-\u9fff][A-Za-z]", candidate.rsplit(".", 1)[0]):
-            continue
-        return candidate
+        return file_like_match.group(1).strip()
 
     # 4) IP address
     ip_match = re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", stripped)
