@@ -22,149 +22,53 @@
 | **合计** | **984** | **269,486** | |
 
 **判断**：对一个"agent + 技能库"形态的项目，34% 核心 / 30% 技能 / 24% 测试是**正常分布**，
-不是失控。真正反常的只有下面第 2 条那两个 5 千行文件。
+不是失控。
 
 ---
 
-## 1. 技能库 references 成组重复（13 组 / 4,167 行）—— ✅ 已修（2026-10-12，commit `86322a6`）
 
-**修法（已落地）**：新增 `vulnclaw/skills/_shared/references/` 共享根 + frontmatter
-`shared_references` 声明机制（`loader.py`）。技能只在自己 SKILL.md 里**声明**要用哪些共享名
-（操作员写盘的静态清单，不是模型输入）；`resolve_skill_reference` 先查本技能
-`references/`（原路径原逻辑），声明过的名字才回退到共享根，**共用同一套 containment 检查**
-（resolve + 必须落在根内 + is_file），穿越面一个字没放松。本技能同名文件优先 = 本地可覆盖共享。
+## 4. 目标范围硬门只装在 HTTP 探测族上（2026-10-16 BILISRC 实战实测）
 
-**迁移**（13 组全部完成，剩余重复 0 组）：web 域 3 文件（web-pentest /
-web-security-advanced / secknowledge-skill）→ android 域 9 文件（android-pentest /
-client-reverse）→ `upstream-source.md` ×34（全部 redteam-*-detail-pack）。
+**症状**：设了 target 后，`http_probe_batch` 对范围外主机 fail-closed——
+`[constraint_violation] Host s1.hdslb.com is outside allowed scope [huahuo.bilibili.com]`（e022）；
+但同一场 run 里 `python_execute` 的裸 `requests` 请求**完全不受同一闸约束**：e005/e006 就是这样
+直接抓下 s1.hdslb.com 上的主 JS bundle（1.9MB）并解析出 API 路径。模型自己在 thinking 里
+察觉到这个不对称、按"严格模式"自我收手——**但那是模型纪律，不是硬门**。换成明令禁止的主机
+走 python_execute，同样只有提示词挡着。
 
-**防回潮**：`tests/skills/test_no_duplicate_references.py`——扫全部 `references/` 树
-（含 `_shared`），任何两份逐字节相同即 fail；`tests/skills/test_shared_references.py`
-钉住解析契约（未声明不可达 / own 覆盖共享 / 穿越仍拒 / 声明清洗）。
+**另一面**：闸的口径是"**单 target 主机**"，既比授权范围窄、又比真实攻击面宽——本次 A4 的
+goal 原文明确授权"抓取 huahuo 首页与主 JS bundle"，而 bundle 托管在 s1.hdslb.com，
+正规工具把授权动作也拦了，只能靠 python 绕路完成；而 BILISRC 的资产面本是 *.bilibili.com
+全域（hdslb.com 不在其中），闸却无从表达"资源主机白名单"这种合法相邻。
 
-以下为原始记录（留存供对照）：
+**为什么暂不修**：真正的修法是网络层收口（拦 socket），对 python_execute 这种通用能力太重，
+且要先定策略模型（deny-list 硬拦 / 资产面 allow-list + 运营者显式放行 / 仅告警记录）——
+属"改安全边界"，须单独一轮设计。
+
+**便宜的先手**（若做最小改动）：把**明令 deny 的主机**（remote/SSH 已有的 denied_hosts 口径）
+在 python_execute 里做 fail-loud 字符串扫描——挡不住决心绕的人，但把"整类工具零约束"
+降为"黑名单受控 + 其余靠纪律"。
+
+**2026-10-16 第二次实证（passport 轮）**：同一冲突（口令显式授权"抓含 CDN 域的公开静态 JS" vs 运行时闸只放行单 target 主机）
+下，模型行为**不稳定**——huahuo/api/account 三轮都判定"任务显式授权 CDN"并用 `python_execute` 绕闸抓下 JS（把正事做完），
+passport 轮却把"严格模式硬约束"判为优先、**拒绝绕过**，于是整轮的核心步骤"首页+主 JS 抽路径"直接跳过、退化为猜已知端点。
+即：这个问题不只"多拦了授权的读"，还让同一口令的轮次结果取决于模型临场解读。**修法优先级应上升**：
+把**操作者显式声明的静态资源主机**接入硬门（如口令/约束里支持"允许静态资源主机"字段），或在 fetch 针对 target 页面引用资源时放行。
+→ 在修复前，给 VulnClaw 的口令**不要再写"含 CDN 域"**（写了也可能被拦，反而制造冲突、浪费轮次）。
+
+**附·已修（2026-10-16）**：数字开头域名被**端口解析误读**——口令"本轮只测 8.duxiaoman.com 这一个域"命中
+`只测\s*(\d{1,5})`，把 "8" 装进 `allowed_ports` ⇒ 硬门把 443 全判 `Port(s) 443 are outside allowed scope [8]`，
+实测烧了 5 轮（e003–e012）才绕开。修法=两条端口模式加 `(?![\d.])` 前瞻（数字后跟 `.`/数字时不当端口）+
+回归 `tests/agent/test_port_parse_guard.py`（数字开头域/IP 目标 → 空；`8080 端口`/`443`/`only test port 8080` → 保留）。
+同类残余（记录在案、未清）：`blocked_group_patterns` 的"不要测 <数字开头域>"仍会把 8 装进 blocked_ports（无害但同族）。
+定域回归已跑；**全量套件因并行会话在飞改动（repl.py/ctf2.py 未提交）未跑**，repo 静默后补。
+
+**附·已测（2026-10-17）**：范围解析器把 **shell 变量当 host 的一部分**——PowerShell 插值的 URL
+`https://www.ys7.com/order/x.html?order_id=$i` 被判 `Host www.ys7.com$i is outside allowed scope` 而误拒
+（agent 改用字面 URL 才通过）。修法=URL host 解析在 `$`/`{}` 处截断，或对含变量占位的 URL 报"需字面 URL"的明确提示。
 
 
-同一份内容在多个 skill 的 `references/` 下各存一份，**逐字节相同**（sha256 相等）：
-
-| 重复 | 单份行数 | 可省 | 文件 | 分布 |
-|---|---|---|---|---|
-| **×3** | 582 | 1,164 | `web-logic-auth.md` | `secknowledge-skill` / `web-pentest` / `web-security-advanced` |
-| ×2 | 906 | 906 | `web-injection.md` | `web-pentest` / `web-security-advanced` |
-| ×3 | 348 | 696 | `web-modern-protocols.md` | `secknowledge-skill` / `web-pentest` / `web-security-advanced` |
-| ×2 | 229 | 229 | `android-external-url-runtime-first-workflow.md` | `android-pentest` / `client-reverse` |
-| ×2 | 220 | 220 | `android-signing-and-crypto-workflow.md` | 同上 |
-| ×2 | 207 | 207 | `android-ui-driven-observation-and-packet-loop.md` | 同上 |
-| ×34 | 6 | 198 | `upstream-source.md` | 34 个 `redteam-*-detail-pack` 等包各一份 |
-| ×2 | 167 | 167 | `android-authorized-app-pentest-sop.md` | `android-pentest` / `client-reverse` |
-| ×2 | 119 | 119 | `android-network-layer-testing-quick-reference.md` | 同上 |
-| ×2 | 115 | 115 | `android-signature-reverse-template.md` | 同上 |
-| ×2 | 55 | 55 | `android-dynamic-hooking-and-replay.md` | 同上 |
-| ×2 | 48 | 48 | `android-static-triage-and-callflow.md` | 同上 |
-| ×2 | 43 | 43 | `android-native-signature-analysis.md` | 同上 |
-
-**两个最集中的重复面**：
-
-- `web-pentest` 与 `web-security-advanced` 的 `references/` 有 **3 个同名文件，且三份全部逐字节相同**
-  （`web-injection` 906 + `web-logic-auth` 582 + `web-modern-protocols` 348 = **1,836 行**）。
-- `android-pentest` 与 `client-reverse` 的 `references/` **9 份逐字节相同**（合计 1,203 行）。
-
-**为什么存在**：技能是独立加载单元，`references/` 必须自包含（`loader.py` 的目录约定：
-`<skill_name>/SKILL.md + <skill_name>/references/`）。这是**有意冗余**，但代价真实：
-改一处要改三处，且已经漂移过（见 `CONTRIBUTING.md` §6.2「唯一来源纪律」——
-flag 正则副本曾漂移到 3/17）。
-
-**为什么暂不修**：⚠️ **去重不能靠软链接**——`resolve_skill_reference()` 会对候选路径做
-`resolve()`（**展开符号链接**）并检查"结果必须落在本 skill 的 `references_dir` 之内"，
-所以指向别的 skill 的软链会被拒绝。这条 containment 是防路径穿越的
-（`load_skill_reference` 的入参 `ref_name` 由模型提供，`../../.vulnclaw/config.yaml` 是真实攻击面），
-不能为了让路给去重而放松。真要修得先给加载层加"共享引用"机制，属**改安全边界附近的行为**，
-不适合赛前动。
-
-**修法（赛后）**：先做 `web-pentest` / `web-security-advanced`（省 1,836 行，且两者是同一域的两个
-版本、最易漂移）；再做 `android-pentest` / `client-reverse`（9 份）。改完必须跑
-`tests/` 里技能加载相关用例。
-
----
-
-## 2. 两个"上帝文件"（各 5 千行）—— ✅ 已拆完（2026-10-12）
-
-> **2026-10-12 更新**：两个上帝文件都已拆完（见下"拆分进度"），以下原始记录留存供对照。
-
-**拆分进度（2026-10-12，aw 分支，未推）**：
-
-- ✅ **`builtin_tools.py` 5,473 → 2,853 行**：按工具族拆成 `vulnclaw/agent/tools/` 子包——
-  `shell_exec.py`（shell_command 族）/ `python_exec.py` / `nmap.py` / `http_probe.py` /
-  `brute_force.py` / `runtime_diff.py` / `ocr.py` / `pyc.py` / `pdf.py` /
-  `subprocess_util.py` / `_shared.py`（跨族 `_runtime_config`）。`builtin_tools.py` 保留
-  gating/policy/dispatch 与 schema 注册，并**原样 re-export 每个搬走的名字（含私有名）**，
-  旧 import 路径与测试的属性访问全部不变。**每族一笔提交**（8 笔），每笔跑全量。
-  - ⚠️ 两个非显然的坑（下次拆别的族会再遇到）：① 搬走的代码原来吃 `builtin_tools.py` 顶部的
-    stdlib import，搬完就 `NameError`——新模块必须补自己的 import；②
-    `scripts/verify_execution_boundary.py` 的 `ALLOWED_SPAWN_SITES` 键含文件路径，搬迁会让
-    旧键 stale、新键未登记——**必须同笔提交里删旧加新**（该守卫专门逼人复查每个 spawn 点）。
-  - `_bg_*`（后台任务族）**刻意不拆**：有模块级可变状态（`_bg_tasks` dict / `_bg_seq` 经
-    `global` 重绑 / `_bg_lock`），测试按属性访问并 `clear()`，拆了会产生孤儿副本——属单独设计任务。
-- ✅ **`cli/main.py` 5,355 → 845 行**：拆成 `cli/repl.py`（1,891）+ `commands_run.py`（1,476）+
-  `commands_platform.py`（741）+ `commands_admin.py`（467）+ `commands_config.py`（242），
-  `main.py` 只留 typer 入口与装配。原"拆时顺手修 `_print_cli_manual` 双定义"已随之完成
-  （`52d7689` 删旧定义，现 1 个定义 + 3 个调用点）。
-- ✅ **拆分遗留已收口（2026-10-12，commit `64d80c6`）**：`cli/__init__.py` 与 `cli/_helpers.py`
-  的双定义实测为 **12 个同名 helper、其中 8 个已漂移**（`_run_cli_orchestrated_task`
-  60 行 vs 41 行，同名不同行为；BOM 实际在 `__init__.py` 而非 `_helpers.py`）。所有消费方
-  均从 `_helpers` 导入、包级零引用零 patch 锚点 ⇒ `__init__.py` 改为全部从正典 re-export
-  （same-object 实测），BOM 一并去掉。全量 4953 passed / 17 skipped。
-
-以下为原始记录（留存供对照）：
-
-| 行数 | 文件 |
-|---|---|
-| **5,473** | `vulnclaw/agent/builtin_tools.py` |
-| **5,355** | `vulnclaw/cli/main.py` |
-| 2,930 | `vulnclaw/cli/tui.py` |
-| 2,725 | `vulnclaw/agent/solver.py` |
-
-`builtin_tools.py` 一个文件承载 shell / python / nmap / fetch / `http_probe_batch` / 后台任务 /
-OCR / pyc / pdf / 证据 / 报告 等十余种工具的执行逻辑；`main.py` 里 REPL 主循环、全部 typer
-子命令、配置 CLI 混在一起。
-
-**为什么暂不修**：这是**重构而非清理**——改错一处就会命中赛时要用的主路径。而且**已经拆过一轮**
-（`remote.py`、`recon_tools.py`、`exec_gate.py`、`constraint_policy.py` 都是从它们里独立出来的），
-说明方向对、只是没做完。
-
-**修法（赛后）**：`builtin_tools.py` 按工具族拆（`tools/shell.py`、`tools/http.py`、`tools/ir.py`…），
-`main.py` 按"REPL / 子命令注册 / 配置"三分。每步跑全量回归
-（当前基线：`python -X utf8 -m pytest -q` → **4902 passed / 17 skipped**）。
-
----
-
-## 3. REPL 路径的收尾缺口（2026-10-15 实战实测）
-
-同日已修并入库的四批（`682978b` 上报/证据面钉入 always-keep；`b2b7678` 目标抽取中文误判；
-`ffaab8c` 逃生分支按最新 goal 判定；`9982115` 收尾落盘 + 中断异常取回）不列在此。剩余一处：
-
-**① REPL 直连 solve 不做 run_complete 落盘 —— ✅ 已修（2026-10-15，commit `9982115`）**
-原症状：Solve 面板显示"目标达成"（completed=True）而 `targets/<id>/state.json` 停在 run_start
-（`completed=False`、findings 为 0），重开 REPL 用 `target X` 恢复的是旧快照（乐橙 ISRC 战报据此
-误判过一次）。修法=REPL 安装 SessionState 的边界 checkpoint 回调（与 orchestrator.checkpoint
-同机制）+ solve 收尾显式 run_complete / 中断 interrupt / chat 收尾 chat_complete，并在 target
-恢复后重装（apply_target_state_to_agent 会替换 state 对象）；测试 tests/cli/test_repl_checkpoint.py
-（失败复现：面板达成 ⇒ state 必须更新）。
-
-**② 每轮 `asyncio.run` 的事件循环 GC 收尾噪声**（低，未修）：Windows proactor 循环被 GC 时
-`__del__` 二次 close → `AttributeError: 'NoneType' object has no attribute 'close'`（前缀
-"Exception ignored"，无害，但会夹进 REPL 输出、干扰"命令是否生效"的判断——判 `chat` 是否生效
-要看提示符有无 `AUTO` 前缀）。修法：复用单一事件循环，或显式丢弃引用避免 GC 二次关闭
-（CPython proactor 的已知收尾怪癖，非阻塞项）。
-
-**②b 退出时 "Task exception was never retrieved"**（低）—— ✅ 已修（2026-10-15，commit `9982115`）
-原症状：带着在飞任务退出时，`asyncio.run` 的取消清理取消 `_run_auto` 任务，`repl_runner` 按设计
-把 `CancelledError` 转成 `KeyboardInterrupt`（round15b F-G 边界），该异常未被取回 → 任务 GC 时
-打印整页 traceback（出现在 "再见!" / "MCP services stopped." 之后；提示符下 `exit` 正常退出不触发）。
-修法=记录被取消任务引用、退出路径 `Task.exception()` 取回（pending 时保留引用供退出期重试），
-未回退 round15b 的取消→中断转换语义。
-
-## 4. 非问题（记录以免后人重复怀疑）
+## 5. 非问题（记录以免后人重复怀疑）
 
 - **`tests/` 占 24%（64,957 行）**：对 9.2 万行核心代码，测试/代码 ≈ 70%，属**健康**，不是臃肿。
 - **`vulnclaw/skills/` 占 30%**：技能库是产品资产（内容即能力），不是代码债。

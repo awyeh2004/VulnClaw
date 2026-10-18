@@ -556,3 +556,41 @@ python scripts/release_preflight.py --build
 - 提交正文写清：**实测证据、改了什么、已知局限、测试计数变化**。
 - 报"N 例 / N passed"前**重新数一遍**，不要凭记忆复述上一个版本的数字。
 
+### 6.5 磁盘落盘纪律：临时产物一律进 E 盘（2026-10-17 清理后）
+
+C 盘只剩 12G 可用，跑题产生的附件/解压/暂存**必须**落在 `E:\vulnclaw\`，
+不要写进 `C:\Users\<user>\` 或 C 盘根目录。
+
+**两条独立路径，别只改一条（这是踩过的坑）：**
+
+| 产物 | 落点 | 由谁决定 |
+|---|---|---|
+| agent 的 `shell_command` / `python_execute` 脚本与工作目录 | `<solve_work_root>/<run_id>/` | `config.yaml: session.solve_work_root`（已配 `E:\vulnclaw\work`） |
+| 平台附件下载 `attachment_dir()` | `$VULNCLAW_WORK_DIR` 或 `~/vulnclaw/work` | 环境变量（已设用户级 `VULNCLAW_WORK_DIR=E:\vulnclaw\work`） |
+
+`vulnclaw/platforms/attachments.py:239-242` 的默认值走 `Path.home()`，
+**不看 `solve_work_root`**——所以只配 config 时，附件仍然写 C 盘。两处都要覆盖。
+
+**2026-10-17 清理归档**（确认无用后可自行删除）：
+
+- `E:\vulnclaw\c-drive-archive\ctf-temp-dirs-20261017.tar.gz`（228 MB）
+  —— 原 `C:\ctf`、`C:\ctf2`、`C:\ctf2work`、`C:\work`、`C:\tmp`、`C:\vulnclaw`、`C:\Users\<user>\vulnclaw`
+- `E:\vulnclaw\dot-vulnclaw-archive\`（701 MB）
+  —— `runs/`（2421 文件）、`sessions/`（588）、`targets/`（443）+ 73 个散落日志/脚本
+
+**清理后 `.vulnclaw` 只剩**（3 MB）：`config.yaml` 及历史备份、`playbooks/`、`skills/`、`kb/`、
+`known_hosts`、`switch-llm.sh`、`web_token`、`solve_locks/`。
+
+**跨会话注意**：
+
+- 历史 run 已不在 `C:\Users\<user>\.vulnclaw\runs`，要查旧 run 去
+  `E:\vulnclaw\dot-vulnclaw-archive\runs`。`--resume` / `target-state` 只认原位，
+  查历史请直接读归档目录。
+- `VULNCLAW_WORK_DIR` 是**用户级环境变量**，已开的终端读不到，新开终端/新进程才生效。
+- 批量跑题会留 `solve_locks/*.lock`；进程被强杀后锁不会自动清，下次启动会误判
+  "another solve run is active"。排查顺序：看 `tasklist` 里 pid 是否还活着，
+  死了就删 `solve_locks/*.lock*`。
+- 平台环境配额 `max_environments=1`；某题被 stall 交还后环境**不会自动释放**，
+  会挡住下一题报 `agent_environment_limit`。换题前先调
+  `ctf2_user_delete_practice_id_challenges_challengeid_environment`。
+
