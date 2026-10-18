@@ -188,3 +188,93 @@ class TestFilteringNeverMakesANoteUnreachable:
         toks = pb._tokenize("http://b9bbb32f-x.http-ctf2.dasctf.com/shrine jinja2 ssti")
         assert {"shrine", "jinja2", "ssti"} <= toks
         assert "b9bbb32f" not in toks
+
+
+# ── 稀有权重：实例标识符 vs 通用词（2026-10-18） ──────────────────────────────
+#
+# 门槛数的是 token 个数，对 token 的价值一视同仁。实测 516 条真实笔记，两个方向
+# 同时出错：
+#
+#   * 假阴性：只为某个实例主机记录的笔记只有一个身份 token
+#     （`0b45310800c50ab708fff28f`），针对该实例的查询恰好共享这一个 token ——
+#     最强的证据 —— 却被"2 个 token"的门槛丢掉。222 条笔记里 11 条因此不可达。
+#   * 噪声：`zip`(df=47)/`flag`(df=145)/`agent log note`(平台模板句) 让一条笔记
+#     与每道兄弟题都拿到 1.0 分（共享 19 个 token），也让一条 lsass.dmp 笔记对
+#     九连环（JPEG 拼接题）拿到 0.4。
+#
+# 修法两条：唯一标识符 token 可单独通过门槛；排序先看"最稀有共享 token"。
+
+
+class TestIdentifierTokens:
+    def test_an_instance_id_is_an_identifier(self):
+        assert pb._is_identifier_token("0b45310800c50ab708fff28f")
+        assert pb._is_identifier_token("5f3a9c2e8b1d")
+
+    def test_an_ordinary_word_is_not_an_identifier(self):
+        """Rarity is relative to the store: in a one-note store every word has df=1.
+
+        The exemption must therefore read the token's SHAPE, not its rarity --
+        otherwise `weblogic` passes in a fresh store, which is exactly the
+        framework-only derailment the overlap floor exists to prevent.
+        """
+        for word in ("weblogic", "deserialization", "forensics", "ssrf", "cafe"):
+            assert not pb._is_identifier_token(word), word
+
+
+class TestOverlapFloorWithRarity:
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pb, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(pb, "PLAYBOOKS_DIR", tmp_path / "playbooks")
+        pb.ensure_dirs()
+        return tmp_path / "playbooks"
+
+    def _write(self, store, slug, fingerprint, name=""):
+        block = [
+            "---",
+            f"name: {name or slug}",
+            f"fingerprint: {fingerprint}",
+            "status: validated",
+            "source: auto",
+            "updated_at: 2026-10-18T00:00:00+00:00",
+            "---",
+            "",
+            "LOCK: fixture note.",
+            "",
+        ]
+        (store / f"{slug}.md").write_text("\n".join(block), encoding="utf-8")
+
+    def test_a_lone_instance_id_clears_the_floor(self, store):
+        """The false-negative half: one instance id IS the evidence."""
+        self._write(store, "instance-note", "0b45310800c50ab708fff28f.http-ctf2.dasctf.com")
+        rows = pb.lookup_playbook_multi(
+            [("target", "http://0b45310800c50ab708fff28f.http-ctf2.dasctf.com:80")], limit=2
+        )
+        assert [r["slug"] for r in rows] == ["instance-note"], rows
+        assert rows[0]["overlap_tokens"] == 1
+
+    def test_a_lone_framework_word_does_not_clear_the_floor(self, store):
+        """The precision half: a bare framework name must still need a second token."""
+        self._write(store, "weblogic-note", "Weblogic wls-wsat XMLDecoder docroot")
+        assert pb.lookup_playbook_multi([("class", "Weblogic")], limit=2) == []
+
+    def test_the_rarest_shared_token_outranks_a_common_overlap(self, store):
+        """九连环 shape: the challenge's own name beats four ubiquitous words.
+
+        Measured before the fix: the note sharing `zip`/`密码` (df 47/13) tied at
+        0.4 with the note sharing `九连`/`连环` (df 1/1), and the tie broke on
+        `validated` status -- so an unrelated BUUCTF note could take the slot from
+        the note that recorded this very challenge.
+        """
+        for i in range(5):
+            self._write(store, f"zip-note-{i}", f"zip 密码 解密 unrelated filler{i}")
+        self._write(store, "jiulianhuan", "九连环 JPEG 末尾拼接 ZIP")
+        rows = pb.lookup_playbook_multi([("target", "九连环 zip 密码 解密")], limit=3)
+        assert rows, "the challenge note must be recallable"
+        assert rows[0]["slug"] == "jiulianhuan", [r["slug"] for r in rows]
+
+    def test_two_common_tokens_still_pass(self, store):
+        """The floor's original job is untouched: 2 distinct tokens remain enough."""
+        self._write(store, "zip-note", "zip 密码 解密 filler")
+        rows = pb.lookup_playbook_multi([("target", "zip 密码")], limit=2)
+        assert [r["slug"] for r in rows] == ["zip-note"]

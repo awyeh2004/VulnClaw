@@ -538,7 +538,12 @@ def test_the_opening_injection_logs_gated_rows(store):
         emit=lambda kind, payload: None,
     )
     assert hits == 0
-    assert any("gated 1 below the 2-token overlap floor" in n for n in notices), notices
+    # The notice must name the rule that actually exists, not a bare token count:
+    # since 2026-10-18 one IDENTIFIER-shaped token clears the floor on its own
+    # (``playbook._clears_overlap_floor``), so "the 2-token floor" is no longer
+    # the whole rule. A bare framework word still needs two tokens, which is what
+    # this case pins.
+    assert any("gated 1 below the overlap floor" in n for n in notices), notices
     assert any("weblogic-only=1" in n for n in notices), notices
 
 

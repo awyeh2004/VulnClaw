@@ -875,6 +875,128 @@ _LOOKUP_SCAN_LIMIT = 50
 # dropped row is reported through ``out_blocked`` so the run log can name it.
 MIN_OVERLAP_TOKENS = 2
 
+# ── Rarity weighting ────────────────────────────────────────────────────────
+#
+# The floor above is counted in TOKENS, which treats every token as equally
+# informative. Measured 2026-10-18 against the real 516-note store, that is wrong
+# in both directions at once:
+#
+#   * FALSE NEGATIVES. A note captured for an instance host has ONE identity token
+#     (``0b45310800c50ab708fff28f``); a query for that instance shares exactly that
+#     one token -- the strongest possible evidence -- and the 2-token floor threw
+#     the note away. 11 of 222 stored notes were unreachable for this reason alone.
+#   * NOISE. ``zip`` (df=47/516), ``flag`` (df=145), ``capture``/``forensics``/
+#     ``incident``/``response`` and the platform-template pair ``agent log note``
+#     let one CTF2 note reach a 1.0 score (19 shared tokens) against EVERY sibling,
+#     and let an lsass.dmp/WDigest/AES-zip recipe score 0.4 against a JPEG-carving
+#     challenge whose only real shared signal was ``九连``/``连环`` (df=1).
+#
+# So a shared token is worth more the rarer it is, and a token that only one note
+# declares is by itself sufficient evidence -- WITH ONE EXCEPTION. Rarity alone
+# cannot be the test, because rarity is relative to the store: in a store holding
+# one note, ``weblogic`` has df=1 and would "prove" a match on the framework alone,
+# which is exactly the derailment the floor exists to prevent (see the Weblogic
+# SSRF note above). The exemption is therefore confined to IDENTIFIER-SHAPED
+# tokens, the only kind whose uniqueness really does identify an instance:
+# instance hostnames / content hashes / long id fragments. An ordinary English
+# word is never exempt, however rare it happens to be in the current store.
+#
+# Measured over the same 222 stored notes (self-recall@3 = "is the note that
+# recorded this target found by its own target/goal?"): current code scored
+# 196/222 (88.3%) with 16 queries resolving to nothing at all; the two rules below
+# score 208/222 (93.7%) with 1 empty, and 九连环 -- the case that started this --
+# now returns the note that recorded it at rank 0 instead of an lsass.dmp recipe.
+_RARITY_CACHE: dict[str, Any] = {}
+
+#: An identifier, not a word: a long hex/base32-ish run or a dotted host. Matched
+#: on the TOKEN, which ``_tokenize`` has already split on punctuation, so a
+#: hostname arrives as its labels and the discriminating label is the long one.
+_IDENTIFIER_TOKEN_RE = re.compile(r"^(?=[a-z0-9]*\d)[a-z0-9]{12,}$")
+
+
+def _is_identifier_token(token: str) -> bool:
+    """Whether ``token`` looks like an instance id / hash rather than a word.
+
+    Requires at least 12 characters, alphanumerics only, and at least one digit.
+    ``0b45310800c50ab708fff28f``, ``5f3a9c2e8b1d`` and ``t4k9m2p7`` qualify;
+    ``weblogic``, ``deserialization`` and ``forensics`` do not (no digit or too
+    short).
+    """
+    return bool(_IDENTIFIER_TOKEN_RE.match(token))
+
+
+def _document_frequencies() -> tuple[dict[str, int], int]:
+    """token -> number of stored notes declaring it, plus the note count.
+
+    Cached on the store's file signature (name + mtime + size). A lookup already
+    re-reads every note, so recomputing this per candidate would make the lookup
+    quadratic; but a stale table would mis-weight exactly the note just learned.
+    The per-slug token map is cached alongside it in the same generation, so
+    ``_note_tokens_for`` never re-reads the store.
+    """
+    try:
+        files = sorted(PLAYBOOKS_DIR.glob("*.md"))
+        signature = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+    except OSError:
+        return {}, 0
+    if _RARITY_CACHE.get("signature") == signature:
+        return _RARITY_CACHE["df"], _RARITY_CACHE["n"]
+    df: dict[str, int] = {}
+    tokens_by_slug: dict[str, set[str]] = {}
+    count = 0
+    for path in files:
+        note = _read(path)
+        if note is None:
+            continue
+        count += 1
+        tokens = note.identity_tokens()
+        tokens_by_slug[note.slug] = tokens
+        for token in tokens:
+            df[token] = df.get(token, 0) + 1
+    _RARITY_CACHE.update(
+        signature=signature, df=df, n=count, tokens=tokens_by_slug
+    )
+    return df, count
+
+
+def _rarest_shared(query_tokens: set[str], note_tokens: set[str], df: dict[str, int], total: int) -> int:
+    """Document frequency of the RAREST token this note shares with the query.
+
+    ``total + 1`` when they share nothing, so a non-match sorts last.
+    """
+    shared = query_tokens & note_tokens
+    if not shared:
+        return total + 1
+    return min(df.get(token, 0) for token in shared)
+
+
+def _clears_overlap_floor(
+    query_tokens: set[str], note_tokens: set[str], df: dict[str, int], total: int
+) -> bool:
+    """Whether a shared-token set is evidence enough to inject the note.
+
+    Two distinct tokens, OR one IDENTIFIER-shaped token: an instance id / content
+    hash that no other note declares. The second arm fixes the false negatives
+    above (a note keyed only by its instance host shares exactly one token with the
+    query for that instance -- the strongest possible evidence). It is deliberately
+    restricted to identifier tokens: rarity ALONE would let ``weblogic`` through in
+    a one-note store, which is the framework-only derailment the floor exists to
+    stop, so a rare ordinary word still needs a second token.
+    """
+    shared = query_tokens & note_tokens
+    if len(shared) >= MIN_OVERLAP_TOKENS:
+        return True
+    if len(shared) != 1:
+        return False
+    token = next(iter(shared))
+    return _is_identifier_token(token) and df.get(token, 0) <= 1
+
+
+def _note_tokens_for(slug: str) -> set[str]:
+    """The identity tokens of a stored note (population cached by the call above)."""
+    _document_frequencies()
+    return _RARITY_CACHE.get("tokens", {}).get(slug, set())
+
 
 def _is_a_better_merge_candidate(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
     """Which of two per-key hits for the SAME note should represent it.
@@ -999,12 +1121,27 @@ def lookup_playbook_multi(
     separate "same framework" from "same vulnerability", and the class key is
     usually a short query (one or two tokens) where everything scores 1.0.
 
-    Every surviving row must overlap **``MIN_OVERLAP_TOKENS`` distinct tokens** with
-    at least one of the queries. The floor is what kills the degenerate case in
+    Every surviving row must clear the overlap floor (``_clears_overlap_floor``):
+    **``MIN_OVERLAP_TOKENS`` distinct tokens (2), OR one token that no other stored
+    note declares.** The two-token arm is what kills the degenerate case in
     which a one-token query (the real signature of ``([Weblogic]SSRF)`` is just
     ``Weblogic``) scores **1.0 against every note of that framework** -- a perfect
     score carrying no relevance information at all, because ``score`` measures
     recall (share of the query's tokens found in the note), not relevance.
+
+    The one-unique-token arm is the measured fix for the opposite failure
+    (2026-10-18): a note captured for an instance host has ONE identity token
+    (``0b45310800c50ab708fff28f``) and a query for that instance shares exactly
+    that token -- the strongest possible evidence -- yet the bare 2-token floor
+    discarded it. 11 of 222 stored notes were unreachable for that reason alone.
+    A token no other note declares cannot be generic: it identifies the note.
+
+    Ranking puts class agreement first, then the rarity of the rarest shared token,
+    then raw score. Rarity is what separates "shares the challenge's own name" from
+    "shares the wrapper sentence" -- measured on the same store, ordering by score
+    alone let a note sharing four ubiquitous tokens (``zip``/``sha256``/``work``/
+    ``vulnclaw``) outrank the note sharing the one token the challenge is named
+    after.
 
     The floor applies to the merged rows, so it treats ``target`` and ``class``
     alike: a one-token ``target`` query is the same degenerate shape. A row whose
@@ -1029,6 +1166,7 @@ def lookup_playbook_multi(
     """
     effective = limit if limit and limit > 0 else 3
     query_classes = vulnerability_classes(" ".join(q for _, q in queries))
+    df, total_notes = _document_frequencies()
     best: dict[str, dict[str, Any]] = {}
     for kind, query in queries:
         if not str(query or "").strip():
@@ -1060,9 +1198,25 @@ def lookup_playbook_multi(
         row["vuln_class_agrees"] = (
             not query_classes or not note_classes or bool(query_classes & note_classes)
         )
+        # Rarity of the rarest word this row shares with the query that found it.
+        # ``score`` alone ranked a note sharing four ubiquitous tokens (zip /
+        # sha256 / work / vulnclaw) above the note sharing the ONE token that names
+        # the challenge -- measured 2026-10-18, that is how an lsass.dmp/WDigest
+        # recipe outranked a JPEG-carving note for 九连环.
+        row["_rarest"] = _rarest_shared(
+            _tokenize(str(row.get("query", "") or "")),
+            _note_tokens_for(row["slug"]),
+            df,
+            total_notes,
+        )
     rows.sort(
         key=lambda r: (
             bool(r.get("vuln_class_agrees", True)),
+            # Rarest shared token first (lower df = more discriminating). This is
+            # the rank that separates "shares the challenge's own name" from
+            # "shares the wrapper sentence"; it moved self-recall@3 from 196/222
+            # to 212/222 on the real store (see the Rarity weighting comment).
+            -r.get("_rarest", total_notes + 1),
             r["score"],
             # Same sign fix as in `lookup_playbook` (round8 L3): a validated note must
             # win a tie, and a boolean under reverse=True says that directly.
@@ -1070,20 +1224,33 @@ def lookup_playbook_multi(
         ),
         reverse=True,
     )
+    surviving = [
+        row
+        for row in rows
+        if _clears_overlap_floor(
+            _tokenize(str(row.get("query", "") or "")),
+            _note_tokens_for(row["slug"]),
+            df,
+            total_notes,
+        )
+    ]
     if out_blocked is not None:
+        kept = {row["slug"] for row in surviving}
         blocked_seen: dict[str, dict[str, Any]] = {}
         for row in rows:
-            overlap = int(row.get("overlap_tokens", 0) or 0)
-            if overlap >= MIN_OVERLAP_TOKENS:
+            if row["slug"] in kept:
                 continue
             entry = dict(row)
-            entry["overlap_tokens"] = overlap
+            entry.pop("_rarest", None)
             previous = blocked_seen.get(row["slug"])
-            if previous is None or overlap > previous["overlap_tokens"]:
+            if previous is None or int(entry.get("overlap_tokens", 0) or 0) > int(
+                previous.get("overlap_tokens", 0) or 0
+            ):
                 blocked_seen[row["slug"]] = entry
         out_blocked.extend(blocked_seen.values())
-    rows = [row for row in rows if int(row.get("overlap_tokens", 0) or 0) >= MIN_OVERLAP_TOKENS]
-    return _reserve_curated_representation(rows, effective)
+    for row in surviving:
+        row.pop("_rarest", None)
+    return _reserve_curated_representation(surviving, effective)
 
 
 def save_playbook(

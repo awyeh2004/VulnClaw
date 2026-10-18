@@ -1025,13 +1025,16 @@ def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict],
 
 
 def _gated_notice(gated: list[dict]) -> str:
-    from vulnclaw.agent.playbook import MIN_OVERLAP_TOKENS
     from vulnclaw.agent.playbook_refresh import blocked_notice_rows
 
     shown = blocked_notice_rows(gated)
     extra = f" (+{len(gated) - len(shown)} more)" if len(gated) > len(shown) else ""
+    # The floor is no longer a bare token COUNT: one token that no other note
+    # declares now clears it (see playbook._clears_overlap_floor). Saying "the
+    # N-token floor" here would name a rule that no longer exists.
     return (
-        f"; gated {len(gated)} below the {MIN_OVERLAP_TOKENS}-token overlap floor: "
+        f"; gated {len(gated)} below the overlap floor "
+        "(2 shared tokens, or 1 token unique to that note): "
         + ", ".join(shown)
         + extra
     )
