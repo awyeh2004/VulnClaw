@@ -258,7 +258,47 @@ _STOP = {
     "login", "register", "logout", "button", "form", "input", "password",
     "username", "home", "index", "the", "and", "for", "title", "page",
     "challenge", "ctf", "dasctf", "http", "https", "com", "org", "net",
+    # Platform-shape words (2026-10-18, measured). Every CTF2 run goal is built
+    # from the same sentence -- "Solve CTF2 challenge '<name>' (category X,
+    # difficulty Y) on practice <uuid>." -- so these tokens are true of EVERY
+    # CTF2 note and carry no discriminating signal. Measured on a real query:
+    # 14 tokens total, 13 of them platform boilerplate, leaving exactly one
+    # (`rsaroll`) that identified the challenge. The consequence was that any
+    # two CTF2 notes scored 0.929 against each other, so `lookup_playbook`
+    # returned the right note first but filled the remaining slots with
+    # unrelated challenges. Tokens that DO discriminate (the challenge name,
+    # vuln classes, attack vocabulary) are untouched.
+    "solve", "practice", "category", "difficulty", "easy", "medium", "hard",
+    "ctf2", "gcs", "on", "the", "of", "to", "in", "is", "it",
 }
+
+
+#: Tokens that are pure hex and at least this long are id fragments, not words.
+#: ``ctf2:practice:<uuid>`` contributes ``b9bbb32f``/``f186``/``458f``/``b90b``
+#: to every query and every auto-captured fingerprint of that practice ground;
+#: keeping them makes all sibling challenges match on the ground id while
+#: saying nothing about the challenge itself.
+#:
+#: Four, not six: a UUID is ``8-4-4-4-12``, so the middle three groups are
+#: exactly four characters (``f186``/``458f``/``b90b``). The digit requirement
+#: below is what keeps this from eating real words -- see :func:`_is_id_fragment`.
+_HEX_ID_MIN_LEN = 4
+_HEX_TOKEN = re.compile(r"[0-9a-f]+")
+
+
+def _is_id_fragment(tok: str) -> bool:
+    """True for a UUID slice / hash fragment rather than a word.
+
+    Requires hex-only characters AND at least one digit: ``b9bbb32f``,
+    ``f186`` and ``12440c0f6aea`` are id fragments, while ``cafe``, ``face``,
+    ``dead`` and ``beef`` -- real words that happen to be hex -- survive
+    because they contain no digit.
+    """
+    return (
+        len(tok) >= _HEX_ID_MIN_LEN
+        and bool(_HEX_TOKEN.fullmatch(tok))
+        and any(ch.isdigit() for ch in tok)
+    )
 
 
 def _slugify(text: str) -> str:
@@ -297,13 +337,30 @@ def _tokenize(fingerprint: str) -> set[str]:
 
     The fingerprint is free text produced by the agent from its first-round
     probe (page title, distinguishing paths, form fields). We lowercase,
-    split ASCII on non-alphanumerics, drop stop words and pure-numeric/short
-    tokens, and dedupe. CJK runs are additionally tokenized into bigrams (see
-    :func:`_cjk_tokens`) so Chinese fingerprints and queries participate in
-    recall instead of vanishing.
+    split ASCII on non-alphanumerics, drop stop words, pure-numeric/short
+    tokens and id fragments, and dedupe. CJK runs are additionally tokenized
+    into bigrams (see :func:`_cjk_tokens`) so Chinese fingerprints and queries
+    participate in recall instead of vanishing.
+
+    Id fragments (see :func:`_is_id_fragment`) are dropped for the same reason
+    stop words are: ``ctf2:practice:<uuid>`` puts the SAME four hex slices into
+    every goal and every auto-captured note of that practice ground, so keeping
+    them made all sibling challenges score ~0.93 against each other regardless
+    of content (measured 2026-10-18).
+
+    **Empty-result fallback (regression found by a full-store sweep).** Filtering
+    can consume EVERY token: 14 of 516 stored notes have a fingerprint that is
+    nothing but ``http://<20-hex>.http-ctf2.dasctf.com:80`` -- the random host
+    label is an id fragment and ``http``/``com`` are stop words. Those notes hold
+    real solutions (e.g. the ``[极客大挑战 2019]Knife`` webshell recipe) and became
+    permanently unreachable, which is the exact recall loss
+    ``_recallable_fingerprint`` warns about. So when filtering would leave
+    nothing, fall back to the unfiltered token set: a note that is only findable
+    by an id-shaped query is still better than a note nobody can find.
     """
     text = unicodedata.normalize("NFKD", (fingerprint or "").lower())
     tokens: set[str] = set()
+    unfiltered: set[str] = set()
     for tok in re.findall(r"[a-z0-9]+", text):
         if tok in _STOP:
             continue
@@ -311,9 +368,22 @@ def _tokenize(fingerprint: str) -> set[str]:
             continue
         if tok.isdigit():
             continue
+        unfiltered.add(tok)
+        if _is_id_fragment(tok):
+            continue
         tokens.add(tok)
     tokens |= _cjk_tokens(text)
-    return tokens
+    if tokens:
+        return tokens
+    # Filtering ate everything. Restore the raw tokens ONLY when the text is a URL
+    # whose identity lives in its (id-shaped) host label -- that is the measured
+    # case (14/516 notes: ``http://<20-hex>.http-ctf2.dasctf.com:80``) and those
+    # notes carry real solutions. A bare ``ctf2:practice:<uuid>`` string is NOT
+    # rescued: its slices are shared by every challenge in that ground, so keeping
+    # them re-creates the cross-sibling collision this filter exists to remove.
+    if "://" in text or "http" in text:
+        return unfiltered | _cjk_tokens(text)
+    return set()
 
 
 @dataclass
@@ -1244,11 +1314,7 @@ def capture_run_notes(
 
     lines: list[str] = []
     lock = blackboard.current_lock() if blackboard is not None else None
-    if lock is not None:
-        lines.append(f"LOCK: {lock.description}")
     facts = blackboard.confirmed_facts() if blackboard is not None else []
-    if facts:
-        lines.append("CONFIRMED: " + "; ".join(f.description for f in facts[:8]))
     angle_bits: list[str] = []
     if blackboard is not None:
         mark = {
@@ -1261,8 +1327,68 @@ def capture_run_notes(
             for n in blackboard.all_nodes()
             if n.type == NodeType.ANGLE
         ]
+    # ── Plan C: a FAILED run records environment facts, not verdicts ─────────
+    #
+    # Measured 2026-10-18: 5 stored notes are pure failures and carry a bare
+    # ``ANGLES: [miss] <approach>`` line. The next run reading that cannot tell
+    # whether the approach was REFUTED (this method cannot work here) or merely
+    # TRIED without success (wrong password this time, worth retrying) -- and the
+    # injector's own wording ("REPLAY its steps") pushes it to skip. Silently
+    # suppressing a direction that would have worked is the worst outcome
+    # available, so a failed run now records only what stayed TRUE about the
+    # challenge (facts the run confirmed before dying) and a plain statement that
+    # the direction was not resolved. Nothing here tells a future run to skip.
+    run_failed = bool(outcome) and bool(
+        re.search(r"stalled|no untried path|no viable path|gave up|budget", outcome, re.I)
+    )
+    facts = blackboard.confirmed_facts() if blackboard is not None else []
+    if run_failed and not facts:
+        # A failure with nothing proven teaches nothing worth storing. Writing
+        # "we tried and stalled" only invites the next run to skip the same
+        # ground, so decline instead of storing a direction-suppressing note.
+        _note_reason(
+            out_reason,
+            "the run failed with no confirmed facts: storing it would only record "
+            "'this was hard', which the next run could misread as 'skip this'",
+        )
+        return None
+    if run_failed and facts:
+        # Keep the proven part; drop the verdicts.
+        lines = []
+        if lock is not None:
+            lines.append(f"LOCK: {lock.description}")
+        lines.append("CONFIRMED: " + "; ".join(f.description for f in facts[:8]))
+        lines.append(
+            "UNRESOLVED: the run stopped before finishing; the angles below were "
+            "attempted without a conclusion. They are NOT refuted -- re-try them "
+            "with different parameters before ruling anything out."
+        )
+        open_bits = [b for b in angle_bits if "open" in b or "miss" in b]
+        if open_bits:
+            lines.append("ANGLES (attempted, undecided): " + "; ".join(open_bits[:10]))
+        angle_bits = []  # already emitted above
+    else:
+        # Successful (or not-failed) run: the original line shape, which the next
+        # run IS meant to replay.
+        if lock is not None:
+            lines.append(f"LOCK: {lock.description}")
+        if facts:
+            lines.append("CONFIRMED: " + "; ".join(f.description for f in facts[:8]))
     if angle_bits:
         lines.append("ANGLES: " + "; ".join(angle_bits[:10]))
+        # Plan B: say what a [miss] MEANS, so the next run does not read it as
+        # "this method cannot work here". The board has one CHALLENGED state, but
+        # two different facts produce it: (a) the approach was disproved because
+        # the real answer was found elsewhere in this same run -- safe to skip;
+        # (b) the approach was only attempted and did not succeed -- worth
+        # retrying with different parameters. Only a solved run reaches this line,
+        # so a [miss] here is (a); the failed path above labels (b) as "undecided".
+        if any("[miss]" in b for b in angle_bits):
+            lines.append(
+                "ANGLES-NOTE: [miss] here means the approach was ruled out BY this "
+                "run's own successful path -- it was not merely untried. [open] "
+                "entries were never reached."
+            )
     if not lines and final_answer:
         # Blackboard-avoidant run: the completion declaration is still a real
         # conclusion — keep it, clearly labelled, so reuse is not lost.

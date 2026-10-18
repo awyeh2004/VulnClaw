@@ -266,3 +266,50 @@ class TestHandbackReasonMatchesTheMessage:
         reason = _stall_handback_reason(FakeAgent())
         assert reason == "stalled with no blackboard to judge coverage from"
         assert "no untried path" not in reason
+
+
+class TestTheNudgeAsksForADecisionNotJustANewAngle:
+    """Measured 2026-10-18: the hint was obeyed only half-way.
+
+    A run hit this exact nudge, created four angles in response, and decided none
+    (``create=4 hit=0 miss=0``). `_path_progress_fingerprint` counts DECIDED
+    angles, so the guard fired again and the run burned another ~100 KB before an
+    operator stopped it. The cause was wording: "record the surfaces you probed as
+    ANGLE nodes (mark them HIT/MISS)" put the decision in a parenthetical after
+    the action the model executed, and the parenthetical was skipped.
+
+    So the decision is now a separate, FIRST numbered step, and the message says
+    outright that an undecided angle changes nothing.
+    """
+
+    def test_hint_puts_deciding_before_registering(self):
+        action, message = _stall_guard_decision(
+            FakeAgent(_bb()), streak=8, hint_sent=False, thin_windows=0
+        )
+        assert action == "hint"
+        decided = message.find("hit_angle")
+        registered = message.find("register")
+        assert decided != -1 and registered != -1, message
+        assert decided < registered, (
+            "the decision step must come before 'register new ANGLES': "
+            f"{message}"
+        )
+
+    def test_hint_says_an_undecided_angle_achieves_nothing(self):
+        _, message = _stall_guard_decision(
+            FakeAgent(_bb()), streak=8, hint_sent=False, thin_windows=0
+        )
+        lowered = message.lower()
+        assert "never decide" in lowered or "undecided" in lowered
+        assert "changes nothing" in lowered or "tells you nothing" in lowered
+
+    def test_handback_asks_to_close_the_open_ones_first(self):
+        bb = _bb()
+        bb.create_angle("surface one")
+        bb.create_angle("surface two")
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=16, hint_sent=True, thin_windows=0
+        )
+        assert action == "ask"
+        assert "Close those" in message or "close those" in message, message
+        assert "hit_angle" in message and "miss_angle" in message

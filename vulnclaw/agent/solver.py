@@ -469,6 +469,34 @@ def _is_observation_only_turn(tools_used: list[str], new_evidence_count: int) ->
     )
 
 
+#: URLs/terms that mean "the model is looking up a writeup instead of solving".
+#: Measured 2026-10-18 over one afternoon of CTF2 runs: **20 of 24 failed runs**
+#: searched the web for the answer (duckduckgo / bing / "writeup"), and every one
+#: of them kept burning turns afterwards. It is a reliable surrender signal -- the
+#: model has stopped deriving and started copying, which cannot ground a flag in
+#: this run's own evidence anyway (the completion gate rejects any flag it cannot
+#: trace to recorded evidence, so a copied answer is wasted work by construction).
+_WRITEUP_SEARCH_MARKERS = (
+    "duckduckgo.com/html",
+    "lite.duckduckgo.com",
+    "google.com/search",
+    "bing.com/search",
+    "baidu.com/s?",
+    "so.com/s?",
+    "/search?q=",
+    "writeup",
+    "题解",
+    "wp.ctf",
+)
+
+
+def _is_writeup_search(args_text: str) -> bool:
+    """True when a tool call looks like searching for someone else's solution."""
+    low = (args_text or "").lower()
+    return any(marker in low for marker in _WRITEUP_SEARCH_MARKERS)
+
+
+
 def _near_miss_evidence_reason(state: AgentState) -> str:
     """Return a compact reason when evidence says the search is not exhausted."""
 
@@ -617,6 +645,38 @@ def _no_path_open_angles(agent: AgentState) -> int:
     return len(bb.open_angles())
 
 
+def _undecided_angle_nudge(agent: AgentState, state: AgentState) -> str:
+    """One-line reminder when angles pile up undecided, else "".
+
+    Measured 2026-10-18 across one afternoon: the stall guard's wording alone did
+    NOT change behaviour on the failing runs. A run would answer the hint by
+    registering three angles and deciding none (`create=3, miss=1, hit=0`), then
+    spend the rest of the window brute-forcing. `_path_progress_fingerprint` only
+    counts DECIDED angles, so opening them changed nothing and the guard repeated
+    itself until the run died.
+
+    The prompt tweak is necessary but not sufficient: something has to notice the
+    specific shape "opened several, decided none" and say it out loud mid-run.
+    """
+    open_count = _no_path_open_angles(agent)
+    if open_count < 2:
+        return ""
+    count = getattr(state, "undecided_nudge_count", 0)
+    if count >= 2:
+        return ""
+    try:
+        state.undecided_nudge_count = count + 1
+    except Exception:
+        return ""
+    return (
+        f"You have {open_count} ANGLES open and none of them decided. An open angle is a "
+        "promise to look, not progress — nothing about the search space is known until you "
+        "mark it HIT or MISS. Stop opening new ones: pick the {n} you already have and "
+        "record what each one actually told you (`blackboard_hit_angle` / "
+        "`blackboard_miss_angle`), then decide what to do next."
+    ).replace("{n}", str(open_count))
+
+
 def _stall_turns(agent: AgentState) -> int:
     """Turns without path progress before the stall guard speaks.
 
@@ -734,8 +794,21 @@ def _stall_guard_decision(
                 f"Path stall: {streak} turns with no new confirmed fact, decided angle or "
                 "new angle, and the blackboard is still EMPTY — no ANGLE has been recorded, "
                 "so nothing distinguishes a path you have tried from one you have not. "
-                "Record the surfaces already probed as ANGLE nodes (mark them HIT/MISS) "
-                "before drawing any conclusion about the search space."
+                # The wording matters more than it looks. Both clauses used to live in
+                # one sentence ("record ... (mark them HIT/MISS)"), and a measured run
+                # obeyed only the leading verb: it created four angles in response to
+                # this exact hint and decided none (`create=4 hit=0 miss=0`), which
+                # leaves `_path_progress_fingerprint` unchanged -- the guard fired again
+                # and the run burned another 100 KB before being stopped. A parenthetical
+                # is read as an aside, so the DECISION is now its own numbered step and
+                # comes first: an angle that is opened but never decided is explicitly
+                # named as producing nothing.
+                "Do both, in this order: (1) mark every surface you have ALREADY probed "
+                "with `blackboard_hit_angle` / `blackboard_miss_angle` — an angle you open "
+                "but never decide changes nothing about your progress and tells you nothing "
+                "next turn; (2) then register the surfaces still untried as new ANGLES. "
+                "Step 1 is the one that matters: deciding an angle is proof a path was "
+                "resolved, opening one is only a promise to look."
             )
         return "ask", (
             f"The current path has not advanced for {streak} turns and the blackboard is "
@@ -781,8 +854,11 @@ def _stall_guard_decision(
         f"The current path has not advanced for {streak} turns, and nudging it toward a "
         f"different angle changed nothing. {open_angles} angle(s) on the blackboard are "
         f"open and never decided, so nothing there distinguishes a path worth pursuing "
-        f"from one already ruled out. Give a concrete next step or scope, or confirm "
-        f"that the run should stop."
+        f"from one already ruled out. Close those {open_angles} angle(s) NOW — "
+        f"`blackboard_hit_angle` or `blackboard_miss_angle` on each one, from what you "
+        f"actually learned — then give a concrete next step or scope, or confirm that the "
+        f"run should stop. Opening more angles without deciding the existing ones is what "
+        f"this guard exists to stop."
     )
 
 
@@ -1449,7 +1525,36 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "- `blackboard_create_tension`: when two judgments contradict each other and you "
         "cannot yet tell which is true, record a TENSION instead of silently discarding one.\n"
         "NO_PATH is rejected if open ANGLES remain — close them (hit/miss) before claiming "
-        "no viable path."
+        "no viable path.\n"
+        # Why this paragraph exists (2026-10-18, measured): the lines above tell the
+        # model HOW to record coverage but never say what the record is FOR. Two
+        # measured failure modes follow from that gap, in opposite directions:
+        #
+        #   * a genuinely productive run (enumerating stego variants, probing a
+        #     sandbox) records nothing, so `_path_progress_fingerprint` sees no
+        #     progress and the guard hands back mid-work -- john-in-the-middle,
+        #     robomunication, 九连环 all died this way;
+        #   * a first attempt at fixing it ("recording keeps the run alive") made
+        #     the opposite failure worse: the model read the guard as a threat,
+        #     either skipped accounting entirely (菜刀666 ran 9 minutes / 286 KB
+        #     with zero angles before going to look up a writeup) or dumped four
+        #     angles at the very end (很好的色彩呃: create=4 hit=4 in the final
+        #     step only). Framing accounting as self-preservation taught the wrong
+        #     lesson.
+        #
+        # So the text below frames it as WORKING MEMORY, not survival: the point of
+        # an ANGLE is your own ability to tell which surfaces you have actually
+        # closed, so you do not re-probe one you already ruled out. That framing is
+        # true on its own terms and does not invite either failure mode. The guard
+        # itself is untouched.
+        "**Closed angles are working memory, not paperwork.** Before you enumerate variants "
+        "of one idea, open an ANGLE for it; as soon as a variant is ruled out, MISS it (or "
+        "HIT it) before moving on. The reason is practical: without that record, your own "
+        "next turn cannot tell an untried surface from one you already ruled out, so you "
+        "end up re-probing the same ground and burning turns. Two habits matter most: "
+        "record the LOCK once a probe settles what the challenge actually is (it stops you "
+        "from drifting), and close an ANGLE the moment you learn something from it. "
+        "Unrecorded work is not just invisible to the stall guard — it is invisible to you."
     )
     playbook_instruction = (
         "\n\n# Solve Playbooks\n"
@@ -2242,9 +2347,38 @@ async def _solve_impl(
         ``emit`` as a local, so calling it any earlier raises UnboundLocalError
         — which the surrounding ``except Exception: pass`` swallowed, silently
         dropping the ``playbook_injected`` event from the stream.
+
+        ``VULNCLAW_EVENT_LOG`` mirrors every event to a file (2026-10-18). The
+        reason: non-interactive runs pass ``on_event=None`` (see
+        ``cli/commands_run.py``), so every guard decision, angle decision and
+        step boundary was thrown away. Measuring guard behaviour then required
+        guessing from the buffered console log, which does carry per-turn
+        structure -- an earlier analysis concluded "the stall guard never fired"
+        from exactly that blind spot. One line per event, JSON, append-only.
         """
         if on_event is not None:
             on_event(kind, payload)
+        log_path = os.environ.get("VULNCLAW_EVENT_LOG", "").strip()
+        if log_path:
+            try:
+                import json as _json
+                from datetime import datetime as _dt
+
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(
+                        _json.dumps(
+                            {
+                                "ts": _dt.now().isoformat(timespec="seconds"),
+                                "kind": kind,
+                                **payload,
+                            },
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
 
     state = _prepare_state(agent, origin=origin, goal=goal)
     agent._subagent_ctx.event_sink = on_event
@@ -2290,6 +2424,9 @@ async def _solve_impl(
 
     repeated_errors = 0
     observation_only_streak = 0
+    # Turns with text but NO tool call and NO new evidence (see the no-action
+    # guard below: the measured death spiral was thinking-instead-of-probing).
+    no_action_streak = 0
     # Path-progress stall guard state (see _path_progress_fingerprint).
     path_stall_streak = 0
     path_stall_hint_sent = False
@@ -2445,6 +2582,48 @@ async def _solve_impl(
             },
         )
 
+        # Surrender signal: the model has stopped deriving and started looking up
+        # someone else's solution. Measured 2026-10-18: 20 of 24 failed runs did
+        # this, and none of them recovered -- copying cannot ground a flag in this
+        # run's evidence, so the completion gate rejects it regardless. Correcting
+        # once is cheaper than letting it grind (one run spent 1192 password
+        # guesses after giving up on derivation).
+        writeup_search_streak = 0
+        # Mid-run check for "opened angles, decided none" -- see
+        # _undecided_angle_nudge for why the stall guard's own wording was not enough.
+        try:
+            nudge = _undecided_angle_nudge(agent, state)
+            if nudge:
+                agent.context.add_user_message("[angles] " + nudge)
+                emit("undecided_angles", {"open": _no_path_open_angles(agent)})
+        except Exception:
+            pass
+        try:
+            recent = state.tool_calls[before_tools:]
+            if any(_is_writeup_search(getattr(tc, "key_args", "") or "") for tc in recent):
+                writeup_search_streak += 1
+                state.add_correction_hint(
+                    "You are searching for a writeup instead of solving. A copied "
+                    "answer cannot pass the completion gate (the flag must appear in "
+                    "THIS run's evidence), so this turn is spent for nothing. Go back "
+                    "to the recorded evidence and state the next concrete hypothesis."
+                )
+                record_writeup_search = True
+            else:
+                record_writeup_search = False
+        except Exception:
+            record_writeup_search = False
+        if record_writeup_search:
+            state.writeup_search_count = getattr(state, "writeup_search_count", 0) + 1
+            emit("writeup_search", {"count": state.writeup_search_count})
+            if state.writeup_search_count >= 2:
+                reason = (
+                    "gave up deriving: the model searched for a writeup twice instead of "
+                    "solving from evidence; stopping rather than burning the run"
+                )
+                state.complete_reason = reason
+                break
+
         stall_guard_message = ""
         stop_for_stall = False
         if not cleaned and not tools_used and not new_evidence_count:
@@ -2488,6 +2667,51 @@ async def _solve_impl(
                 stop_for_stall = True
         else:
             observation_only_streak = 0
+
+        # "Thinking instead of acting" guard (2026-10-18, measured).
+        #
+        # Neither existing guard catches the dominant failure shape. Measured over
+        # one afternoon (90 runs, 66 solved / 24 failed): every failed run's second
+        # half had FEWER tool calls than its first half (e.g. 11→3, 8→0), while its
+        # speculative language ("maybe/perhaps/could be") clustered in exactly those
+        # tool-less stretches. Solved runs went the other way (25→26, 12→20, 10→24).
+        #
+        # `_is_observation_only_turn` requires a tool call, so 0 tools is invisible
+        # to it; `_path_progress_fingerprint` only counts facts/angles/locks, and
+        # prose that contemplates options registers nothing. So a run can spend
+        # hundreds of KB proposing "maybe A, maybe B" without ever touching the
+        # target, and both guards stay silent.
+        #
+        # The fix is deliberately narrow: a turn with text but NO tool call and NO
+        # new evidence is a turn that learned nothing, whatever it reasoned. One
+        # such turn is legitimate (reflection between probes); two in a row is the
+        # measured start of the death spiral, so the second one is corrected and
+        # the fourth ends the run rather than burning the remaining budget.
+        if not tools_used and not new_evidence_count and cleaned:
+            no_action_streak += 1
+            if no_action_streak == 2:
+                hint = (
+                    "Two turns in a row with no tool call. Thinking without probing cannot "
+                    "produce new evidence, and no new evidence means no new conclusion. Stop "
+                    "enumerating possibilities in prose: pick the single cheapest probe that "
+                    "would distinguish your top two hypotheses and run it now."
+                )
+                state.add_correction_hint(hint)
+                stall_guard_message = f"[no-action guard] {hint}"
+                emit("no_action_guard", {"action": "hint", "streak": no_action_streak})
+            elif no_action_streak >= 4:
+                question = (
+                    "The agent produced four consecutive turns of reasoning with no tool call "
+                    "and no new evidence. Nothing in its output can change the outcome from "
+                    "here. Provide a concrete next action/scope, or confirm the run should stop."
+                )
+                state.ask_user(question)
+                needs_user = True
+                reason = "stalled while reasoning without acting (no tool call for 4 turns)"
+                emit("ask_user", {"question": question, "reason": reason})
+                stop_for_stall = True
+        else:
+            no_action_streak = 0
 
         # Path-progress guard, complementary to the observation-only guard above.
         # That one catches "rereading saved evidence"; this one catches "actively

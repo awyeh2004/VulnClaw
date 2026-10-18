@@ -154,7 +154,19 @@ def test_system_prompt_includes_tool_card():
     if any(tr._detect(e) for e in tr._REGISTRY):
         built = tr.build_tool_card(_State.goal)
         if built:
-            assert built.strip() in prompt, "tool card was built but not injected"
+            # Assert on the section header plus every TOOL NAME the card lists,
+            # not on whole-string equality: `_system_prompt` builds the card with
+            # the RESOLVED task mode, which may offer more entries than a default
+            # `mode="auto"` call does here (bsdtar is `always` under ctf/pentest —
+            # see `_REGISTRY`). Exact equality made this test fail on a deliberate
+            # behavioural change instead of on a regression.
+            assert "# External tools available on this host" in prompt, (
+                "tool card section missing from the system prompt"
+            )
+            for line in built.splitlines():
+                if line.startswith("- **"):
+                    name = line.split("**")[1]
+                    assert name in prompt, f"tool {name} listed but not injected"
 
 
 # ── portability (round-5 review N7) ─────────────────────────────────────

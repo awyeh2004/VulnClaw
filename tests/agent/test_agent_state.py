@@ -179,3 +179,43 @@ class TestPlaceholderFlag:
     def test_template_flags_still_rejected(self):
         for token in ("flag{...}", "{uuid}", "<flag>", "flag{}", "flag{your_flag_here}"):
             assert is_placeholder_flag(token) is True, token
+
+
+class TestFlagsWithSpacesAreExtracted:
+    """A solved challenge must not be reported as unsolved because of its flag's shape.
+
+    Measured 2026-10-18 on a real BUUCTF challenge: the flag is literally
+    ``flag{you are the best!}``. The old body class excluded every whitespace
+    character, so `extract_flags` returned [] -- and `_completion_gate` grounds a
+    FINAL by requiring the claimed flag to appear in recorded evidence. With no
+    match the gate rejected every FINAL, the model kept re-emitting it, and the
+    run ended as "⊘ 未达成" **on a challenge the platform had already accepted**
+    (`is_solved: true`, point awarded). The scoring was never wrong; the local
+    completion signal was.
+    """
+
+    def test_flag_with_spaces_is_recognized(self):
+        from vulnclaw.agent.agent_state import extract_flags
+
+        assert extract_flags("flag{you are the best!}") == ["flag{you are the best!}"]
+
+    def test_flag_embedded_in_prose_stops_at_the_brace(self):
+        from vulnclaw.agent.agent_state import extract_flags
+
+        assert extract_flags("the flag is flag{a b c} and done") == ["flag{a b c}"]
+
+    def test_a_flag_never_spans_lines(self):
+        """Newlines stay excluded: otherwise the body could swallow a paragraph."""
+        from vulnclaw.agent.agent_state import extract_flags
+
+        assert extract_flags("flag{multi\nline}") == []
+
+    def test_ordinary_flags_are_unchanged(self):
+        from vulnclaw.agent.agent_state import extract_flags
+
+        for value in (
+            "flag{no_space_here}",
+            "CTF2{5aa56f4a-cf5d-4406-bd79-71ef975f2775}",
+            "sun{lesssgooo_solved_the_poop_challenge!}",
+        ):
+            assert extract_flags(value) == [value]

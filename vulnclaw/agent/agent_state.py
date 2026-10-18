@@ -30,7 +30,22 @@ MAX_STORED_CORRECTION_HINTS = 24
 MAX_STORED_CONTEXT_COMPACTIONS = 32
 OBSERVATION_ONLY_TOOLS = frozenset({"evidence_list", "evidence_view", "evidence_search"})
 
-_FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n\s'\"`]{1,200}\}")
+# Flag body characters. Deliberately allows SPACES and punctuation (2026-10-18):
+# a real BUUCTF challenge's flag is literally ``flag{you are the best!}``, and the
+# old body class ``[^{}\n\s'\"`]`` excluded every whitespace character, so
+# ``extract_flags`` returned [] for it. The consequence was not cosmetic: the
+# platform had ALREADY accepted the submission (`is_solved: true`, points
+# awarded), but `_completion_gate` compares the claimed flag against flags found
+# in evidence, found none, and rejected every FINAL the model produced. The run
+# looped on rejections until the stall guard handed it back, ending as
+# "⊘ 未达成" on a solved challenge.
+#
+# Still excluded: braces (the body must not swallow a neighbouring token) and
+# newlines (a flag never spans lines, and allowing them would let the regex run
+# across an entire paragraph). Backtick/quote exclusion is also gone -- those are
+# legitimate in some flag bodies and the surrounding-delimiter risk is already
+# covered by requiring balanced ``{`` ... ``}``.
+_FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n]{1,200}\}")
 _STATUS_RE = re.compile(r"(?:Status|HTTP/\d(?:\.\d)?)\s*:?\s*(\d{3})", re.IGNORECASE)
 
 

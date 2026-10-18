@@ -101,6 +101,50 @@ def _local_app_data() -> Path:
 # "cmd" is a template in which "{path}" is replaced by whatever detection found.
 _REGISTRY: list[dict] = [
     {
+        "name": "7-Zip full (RAR + encrypted archives)",
+        "rel": ("7z-full", "7z.exe"),
+        "cmd": '"{path}"',
+        # `always` under ctf for the same reason as bsdtar: the handout's FORMAT is
+        # not in the goal text. Measured 2026-10-18 (after bsdtar was added and
+        # working): challenges kept shipping ENCRYPTED RARs, which bsdtar/libarchive
+        # cannot open, so the agent went back to installing extractors mid-run --
+        # downloading 7zip installers and probing pip for `unrar` bindings. The full
+        # 7-Zip build bundles unrar-capable code in 7z.dll; verified that
+        # `7z x -pctf enc.rar` extracts an encrypted RAR ("Everything is Ok").
+        "always": True,
+        "keywords": ["rar", "7z", "加密", "password", "密码", "压缩包", "archive", "extract", "解压"],
+        "usage": '-x -y -p<pw> <file> -o<dir> (解压，支持加密 RAR); l <file> (列表)',
+        "when": "**加密 RAR 只有它能解**（bsdtar/libarchive 不支持 RAR 加密，会静默失败）。"
+                "zip/tar/7z 也可以用它",
+    },
+    {
+        "name": "bsdtar (libarchive)",
+        "which": "bsdtar",
+        "cmd": "bsdtar",
+        # `always` means "offered on every CTF run regardless of goal wording",
+        # because a challenge attachment's FORMAT never appears in the goal text
+        # (CTF goals carry only the name/category/difficulty). Measured 2026-10-18:
+        # a RAR challenge produced a card WITHOUT bsdtar -- in fact an empty card --
+        # and the agent went back to hunting for unrar.
+        #
+        # Deliberately NOT global: `build_tool_card` honours this flag for
+        # ``mode == "ctf"`` only. A bug-hunting engagement does not arrive as a
+        # handout, so `pentest` stays keyword-driven (an archive-related goal still
+        # matches here); `auto`/`ir` are unaffected. See ``build_tool_card``.
+        "always": True,
+        "keywords": ["zip", "rar", "7z", "压缩包", "archive", "extract", "解压", "解包", "attachment"],
+        # Why the "when" text names the failures: a generic "extract archives"
+        # line did not stop the hunt. Measured across one afternoon of runs, the
+        # agent tried rarfile (needs an unrar binary that is not installed),
+        # py7zr (no RAR support), the bundled 7zr.exe (lists a RAR header then
+        # fails with "Cannot open the file as archive"), and a full-disk scan for
+        # unrar*.exe -- while bsdtar was on PATH the whole time. `reverse1` only
+        # got past the same gap because the model happened to guess `tar`.
+        "usage": '-tf <file> (列表); -xf <file> -C <dir> (解压). Windows 自带同名同款: C:\\Windows\\System32\\tar.exe',
+        "when": "解压 zip/7z/tar。**能列 RAR 但不能解加密 RAR**（解压会失败）——"
+                "RAR 一律优先用上面的 7-Zip full，别在这里浪费时间",
+    },
+    {
         "name": "sqlmap",
         "rel": ("sqlmap", "sqlmap.py"),
         "which": "sqlmap",
@@ -144,6 +188,39 @@ _REGISTRY: list[dict] = [
         "keywords": ["目录", "dir", "子域名", "subdomain", "vhost"],
         "usage": 'dir -u http://target -w <wordlist> (目录); dns -d domain -w subs.txt (子域)',
         "when": "Web 目录与子域名枚举",
+    },
+    {
+        "name": "F5 隐写 (F5.jar)",
+        "rel": ("stego", "Extract.class"),
+        "cmd": 'java -cp "E:\\vulnclaw\\tools\\stego" Extract',
+        # Why this entry exists (2026-10-18): JPEG F5 steganography is a BUUCTF
+        # staple and the only extractor is F5.jar. Measured across two days of
+        # logs, F5 was named in 52 of them -- the run would search the whole disk
+        # for F5.jar, fail, and either give up or waste a stall window. The class
+        # files are now vendored under E:\vulnclaw\tools\stego so the tool is
+        # always present. `cmd` is a compound because the classes are loaded by
+        # class name from that directory (java needs the cwd).
+        "keywords": ["jpg", "jpeg", "隐写", "stego", "f5", "图片", "image", "藏"],
+        "usage": '-p <password> <image.jpg> (提取; 默认密码 abc123); '
+                 'Embed -p <pw> -e <file> <cover.jpg> <out.jpg> (嵌入)',
+        "when": "JPEG 的 F5 隐写提取/嵌入。**别的工具都解不了 F5**：steghide/outguess 是不同算法",
+    },
+    {
+        "name": "二维码/条码识别 (pyzbar + cv2)",
+        "module": "pyzbar",
+        "cmd": "python -c \"from pyzbar.pyzbar import decode; from PIL import Image; print(decode(Image.open(r'<img>')))\"",
+        "keywords": ["qr", "二维码", "barcode", "条码", "扫码", "识别"],
+        "usage": 'pyzbar.pyzbar.decode(Image.open(path)) — 返回 data 字节; '
+                 'cv2.QRCodeDetector().detectAndDecode(img) 作为备选',
+        "when": "二维码/条码解码（pyzbar 已装；损坏的码可先 cv2 放大二值化）",
+    },
+    {
+        "name": "OCR (easyocr)",
+        "module": "easyocr",
+        "cmd": "python -c \"import easyocr; print(easyocr.Reader(['ch_sim','en'], gpu=False).readtext(r'<img>', detail=0))\"",
+        "keywords": ["ocr", "识别文字", "图片文字", "截图", "screenshot", "读字", "图", "image", "文字"],
+        "usage": "easyocr.Reader(['ch_sim','en'], gpu=False).readtext(path, detail=0)",
+        "when": "图片/截图里的文字识别。**本机没有 tesseract**，用 easyocr（已装，纯 Python，首次加载模型约 20s）",
     },
     {
         "name": "binwalk",
@@ -452,11 +529,25 @@ def build_tool_card(goal: str, mode: str = "auto") -> str:
     lines: list[str] = []
 
     if mode != "ir":
+        # `always` entries are offered on every CTF run regardless of goal wording,
+        # because a challenge attachment's FORMAT never appears in the goal text.
+        # Measured 2026-10-18: a RAR challenge produced a card WITHOUT bsdtar and the
+        # agent resumed hunting for unrar.
+        #
+        # Scoped to `ctf` ONLY. A pentest engagement does not arrive as an archive
+        # the way a CTF handout does, and a real bug-hunting run should not spend
+        # context on a "how to unzip" line it will never use — `pentest` therefore
+        # stays purely keyword-driven (an archive-related goal still gets bsdtar via
+        # its keywords). `auto` is unchanged, so unrelated goals still produce an
+        # empty card (`test_unrelated_goal_returns_empty`).
+        always_ok = mode == "ctf"
         for entry in _REGISTRY:
             cmd = _detect(entry)
             if not cmd:
                 continue
-            if not _match(goal_lower, entry.get("keywords", [])):
+            if not (always_ok and entry.get("always")) and not _match(
+                goal_lower, entry.get("keywords", [])
+            ):
                 continue
             lines.append(f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})")
 
