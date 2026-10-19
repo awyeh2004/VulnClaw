@@ -45,7 +45,12 @@ OBSERVATION_ONLY_TOOLS = frozenset({"evidence_list", "evidence_view", "evidence_
 # across an entire paragraph). Backtick/quote exclusion is also gone -- those are
 # legitimate in some flag bodies and the surrounding-delimiter risk is already
 # covered by requiring balanced ``{`` ... ``}``.
-_FLAG_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n]{1,200}\}")
+#
+# The widened body also matched code constructs -- measured 2026-10-19:
+# ``extract_flags('class Foo{ int x; }')`` returned ``Foo{ int x; }`` and
+# ``struct Bar{1,2}`` matched too. ``extract_flags`` filters those shapes (see
+# ``_is_code_shaped_body``) and the prefix must start a word, not end one.
+_FLAG_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n]{1,200}\}")
 _STATUS_RE = re.compile(r"(?:Status|HTTP/\d(?:\.\d)?)\s*:?\s*(\d{3})", re.IGNORECASE)
 
 
@@ -77,10 +82,32 @@ def parse_status_code(output: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _is_code_shaped_body(body: str) -> bool:
+    """Whether a ``word{...}`` body reads as code rather than a flag.
+
+    Measured 2026-10-19: ``extract_flags('class Foo{ int x; }')`` returned
+    ``Foo{ int x; }`` and ``struct Bar{1,2}`` matched too, so a token that is
+    plainly not a flag could satisfy the provenance gate's "seen in evidence"
+    check. Real flags hug their braces (no leading/trailing whitespace) and never
+    carry statement separators; a letterless comma list is the one initializer
+    shape that must not pass (pure-digit bodies stay: ``flag{123456}`` is a flag).
+    """
+    if body != body.strip():
+        return True
+    if ";" in body:
+        return True
+    return "," in body and not any(ch.isalpha() for ch in body)
+
+
 def extract_flags(text: str) -> list[str]:
     """Extract common CTF flag-looking tokens without asserting validity."""
 
-    return list(dict.fromkeys(_FLAG_RE.findall(text or "")))
+    found = [
+        token
+        for token in _FLAG_RE.findall(text or "")
+        if not _is_code_shaped_body(token[token.index("{") + 1 : -1])
+    ]
+    return list(dict.fromkeys(found))
 
 
 # ── Placeholder / template flag rejection (ported from Muteki gate.py) ──
@@ -492,6 +519,20 @@ class AgentState(BaseModel):
         self.evidence_seq = 0
         self.step_seq = 0
         self.claim_seq = 0
+        # Per-run guard budgets: a new goal must not inherit counters the
+        # previous goal spent. Measured 2026-10-19: after ``reset_for_goal`` a
+        # fresh goal still carried ``undecided_nudge_count=2``,
+        # ``writeup_search_count=2`` and ``blackboard_nudged=True`` -- the second
+        # challenge in one session could never see the undecided-angle nudge,
+        # and its first writeup-lookalike turn would stop it at the limit.
+        # (The same-goal continuation above returns EARLY, so a resumed run
+        # keeps its counters -- that is the intended distinction.)
+        self.blackboard_nudged = False
+        self.pwn_local_reminded = False
+        self.lock_nudge_count = 0
+        self.submit_gate_refusals = {}
+        self.writeup_search_count = 0
+        self.undecided_nudge_count = 0
 
     def record_step(
         self,

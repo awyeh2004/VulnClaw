@@ -219,3 +219,65 @@ class TestFlagsWithSpacesAreExtracted:
             "sun{lesssgooo_solved_the_poop_challenge!}",
         ):
             assert extract_flags(value) == [value]
+
+
+class TestCodeBlocksAreNotFlags:
+    """The widened body class (2026-10-18) also let code constructs through.
+
+    Measured 2026-10-19: `extract_flags('class Foo{ int x; }')` returned
+    ``Foo{ int x; }`` and `struct Bar{1,2}` matched too -- a non-flag token could
+    satisfy the provenance gate's "seen in evidence" check.
+    """
+
+    def test_code_shapes_are_not_flags(self):
+        assert extract_flags("class Foo{ int x; }") == []
+        assert extract_flags("struct Bar{1,2};") == []
+
+    def test_real_shapes_survive_the_tightening(self):
+        assert extract_flags("flag{123456}") == ["flag{123456}"]
+        assert extract_flags("flag{you are the best!}") == ["flag{you are the best!}"]
+
+    def test_a_word_embedding_does_not_start_a_flag(self):
+        """The prefix must start a word: a long identifier ending in `Flag{...}`
+        is a name, not a flag."""
+        assert extract_flags("a" * 30 + "Flag{x}") == []
+
+
+class TestPerRunCountersReset:
+    """A new goal must not inherit the previous goal's spent guard budget.
+
+    Measured 2026-10-19: right after ``reset_for_goal`` a fresh goal still saw
+    ``undecided_nudge_count=2``, ``writeup_search_count=2`` and
+    ``blackboard_nudged=True`` -- so the second challenge in one session could
+    never receive the undecided-angle nudge, and its very first
+    writeup-lookalike turn ended it at the limit.
+    """
+
+    def test_reset_for_goal_clears_per_run_counters(self):
+        state = AgentState(origin="t1", goal="g1")
+        state.blackboard_nudged = True
+        state.pwn_local_reminded = True
+        state.lock_nudge_count = 2
+        state.submit_gate_refusals = {"flag{a}": 2}
+        state.writeup_search_count = 2
+        state.undecided_nudge_count = 2
+
+        state.reset_for_goal(origin="t2", goal="g2")
+
+        assert state.writeup_search_count == 0
+        assert state.undecided_nudge_count == 0
+        assert state.blackboard_nudged is False
+        assert state.pwn_local_reminded is False
+        assert state.lock_nudge_count == 0
+        assert state.submit_gate_refusals == {}
+
+    def test_continuing_the_same_goal_keeps_them(self):
+        """The early return is the continuation path: counters must survive."""
+        state = AgentState(origin="t1", goal="g1")
+        state.writeup_search_count = 1
+        state.undecided_nudge_count = 1
+
+        state.reset_for_goal(origin="t1", goal="g1")
+
+        assert state.writeup_search_count == 1
+        assert state.undecided_nudge_count == 1
