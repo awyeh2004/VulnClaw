@@ -661,13 +661,12 @@ def _undecided_angle_nudge(agent: AgentState, state: AgentState) -> str:
     open_count = _no_path_open_angles(agent)
     if open_count < 2:
         return ""
-    count = getattr(state, "undecided_nudge_count", 0)
-    if count >= 2:
+    # Declared on AgentState, not setattr'd: pydantic v2 refuses undeclared
+    # attributes, and the previous try/except around this line converted that
+    # refusal into "the counter never moves" (see the field's comment).
+    if state.undecided_nudge_count >= 2:
         return ""
-    try:
-        state.undecided_nudge_count = count + 1
-    except Exception:
-        return ""
+    state.undecided_nudge_count += 1
     return (
         f"You have {open_count} ANGLES open and none of them decided. An open angle is a "
         "promise to look, not progress — nothing about the search space is known until you "
@@ -2591,7 +2590,6 @@ async def _solve_impl(
         # run's evidence, so the completion gate rejects it regardless. Correcting
         # once is cheaper than letting it grind (one run spent 1192 password
         # guesses after giving up on derivation).
-        writeup_search_streak = 0
         # Mid-run check for "opened angles, decided none" -- see
         # _undecided_angle_nudge for why the stall guard's own wording was not enough.
         try:
@@ -2601,10 +2599,14 @@ async def _solve_impl(
                 emit("undecided_angles", {"open": _no_path_open_angles(agent)})
         except Exception:
             pass
+        # The counter lives on AgentState and PERSISTS across steps; a local
+        # ``writeup_search_streak`` here would be reset every iteration and could
+        # never reach the threshold (it was written that way first and was dead
+        # code). Declared field, so this assignment cannot be silently refused.
+        record_writeup_search = False
         try:
             recent = state.tool_calls[before_tools:]
             if any(_is_writeup_search(getattr(tc, "key_args", "") or "") for tc in recent):
-                writeup_search_streak += 1
                 state.add_correction_hint(
                     "You are searching for a writeup instead of solving. A copied "
                     "answer cannot pass the completion gate (the flag must appear in "
@@ -2612,12 +2614,10 @@ async def _solve_impl(
                     "to the recorded evidence and state the next concrete hypothesis."
                 )
                 record_writeup_search = True
-            else:
-                record_writeup_search = False
         except Exception:
             record_writeup_search = False
         if record_writeup_search:
-            state.writeup_search_count = getattr(state, "writeup_search_count", 0) + 1
+            state.writeup_search_count += 1
             emit("writeup_search", {"count": state.writeup_search_count})
             if state.writeup_search_count >= 2:
                 reason = (

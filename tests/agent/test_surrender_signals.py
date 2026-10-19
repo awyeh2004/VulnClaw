@@ -162,3 +162,52 @@ class TestThinkingInsteadOfActing:
         assert "no-action guard" in src
         # The escalation must hand back rather than silently end.
         assert "no tool call for 4 turns" in src or "four consecutive turns" in src
+
+
+class TestCountersAreDeclaredOnTheModel:
+    """The counters must be FIELDS of AgentState, not ad-hoc attributes.
+
+    Measured 2026-10-19 on a real run (`robomunication`): the writeup guard raised
+    ``ValueError: "AgentState" object has no field "writeup_search_count"`` and the
+    whole run died with EXIT=1 at step 2. Pydantic v2 refuses assignment to
+    undeclared names.
+
+    The angle counter failed the same way but INVISIBLY -- its assignment sat in a
+    ``try/except`` that swallowed the refusal, so the counter never moved and the
+    nudge would have fired every turn instead of the intended two. Both are pinned
+    here so the next counter added to this loop cannot repeat it.
+    """
+
+    def test_writeup_counter_exists_and_increments(self):
+        from vulnclaw.agent.agent_state import AgentState
+
+        state = AgentState()
+        assert state.writeup_search_count == 0
+        state.writeup_search_count += 1
+        assert state.writeup_search_count == 1
+
+    def test_angle_nudge_counter_exists_and_increments(self):
+        from vulnclaw.agent.agent_state import AgentState
+
+        state = AgentState()
+        assert state.undecided_nudge_count == 0
+        blackboard = Blackboard()
+        blackboard.create_angle("surface one")
+        blackboard.create_angle("surface two")
+        agent = _Agent(blackboard)
+        assert _undecided_angle_nudge(agent, state) != ""
+        assert state.undecided_nudge_count == 1, (
+            "the counter must move on the model, not be refused silently"
+        )
+
+    def test_the_nudge_stops_after_two(self):
+        from vulnclaw.agent.agent_state import AgentState
+
+        state = AgentState()
+        blackboard = Blackboard()
+        blackboard.create_angle("surface one")
+        blackboard.create_angle("surface two")
+        agent = _Agent(blackboard)
+        assert _undecided_angle_nudge(agent, state) != ""
+        assert _undecided_angle_nudge(agent, state) != ""
+        assert _undecided_angle_nudge(agent, state) == ""

@@ -400,6 +400,16 @@ class AgentState(BaseModel):
     blackboard_nudged: bool = False
     pwn_local_reminded: bool = False
     lock_nudge_count: int = 0
+    # 2026-10-19: the two counters below were first written as plain setattr and are
+    # the FOURTH instance of the defect documented just above. The writeup one
+    # crashed a real run outright ("AgentState object has no field
+    # writeup_search_count" -- pydantic v2 refuses the assignment). The angle one
+    # was worse: its setattr sits inside a try/except, so the counter never
+    # incremented, the "opened several angles, decided none" nudge would have fired
+    # on EVERY turn instead of twice, and the failure looked exactly like the nudge
+    # working -- the same silent shape the comment above warns about.
+    writeup_search_count: int = 0
+    undecided_nudge_count: int = 0
     # 提交证据门（``vulnclaw/agent/submit_gate.py``）：候选 flag → 已被本地拒绝的
     # 次数。有界拒绝用 —— 同一候选被拒超过上限就放行，避免把真 flag 永久关在门外。
     submit_gate_refusals: dict[str, int] = Field(default_factory=dict)
