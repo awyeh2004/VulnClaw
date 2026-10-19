@@ -151,6 +151,26 @@ class TestDiscriminationOnRealStore:
             f"unrelated sibling should be gated by the overlap floor, got {names}"
         )
 
+    def test_rarity_generation_is_read_once_per_lookup(self, store, monkeypatch):
+        """Performance pin (2026-10-19).
+
+        A warm `lookup_playbook_multi` resolved the per-slug token map once per
+        candidate row (`_note_tokens_for`), and each resolution still stat-ed
+        every note file -- 61 ms on the 530-note store, 32 rows, 3.0 s of pure
+        stat calls. The lookup reads the generation once now; this counter fails
+        if a per-row read is ever re-added.
+        """
+        calls = {"n": 0}
+        real = pb._document_frequencies
+
+        def counted():
+            calls["n"] += 1
+            return real()
+
+        monkeypatch.setattr(pb, "_document_frequencies", counted)
+        pb.lookup_playbook_multi([("target", GOAL)], limit=3)
+        assert calls["n"] == 1, f"lookup read the store {calls['n']} times"
+
 
 class TestFilteringNeverMakesANoteUnreachable:
     """Full-store sweep (2026-10-18) found 14 of 516 notes that became dead.
