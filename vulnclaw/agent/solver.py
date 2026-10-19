@@ -476,6 +476,11 @@ def _is_observation_only_turn(tools_used: list[str], new_evidence_count: int) ->
 #: model has stopped deriving and started copying, which cannot ground a flag in
 #: this run's own evidence anyway (the completion gate rejects any flag it cannot
 #: trace to recorded evidence, so a copied answer is wasted work by construction).
+#:
+#: NOTE (2026-10-19): the generic ``"/search?q="`` marker was removed. The
+#: target's own search endpoint -- ``http://target/search?q=1' OR 1=1--`` -- is a
+#: routine probe, and it matched, so three of OUR probes would have been counted
+#: as surrender turns. The engine domains below are what the signal was for.
 _WRITEUP_SEARCH_MARKERS = (
     "duckduckgo.com/html",
     "lite.duckduckgo.com",
@@ -483,7 +488,6 @@ _WRITEUP_SEARCH_MARKERS = (
     "bing.com/search",
     "baidu.com/s?",
     "so.com/s?",
-    "/search?q=",
     "wp.ctf",
 )
 
@@ -509,11 +513,18 @@ def _is_writeup_search(args_text: str, tool_name: str = "") -> bool:
     false positive that made this distinction necessary.
     """
     low = (args_text or "").lower()
+    name = (tool_name or "").lower()
+    # Observation-only tools read THIS run's own record; they never touch the
+    # network, so nothing in their arguments can be "someone else's solution".
+    # Measured 2026-10-19: `evidence_search` contains `search` and so matched the
+    # network hint, which made `{"query": "writeup"}` over our own evidence a
+    # surrender turn -- three of those stopped a run that was re-reading its log.
+    if name in OBSERVATION_ONLY_TOOLS:
+        return False
     if any(marker in low for marker in _WRITEUP_SEARCH_MARKERS):
         return True
     if not any(word in low for word in _WRITEUP_SEARCH_WORDS):
         return False
-    name = (tool_name or "").lower()
     if not name:
         # No tool name to judge by: the URL markers above are the only safe signal.
         return False

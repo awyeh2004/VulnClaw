@@ -52,7 +52,6 @@ class TestWriteupSearchDetection:
             '{"url": "https://lite.duckduckgo.com/lite/?q=x"}',
             '{"url": "https://www.bing.com/search?q=x"}',
             '{"url": "https://www.google.com/search?q=x"}',
-            '{"url": "https://example.com/search?q=flag"}',
             '{"url": "https://example.com/writeup"}',
             '{"url": "https://example.com/题解"}',
         ],
@@ -74,6 +73,23 @@ class TestWriteupSearchDetection:
     def test_ordinary_work_is_not_flagged(self, args):
         """False positives here would cut off legitimate runs."""
         assert _is_writeup_search(args) is False
+
+    def test_hitting_the_targets_own_search_endpoint_is_not_this(self):
+        # 2026-10-19: the removed generic `/search?q=` marker made a routine
+        # probe (`http_probe_batch` against the target's search form) a
+        # surrender turn -- three of them would have stopped the run.
+        assert (
+            _is_writeup_search(
+                '{"url": "http://target.local/search?q=1%27 OR 1=1--"}',
+                "http_probe_batch",
+            )
+            is False
+        )
+
+    def test_searching_our_own_evidence_for_the_word_writeup_is_not_this(self):
+        # `evidence_search` contains `search` and matched the network hint, so
+        # re-reading our own log for the word "writeup" counted as surrender.
+        assert _is_writeup_search('{"query": "writeup"}', "evidence_search") is False
 
 
 class TestUndecidedAngleNudge:
