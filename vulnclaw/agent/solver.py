@@ -2627,15 +2627,31 @@ async def _solve_impl(
         # ``writeup_search_streak`` here would be reset every iteration and could
         # never reach the threshold (it was written that way first and was dead
         # code). Declared field, so this assignment cannot be silently refused.
+        #
+        # Only a turn that did NOTHING BUT search counts. Measured 2026-10-19 on
+        # 荷兰宽带数据泄露: a turn carried 7-8 real probes (unpack the zip, test
+        # ECB, sweep AES/RC4 keys) plus one ``fetch`` of a Bing writeup page. The
+        # first version counted that as a surrender turn, so two such turns ended
+        # an actively-working run in 3 steps / 32 tool calls -- against 118 calls
+        # when the same challenge was allowed to grind. "Stopped deriving" means
+        # the search REPLACED the probes, not that it rode along with them.
         record_writeup_search = False
         try:
             recent = state.tool_calls[before_tools:]
-            if any(
-                _is_writeup_search(
+            searched = [
+                tc
+                for tc in recent
+                if _is_writeup_search(
                     getattr(tc, "key_args", "") or "", getattr(tc, "tool", "") or ""
                 )
+            ]
+            other_work = [
+                tc
                 for tc in recent
-            ):
+                if tc not in searched
+                and (getattr(tc, "tool", "") or "") not in OBSERVATION_ONLY_TOOLS
+            ]
+            if searched and not other_work:
                 state.add_correction_hint(
                     "You are searching for a writeup instead of solving. A copied "
                     "answer cannot pass the completion gate (the flag must appear in "

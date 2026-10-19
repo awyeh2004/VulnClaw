@@ -254,3 +254,56 @@ class TestLocalMaterialIsNotAWriteupSearch:
     def test_an_empty_tool_name_does_not_assert_a_violation(self):
         """No name to judge by -> the URL markers are the only safe signal."""
         assert not _is_writeup_search("grep writeup E:/vulnclaw", "")
+
+
+class TestOnlyAPureSearchTurnCounts:
+    """实测（2026-10-19，荷兰宽带数据泄露）：一轮 7-8 个真实探测 + 1 次搜题解。
+
+    第一版把这轮算作"投降轮"，于是两个这样的轮次在 3 步 / 32 次工具调用内结束了
+    一个正在干活的 run —— 同一道题允许磨下去时是 118 次调用。所以判据不是"这一轮
+    出现过搜索"，而是"这一轮**只有**搜索"：搜索**代替**了探测才算停止推导，
+    搭着探测一起出现不算。
+    """
+
+    @staticmethod
+    def _turn(*pairs):
+        """(tool, key_args) -> the ToolCallRecord shape the loop inspects."""
+        from vulnclaw.agent.agent_state import ToolCallRecord
+
+        return [ToolCallRecord(tool=t, key_args=a) for t, a in pairs]
+
+    def _would_count(self, records):
+        """Mirror of the loop's decision (kept tiny so drift is obvious)."""
+        from vulnclaw.agent.solver import _is_writeup_search
+        from vulnclaw.agent.solver import OBSERVATION_ONLY_TOOLS
+
+        searched = [c for c in records if _is_writeup_search(c.key_args, c.tool)]
+        other = [
+            c
+            for c in records
+            if c not in searched and c.tool not in OBSERVATION_ONLY_TOOLS
+        ]
+        return bool(searched) and not other
+
+    def test_a_pure_search_turn_counts(self):
+        assert self._would_count(
+            self._turn(("fetch", "https://www.bing.com/search?q=x+writeup"))
+        )
+
+    def test_a_search_carried_alongside_real_probes_does_not_count(self):
+        assert not self._would_count(
+            self._turn(
+                ("python_execute", "test AES keys on conf.bin"),
+                ("shell_command", "7z l attachment.zip"),
+                ("fetch", "https://www.bing.com/search?q=x+writeup"),
+            )
+        )
+
+    def test_observation_only_calls_do_not_excuse_the_search(self):
+        """只读证据仍然算"没在干活"，所以纯搜索 + 只读仍是投降轮。"""
+        assert self._would_count(
+            self._turn(
+                ("evidence_view", '{"id": "e012"}'),
+                ("fetch", "https://www.bing.com/search?q=x+writeup"),
+            )
+        )
