@@ -663,10 +663,24 @@ def _no_path_open_angles(agent: AgentState) -> int:
 
     Used to enforce coverage: NO_PATH is premature if untried angles remain.
     """
+    return len(_open_angle_nodes(agent))
+
+
+def _open_angle_nodes(agent: AgentState) -> list[Any]:
+    """The ANGLE nodes still in PROPOSED status.
+
+    Split from the count so a handback can NAME them: measured 2026-10-19, a run
+    obeyed the nudge (three angles registered, two decided) and was then told only
+    "1 angle(s) open and never decided" -- it had to guess which one, and the run
+    ended there. The nodes are already in memory, so naming them is free.
+    """
     bb = getattr(agent, "runtime", None) and getattr(agent.runtime, "blackboard", None)
     if bb is None:
-        return 0
-    return len(bb.open_angles())
+        return []
+    try:
+        return list(bb.open_angles())
+    except Exception:
+        return []
 
 
 def _undecided_angle_nudge(agent: AgentState, state: AgentState) -> str:
@@ -872,12 +886,25 @@ def _stall_guard_decision(
     # The wording stays honest: it reports how many angles are open and undecided
     # and says that the blackboard cannot distinguish them, rather than claiming the
     # search space is exhausted.
-    open_angles = _no_path_open_angles(agent)
+    #
+    # NAMED, not merely counted (2026-10-19). Measured on robomunication: the model
+    # DID obey the nudge -- it set a LOCK, registered three angles and decided two
+    # -- but one stayed open, and the handback said only "1 angle(s) ... open and
+    # never decided". It then had to guess which, and the run ended there. Listing
+    # the id and description costs nothing (they are already in memory) and removes
+    # that guess.
+    open_nodes = _open_angle_nodes(agent)
+    open_angles = len(open_nodes)
+    named = "; ".join(
+        f"{getattr(n, 'id', '?')}: {one_line(str(getattr(n, 'description', '') or ''), 90)}"
+        for n in open_nodes[:4]
+    )
+    detail = f" Still open: {named}." if named else ""
     return "ask", (
         f"The current path has not advanced for {streak} turns, and nudging it toward a "
         f"different angle changed nothing. {open_angles} angle(s) on the blackboard are "
         f"open and never decided, so nothing there distinguishes a path worth pursuing "
-        f"from one already ruled out. Close those {open_angles} angle(s) NOW — "
+        f"from one already ruled out.{detail} Close those {open_angles} angle(s) NOW — "
         f"`blackboard_hit_angle` or `blackboard_miss_angle` on each one, from what you "
         f"actually learned — then give a concrete next step or scope, or confirm that the "
         f"run should stop. Opening more angles without deciding the existing ones is what "

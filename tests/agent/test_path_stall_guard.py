@@ -313,3 +313,39 @@ class TestTheNudgeAsksForADecisionNotJustANewAngle:
         assert action == "ask"
         assert "Close those" in message or "close those" in message, message
         assert "hit_angle" in message and "miss_angle" in message
+
+
+class TestHandbackNamesTheOpenAngles:
+    """实测（2026-10-19，robomunication）：模型照做了提醒，但还剩一个角度没关。
+
+    run 在第 8 步听劝建了 LOCK + 3 个角度、第 9 步裁决了 2 个；第 16 步交还时只
+    被告知"1 angle(s) open and never decided"，需要自己回想是哪一个 —— 它没做到，
+    run 到此结束。节点 id 与描述本来就在内存里，点名是零成本的。
+    """
+
+    def test_the_message_lists_id_and_description(self):
+        bb = Blackboard()
+        keep = bb.create_angle("Read spec images for hidden flag text")
+        bb.create_angle("Unrelated surface")
+        # Leave exactly one open, decide the other.
+        other = [n for n in bb.open_angles() if n.id != keep.id][0]
+        bb.miss_angle(other.id)
+
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=9, hint_sent=True, thin_windows=0
+        )
+        assert action == "ask"
+        assert keep.id in message, message
+        assert "Read spec images" in message, message
+
+    def test_a_fully_decided_board_does_not_get_a_stale_list(self):
+        bb = Blackboard()
+        a = bb.create_angle("one")
+        b = bb.create_angle("two")
+        bb.hit_angle(a.id)
+        bb.miss_angle(b.id)
+        action, message = _stall_guard_decision(
+            FakeAgent(bb), streak=9, hint_sent=True, thin_windows=0
+        )
+        # No open angle -> the "no untried angle remains" branch.
+        assert "Still open:" not in message, message
