@@ -484,16 +484,40 @@ _WRITEUP_SEARCH_MARKERS = (
     "baidu.com/s?",
     "so.com/s?",
     "/search?q=",
-    "writeup",
-    "题解",
     "wp.ctf",
 )
 
+#: Bare words that mean "someone else's solution" ONLY when the call goes to the
+#: NETWORK. Measured 2026-10-19 on 荷兰宽带数据泄露: the guard counted two local
+#: ``shell_command`` greps over ``E:\vulnclaw\writeup`` and ``E:\vulnclaw\hackerWP``
+#: as writeup searches, hit its limit of two, and killed a run that was actively
+#: deriving (it had just narrowed an ECB cipher to a dictionary + 8-digit-DES
+#: sweep). Reading material already on this machine is not copying an answer --
+#: it is the operator's own knowledge base -- and stopping a run for it is worse
+#: than the behaviour the guard exists to prevent.
+_WRITEUP_SEARCH_WORDS = ("writeup", "题解", "攻略")
 
-def _is_writeup_search(args_text: str) -> bool:
-    """True when a tool call looks like searching for someone else's solution."""
+#: Tool names whose arguments are a network request/URL.
+_NETWORK_TOOL_HINTS = ("fetch", "http", "download", "url", "browse", "search", "request")
+
+
+def _is_writeup_search(args_text: str, tool_name: str = "") -> bool:
+    """True when a tool call looks like fetching someone else's solution.
+
+    URL/search-engine markers always count. The bare words (``writeup``/``题解``)
+    count only for network tools -- see ``_WRITEUP_SEARCH_WORDS`` for the measured
+    false positive that made this distinction necessary.
+    """
     low = (args_text or "").lower()
-    return any(marker in low for marker in _WRITEUP_SEARCH_MARKERS)
+    if any(marker in low for marker in _WRITEUP_SEARCH_MARKERS):
+        return True
+    if not any(word in low for word in _WRITEUP_SEARCH_WORDS):
+        return False
+    name = (tool_name or "").lower()
+    if not name:
+        # No tool name to judge by: the URL markers above are the only safe signal.
+        return False
+    return any(hint in name for hint in _NETWORK_TOOL_HINTS)
 
 
 
@@ -2606,7 +2630,12 @@ async def _solve_impl(
         record_writeup_search = False
         try:
             recent = state.tool_calls[before_tools:]
-            if any(_is_writeup_search(getattr(tc, "key_args", "") or "") for tc in recent):
+            if any(
+                _is_writeup_search(
+                    getattr(tc, "key_args", "") or "", getattr(tc, "tool", "") or ""
+                )
+                for tc in recent
+            ):
                 state.add_correction_hint(
                     "You are searching for a writeup instead of solving. A copied "
                     "answer cannot pass the completion gate (the flag must appear in "

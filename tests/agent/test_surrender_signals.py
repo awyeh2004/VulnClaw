@@ -58,7 +58,9 @@ class TestWriteupSearchDetection:
         ],
     )
     def test_search_shapes_are_detected(self, args):
-        assert _is_writeup_search(args) is True
+        # These are all network fetches; the tool name is what tells the bare
+        # writeup/题解 words apart from a local grep (see the class below).
+        assert _is_writeup_search(args, "fetch") is True
 
     @pytest.mark.parametrize(
         "args",
@@ -211,3 +213,44 @@ class TestCountersAreDeclaredOnTheModel:
         assert _undecided_angle_nudge(agent, state) != ""
         assert _undecided_angle_nudge(agent, state) != ""
         assert _undecided_angle_nudge(agent, state) == ""
+
+
+class TestLocalMaterialIsNotAWriteupSearch:
+    r"""Measured 2026-10-19 on 荷兰宽带数据泄露: two local greps killed a live run.
+
+    The run was deriving (ECB cipher → dictionary → 8-digit DES sweep) and also
+    grepping ``E:\vulnclaw\writeup`` / ``hackerWP`` — the operator's own knowledge
+    base sitting on this machine. Both hits counted, the run hit its limit of two,
+    and stopped. Reading local material is not "copying someone else's answer";
+    only a NETWORK fetch of one is.
+    """
+
+    LOCAL_SHELL = (
+        r"Get-ChildItem E:\vulnclaw\writeup -Recurse -File | "
+        "Select-String -Pattern 'RouterPassView'"
+    )
+
+    def test_a_local_grep_for_writeups_does_not_count(self):
+        assert not _is_writeup_search(self.LOCAL_SHELL, "shell_command")
+
+    def test_a_local_python_search_for_writeups_does_not_count(self):
+        assert not _is_writeup_search(
+            "import glob; glob.glob('E:/vulnclaw/docs/**/*writeup*')", "python_execute"
+        )
+
+    def test_a_network_fetch_of_a_writeup_still_counts(self):
+        assert _is_writeup_search(
+            "https://example.com/buuctf/荷兰宽带数据泄露-writeup", "fetch"
+        )
+        assert _is_writeup_search("https://example.com/题解", "fetch")
+
+    def test_a_search_engine_url_still_counts_for_any_tool(self):
+        """The unambiguous markers do not depend on the tool name."""
+        for tool in ("fetch", "shell_command", "python_execute", ""):
+            assert _is_writeup_search(
+                "https://duckduckgo.com/html/?q=flag", tool
+            ), tool
+
+    def test_an_empty_tool_name_does_not_assert_a_violation(self):
+        """No name to judge by -> the URL markers are the only safe signal."""
+        assert not _is_writeup_search("grep writeup E:/vulnclaw", "")
