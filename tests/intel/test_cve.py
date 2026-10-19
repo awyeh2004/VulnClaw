@@ -144,3 +144,117 @@ async def test_tool_routes_cve_id_vs_keyword(monkeypatch):
     assert calls.get("id") == "CVE-2021-44228"
     assert calls.get("kw") == "log4j"
     assert "CVE-2021-44228" in out_id and "CVE-2021-44228" in out_kw
+
+
+# ── 别名回退：NVD 不认漏洞绰号，GitHub 认（2026-10-19 实测） ──────────────────
+#
+# 实测 NVD：
+#   search_cve('log4j')     -> CVE-2017-5645 / 2019-17571 / 2014-0722（全是旧的，
+#                              CVE-2021-44228 不在里面）
+#   search_cve('log4shell') -> 0 条
+#   search_cve('Log4j2')    -> CVE-2021-44228 排第一
+#
+# 也就是说，agent 按操作者/题面的说法（绰号）去查，会拿到"没有"或一堆十年前的
+# CVE —— "用新披露的漏洞"这条路就断在这里。GitHub 仓库名/描述里是写绰号的，实测
+# log4shell -> CVE-2021-44228、springshell -> CVE-2022-22965、
+# text4shell -> CVE-2022-42889 都能提出来。
+
+
+@pytest.mark.asyncio
+async def test_alias_resolves_to_a_cve_id_via_github(monkeypatch):
+    async def fake_exploits(query, **kw):
+        return [
+            {"title": "NCSC-NL/log4shell", "url": "https://x/1", "description": "CVE-2021-44228 scanner", "stars": "1882"},
+            {"title": "someone/other", "url": "https://x/2", "description": "CVE-2021-44228 PoC", "stars": "10"},
+            {"title": "mixed/collection", "url": "https://x/3", "description": "CVE-2021-21972 too", "stars": "5"},
+        ]
+
+    async def fake_lookup(cve_id, **kw):
+        return cve.CVEEntry(cve_id=cve_id, description=f"desc {cve_id}", cvss_score=9.8)
+
+    monkeypatch.setattr(cve, "search_exploits", fake_exploits)
+    monkeypatch.setattr(cve, "lookup_cve_id", fake_lookup)
+
+    entries, repos = await cve.resolve_alias_to_cves("log4shell", max_results=3)
+    assert len(repos) == 3
+    # Ranked by how many repos mention the id: 44228 appears twice, 21972 once.
+    assert [e.cve_id for e in entries] == ["CVE-2021-44228", "CVE-2021-21972"]
+
+
+@pytest.mark.asyncio
+async def test_alias_fallback_fires_only_when_nvd_is_empty(monkeypatch):
+    """A keyword NVD DOES understand must not pay for a GitHub round trip."""
+    calls = {"alias": 0}
+
+    async def fake_search(keyword, **kw):
+        return []
+
+    async def fake_alias(query, **kw):
+        calls["alias"] += 1
+        return [cve.CVEEntry(cve_id="CVE-2021-44228", description="via alias", cvss_score=10.0)], [{"title": "x", "url": "u", "stars": "1"}]
+
+    monkeypatch.setattr(cve, "search_cve", fake_search)
+    monkeypatch.setattr(cve, "resolve_alias_to_cves", fake_alias)
+
+    out = await cve_lookup_tool(agent=None, args={"query": "log4shell"})
+    assert calls["alias"] == 1
+    assert "CVE-2021-44228" in out
+    # The mapping is inferred, and the caller must be told so.
+    assert "inferred, not authoritative" in out
+
+
+@pytest.mark.asyncio
+async def test_a_nonempty_nvd_result_skips_the_alias_path(monkeypatch):
+    calls = {"alias": 0}
+
+    async def fake_search(keyword, **kw):
+        return [cve.CVEEntry(cve_id="CVE-2017-5645", description="old", cvss_score=9.8)]
+
+    async def fake_alias(query, **kw):
+        calls["alias"] += 1
+        return [], []
+
+    monkeypatch.setattr(cve, "search_cve", fake_search)
+    monkeypatch.setattr(cve, "resolve_alias_to_cves", fake_alias)
+
+    out = await cve_lookup_tool(agent=None, args={"query": "log4j"})
+    assert calls["alias"] == 0
+    assert "CVE-2017-5645" in out
+
+
+@pytest.mark.asyncio
+async def test_a_stale_nvd_answer_says_so(monkeypatch):
+    """实测：查 'log4j' 返回 2017/2019/2014，Log4Shell 不在其中。
+
+    NVD 关键词是全文本匹配，按相关度而不是时间排；一个只报最新 5 条的列表会让
+    agent 相信"这就是全部"。所以当最新年份早于今年时必须明说，并提示换更精确的
+    产品名或绰号重试。
+    """
+
+    async def fake_search(keyword, **kw):
+        return [
+            cve.CVEEntry(cve_id="CVE-2017-5645", description="old", cvss_score=9.8),
+            cve.CVEEntry(cve_id="CVE-2014-0722", description="older", cvss_score=7.5),
+        ]
+
+    monkeypatch.setattr(cve, "search_cve", fake_search)
+    out = await cve_lookup_tool(agent=None, args={"query": "log4j"})
+    assert "CVE-2017-5645" in out
+    assert "Newest match here is 2017" in out
+    assert "nickname" in out
+
+
+@pytest.mark.asyncio
+async def test_a_current_year_answer_carries_no_stale_note(monkeypatch):
+    import time as _time
+
+    year = _time.gmtime().tm_year
+
+    async def fake_search(keyword, **kw):
+        return [
+            cve.CVEEntry(cve_id=f"CVE-{year}-12345", description="new", cvss_score=9.8)
+        ]
+
+    monkeypatch.setattr(cve, "search_cve", fake_search)
+    out = await cve_lookup_tool(agent=None, args={"query": "some product"})
+    assert "Newest match here is" not in out

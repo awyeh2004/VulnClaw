@@ -290,6 +290,55 @@ async def search_exploits(
     return exploits
 
 
+async def resolve_alias_to_cves(
+    query: str,
+    *,
+    max_results: int = 5,
+    exploit_repos: int = 8,
+    timeout: float = 20.0,
+) -> tuple[list[CVEEntry], list[dict[str, str]]]:
+    """Turn a colloquial alias (``log4shell``) into real CVE entries.
+
+    NVD's ``keywordSearch`` matches the CVE's own text, and that text almost never
+    contains the nickname the world uses. Measured 2026-10-19:
+
+        search_cve('log4j')      -> CVE-2017-5645, CVE-2019-17571, CVE-2014-0722 …
+                                    (all OLD; CVE-2021-44228 absent)
+        search_cve('log4shell')  -> 0 hits
+        search_cve('Log4j2')     -> CVE-2021-44228 first
+
+    So an agent that knows the nickname (which is how operators talk, and how the
+    challenge description usually puts it) gets either nothing or a decade-old
+    list -- exactly the case where "use a newly disclosed vulnerability" fails.
+
+    GitHub does know the nickname. Searching repositories for the alias and then
+    reading CVE ids out of the repo names/descriptions recovered the right id for
+    every alias tried: ``log4shell`` -> CVE-2021-44228, ``springshell`` ->
+    CVE-2022-22965, ``text4shell`` -> CVE-2022-42889.
+
+    Returns ``(entries, repos)``. The CVE ids are ranked by how many of the
+    returned repositories mention them, so a repo that merely bundles many
+    exploits (a "CVE collection") does not outvote the alias's own CVE.
+    """
+    repos = await search_exploits(query, max_results=exploit_repos, timeout=timeout)
+    if not repos:
+        return [], []
+    counts: dict[str, int] = {}
+    for repo in repos:
+        blob = f"{repo.get('title', '')} {repo.get('description', '')}".upper()
+        for cve_id in set(re.findall(r"CVE-\d{4}-\d{4,}", blob)):
+            counts[cve_id] = counts.get(cve_id, 0) + 1
+    if not counts:
+        return [], repos
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:max_results]
+    entries: list[CVEEntry] = []
+    for cve_id, _ in ranked:
+        entry = await lookup_cve_id(cve_id, timeout=timeout, with_exploits=False)
+        if entry is not None:
+            entries.append(entry)
+    return entries, repos
+
+
 # ── Formatting ───────────────────────────────────────────────────────────────
 
 
@@ -360,5 +409,57 @@ async def cve_lookup_tool(agent: Any, args: dict[str, Any]) -> str:
 
     entries = await search_cve(query, max_results=limit, api_key=api_key)
     if not entries:
+        # The keyword matched nothing. Before reporting "not found", try the alias
+        # route: NVD's keyword index does not know nicknames (measured: 'log4shell'
+        # -> 0 hits, 'log4j' -> a list of decade-old CVEs), while GitHub does.
+        # Without this the agent reads "No CVEs found" for a vulnerability that is
+        # famous by exactly that name, and the "use a new CVE" path dies here.
+        alias_entries, repos = await resolve_alias_to_cves(query, max_results=limit)
+        if alias_entries:
+            report = format_cve_report(
+                alias_entries, title=f"CVE search: {query} (via alias → GitHub)"
+            )
+            return (
+                report
+                + "\n\n> NVD's keyword index returned nothing for this name, so these ids "
+                "were recovered from GitHub repositories that mention it. The mapping is "
+                "inferred, not authoritative: confirm the targeted product/version "
+                "matches before using any of them.\n"
+            )
+        if repos:
+            lines = [
+                f"## CVE search: {query}",
+                "",
+                "NVD returned nothing and no CVE id could be extracted from GitHub "
+                "repositories, but these repositories match the name:",
+                "",
+            ]
+            for repo in repos[:limit]:
+                lines.append(f"- [{repo['title']}]({repo['url']}) ⭐ {repo.get('stars', '')}")
+            lines.append("")
+            return "\n".join(lines)
         return f"[cve_lookup] No CVEs found for '{query}'."
-    return format_cve_report(entries, title=f"CVE search: {query}")
+    # NVD answered, but its keyword index is a full-text match: for a product name it
+    # returns everything that mentions the product, newest first only by relevance, so
+    # a run asking "what is new in log4j" got 2017/2019/2014 and never saw Log4Shell
+    # (measured 2026-10-19). Rank the NVD rows by year and, when the newest one predates
+    # this year, say so and offer the alias route as well -- silence here reads as
+    # "this is the complete list".
+    newest_year = max((_cve_year(e.cve_id) for e in entries), default=0)
+    report = format_cve_report(entries, title=f"CVE search: {query}")
+    if newest_year and newest_year < time.gmtime().tm_year:
+        note = (
+            f"\n> Newest match here is {newest_year}. NVD keyword search is a full-text "
+            "match, so a recently disclosed CVE may be listed under a different name "
+            "(a nickname like `log4shell`, or 'Log4j2' rather than 'log4j'). If you are "
+            "looking for a recent vulnerability, retry with the product's exact current "
+            "name or its nickname.\n"
+        )
+        return report + note
+    return report
+
+
+def _cve_year(cve_id: str) -> int:
+    """The year embedded in a CVE id, or 0 when the id is malformed."""
+    match = re.match(r"CVE-(\d{4})-", cve_id.upper())
+    return int(match.group(1)) if match else 0
