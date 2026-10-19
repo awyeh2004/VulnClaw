@@ -954,6 +954,10 @@ _RARITY_CACHE: dict[str, Any] = {}
 #: on the TOKEN, which ``_tokenize`` has already split on punctuation, so a
 #: hostname arrives as its labels and the discriminating label is the long one.
 _IDENTIFIER_TOKEN_RE = re.compile(r"^(?=[a-z0-9]*\d)[a-z0-9]{12,}$")
+_UUID_TOKEN_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _is_identifier_token(token: str) -> bool:
@@ -962,9 +966,9 @@ def _is_identifier_token(token: str) -> bool:
     Requires at least 12 characters, alphanumerics only, and at least one digit.
     ``0b45310800c50ab708fff28f``, ``5f3a9c2e8b1d`` and ``t4k9m2p7`` qualify;
     ``weblogic``, ``deserialization`` and ``forensics`` do not (no digit or too
-    short).
+    short). Standard hyphenated UUIDs are identifiers too.
     """
-    return bool(_IDENTIFIER_TOKEN_RE.match(token))
+    return bool(_IDENTIFIER_TOKEN_RE.match(token) or _UUID_TOKEN_RE.match(token))
 
 
 def _document_frequencies() -> tuple[dict[str, int], int]:

@@ -98,6 +98,59 @@ class TestCheckpointReplAgent:
         assert "SQLi in /login" in titles, "checkpoint dropped an on-disk finding"
         assert store_mod is not None
 
+    def test_checkpoint_preserves_agent_state_facts_and_recon(
+        self, monkeypatch, tmp_path
+    ):
+        """A strict-subset checkpoint must not replace target-level progress."""
+        from vulnclaw.target_state.store import save_target_state
+
+        _isolate(monkeypatch, tmp_path)
+        rich = SessionState(target="victim.example")
+        rich.agent_state.completed = True
+        rich.agent_state.goal = "stored goal"
+        rich.agent_state.final_answer = "flag{stored}"
+        rich.confirmed_facts = ["fact-1"]
+        rich.recon_dimensions_completed["server"] = True
+        path = save_target_state("victim.example", rich, command="run")
+
+        agent = _FakeAgent(target="victim.example")
+        assert _checkpoint_repl_agent(agent, "run_complete") is not None
+
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert doc["agent_state"]["completed"] is True
+        assert doc["agent_state"]["goal"] == "stored goal"
+        assert doc["agent_state"]["final_answer"] == "flag{stored}"
+        assert doc["confirmed_facts"] == ["fact-1"]
+        assert doc["recon_dimensions_completed"]["server"] is True
+
+    def test_checkpoint_keeps_old_facts_when_a_new_goal_starts(
+        self, monkeypatch, tmp_path
+    ):
+        from vulnclaw.target_state.store import save_target_state
+
+        _isolate(monkeypatch, tmp_path)
+        rich = SessionState(target="victim.example")
+        rich.agent_state.completed = True
+        rich.agent_state.goal = "old goal"
+        rich.confirmed_facts = ["fact-1"]
+        rich.recon_dimensions_completed["server"] = True
+        path = save_target_state("victim.example", rich, command="run")
+
+        agent = _FakeAgent(target="victim.example")
+        agent.session_state.confirmed_facts = ["fact-2"]
+        agent.session_state.recon_dimensions_completed["website"] = True
+        agent.session_state.agent_state.reset_for_goal(
+            origin="repl", goal="new goal"
+        )
+        assert _checkpoint_repl_agent(agent, "step_complete") is not None
+
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert doc["agent_state"]["completed"] is False
+        assert doc["agent_state"]["goal"] == "new goal"
+        assert doc["confirmed_facts"] == ["fact-1", "fact-2"]
+        assert doc["recon_dimensions_completed"]["server"] is True
+        assert doc["recon_dimensions_completed"]["website"] is True
+
 
 class TestInterruptRetrieval:
     def test_done_task_exception_is_retrieved_and_ref_cleared(self):

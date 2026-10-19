@@ -247,7 +247,13 @@ def save_target_state(
     raw["target_model"] = model.to_manifest()
     raw["schema_version"] = TARGET_STATE_SCHEMA_VERSION
     if existing:
-        raw = _merge_target_state(existing, raw)
+        raw = _merge_target_state(
+            existing,
+            raw,
+            explicit_fields=set(session.model_fields_set)
+            | {"target", "target_model", "schema_version"},
+            agent_fields=set(session.agent_state.model_fields_set),
+        )
         raw["schema_version"] = max(
             int(existing.get("schema_version", TARGET_STATE_SCHEMA_VERSION)),
             TARGET_STATE_SCHEMA_VERSION,
@@ -743,14 +749,48 @@ def _build_resume_summary(raw: dict[str, Any], resume_meta: dict[str, Any]) -> s
     return "\n".join(parts)
 
 
-def _merge_target_state(existing: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+def _merge_unique(existing: list[Any], current: list[Any]) -> list[Any]:
+    merged = list(existing or [])
+    for item in current or []:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _merge_target_state(
+    existing: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    explicit_fields: set[str] | None = None,
+    agent_fields: set[str] | None = None,
+) -> dict[str, Any]:
+    explicit = set(explicit_fields if explicit_fields is not None else current)
     merged = dict(existing)
-    merged.update(current)
+    for key in explicit:
+        if key in current:
+            merged[key] = current[key]
+
+    if "agent_state" not in explicit and agent_fields:
+        base = dict(existing.get("agent_state") or {})
+        incoming = current.get("agent_state") or {}
+        for key in agent_fields:
+            if key in incoming:
+                base[key] = incoming[key]
+        merged["agent_state"] = base
 
     merged["recon_data"] = _merge_recon_data(
         existing.get("recon_data", {}), current.get("recon_data", {})
     )
     merged["findings"] = _merge_findings(existing.get("findings", []), current.get("findings", []))
+    merged["confirmed_facts"] = _merge_unique(
+        existing.get("confirmed_facts", []), current.get("confirmed_facts", [])
+    )
+    existing_dimensions = existing.get("recon_dimensions_completed", {}) or {}
+    current_dimensions = current.get("recon_dimensions_completed", {}) or {}
+    merged["recon_dimensions_completed"] = {
+        key: bool(existing_dimensions.get(key, False) or current_dimensions.get(key, False))
+        for key in set(existing_dimensions) | set(current_dimensions)
+    }
 
     # [P18 修改] 合并 step_records，不再合并 executed_steps
     # executed_steps 在序列化时会自动从 step_records 生成

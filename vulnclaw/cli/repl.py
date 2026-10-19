@@ -1871,20 +1871,15 @@ def _extract_target_from_input(user_input: str) -> Optional[str]:
         return local_path_match.group(1).rstrip("\\/")
 
     # 3) A bare token with a file-ish extension (zip, tar, gz, png, txt, …)
-    #    is a local file target, not a domain.
-    #    A real filename stem is either ASCII ("misc2.zip") or purely non-ASCII
-    #    ("报告.pdf") — never a CJK/ASCII mix, and never space-glued prose. The
-    #    old ``[\w\-. ]+`` class (``\w`` matches CJK, and the class allowed
-    #    spaces) absorbed the leading Chinese into the stem whenever a space
-    #    separated it from the filename: measured 2026-10-15,
-    #    ``_extract_target_from_input("请分析 target.zip 的漏洞")`` returned
-    #    "请分析 target.zip" — the same bogus *local file* retarget the adjacent
-    #    case fixed, only spaced. The lookbehind likewise refuses a start that is
-    #    the tail of a bigger word/path (CJK counts as ``\w``), so
-    #    "…使用console.log" never mines "console.log" here.
+    #    is a local file target, not a domain. The stem is Unicode-aware but
+    #    never contains spaces, so "请分析 target.zip 的漏洞" still mines only
+    #    "target.zip". The lookbehind refuses a start that is the tail of a
+    #    bigger word/path (CJK counts as ``\w``), so "…使用console.log" never
+    #    mines "console.log" here.
     for file_like_match in re.finditer(
         r"(?<![\w\-.])"
-        r"((?:[A-Za-z0-9_.\-]+|[\u4e00-\u9fff]+)"
+        r"((?:[^\W\d_\u4e00-\u9fff][\w.\-]*"
+        r"|[\u4e00-\u9fff][\u4e00-\u9fff0-9_.\-]*)"
         r"\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf))\b",
         stripped,
         flags=re.IGNORECASE,

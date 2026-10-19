@@ -299,6 +299,17 @@ class TestOverlapFloorWithRarity:
         rows = pb.lookup_playbook_multi([("target", "zip 密码")], limit=2)
         assert [r["slug"] for r in rows] == ["zip-note"]
 
+    def test_challenge_id_alone_recalls_its_note(self, store):
+        ref = TestCtf2RefTokens.REF
+        self._write(
+            store,
+            slug="challenge-id-note",
+            name="challenge",
+            fingerprint=f"{ref} capture the flag",
+        )
+        rows = pb.lookup_playbook_multi([("target", ref)], limit=1)
+        assert [r["slug"] for r in rows] == ["challenge-id-note"]
+
 
 # ── challenge id vs ground id（2026-10-19） ────────────────────────────────────
 #

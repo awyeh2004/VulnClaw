@@ -9,6 +9,8 @@ CJK in the file-like branch, and the domain branch lacked the agent layer's
 lookbehind + plausible-host guards (``input_analysis.detect_target``).
 """
 
+import pytest
+
 from vulnclaw.cli.repl import _extract_target_from_input
 
 
@@ -50,6 +52,18 @@ class TestRealTargetsStillMine:
 
     def test_cjk_stem_file_target(self):
         assert _extract_target_from_input("报告.pdf") == "报告.pdf"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "café.zip",
+            "résumé.pdf",
+            "Отчёт.zip",
+            "报告2024.pdf",
+        ],
+    )
+    def test_unicode_and_mixed_stem_file_targets(self, name):
+        assert _extract_target_from_input(name) == name
 
     def test_url_domain_ip_unchanged(self):
         # The URL branch has always kept the host only (no path) — unchanged.
