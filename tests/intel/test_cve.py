@@ -182,6 +182,61 @@ async def test_alias_resolves_to_a_cve_id_via_github(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_alias_detail_lookups_are_capped(monkeypatch):
+    """Ten alias ids must not become ten serial NVD rate-limit windows.
+
+    Measured 2026-10-19: each detail lookup costs 6.5 s without an API key, so
+    the uncapped sequence held the tool for ~32 s at the default limit of 5 and
+    over a minute at higher limits.
+    """
+
+    async def fake_exploits(query, **kw):
+        return [
+            {
+                "title": f"repo/{i}",
+                "url": f"https://x/{i}",
+                "description": f"about CVE-2021-{44000 + i}",
+                "stars": "1",
+            }
+            for i in range(10)
+        ]
+
+    calls = {"n": 0}
+
+    async def fake_lookup(cve_id, **kw):
+        calls["n"] += 1
+        return cve.CVEEntry(cve_id=cve_id, description=cve_id, cvss_score=1.0)
+
+    monkeypatch.setattr(cve, "search_exploits", fake_exploits)
+    monkeypatch.setattr(cve, "lookup_cve_id", fake_lookup)
+
+    entries, repos = await cve.resolve_alias_to_cves("what", max_results=10)
+
+    assert len(repos) == 10
+    assert calls["n"] == cve._ALIAS_DETAIL_LOOKUPS
+    assert len(entries) == cve._ALIAS_DETAIL_LOOKUPS
+
+
+@pytest.mark.asyncio
+async def test_alias_route_forwards_the_api_key(monkeypatch):
+    """With a key each detail lookup costs 0.6 s instead of 6.5 s."""
+    seen: list[str] = []
+
+    async def fake_exploits(query, **kw):
+        return [{"title": "r", "url": "u", "description": "CVE-2021-44228", "stars": "1"}]
+
+    async def fake_lookup(cve_id, **kw):
+        seen.append(kw.get("api_key", ""))
+        return cve.CVEEntry(cve_id=cve_id, description="d", cvss_score=1.0)
+
+    monkeypatch.setattr(cve, "search_exploits", fake_exploits)
+    monkeypatch.setattr(cve, "lookup_cve_id", fake_lookup)
+
+    await cve.resolve_alias_to_cves("log4shell", api_key="k")
+    assert seen == ["k"]
+
+
+@pytest.mark.asyncio
 async def test_alias_fallback_fires_only_when_nvd_is_empty(monkeypatch):
     """A keyword NVD DOES understand must not pay for a GitHub round trip."""
     calls = {"alias": 0}

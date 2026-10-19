@@ -194,15 +194,17 @@ _REGISTRY: list[dict] = [
         "rel": ("stego", "Extract.class"),
         "cmd": (
             'java --add-exports java.base/sun.security.provider=ALL-UNNAMED '
-            '-cp "E:\\vulnclaw\\tools\\stego" Extract'
+            '-cp "{dir}" Extract'
         ),
         # Why this entry exists (2026-10-18): JPEG F5 steganography is a BUUCTF
         # staple and the only extractor is F5.jar. Measured across two days of
         # logs, F5 was named in 52 of them -- the run would search the whole disk
         # for F5.jar, fail, and either give up or waste a stall window. The class
-        # files are now vendored under E:\vulnclaw\tools\stego so the tool is
+        # files are vendored under the configured tools root so the tool is
         # always present. `cmd` is a compound because the classes are loaded by
-        # class name from that directory (java needs the cwd).
+        # class name from their directory (java needs the classpath), which is
+        # why the template carries `{dir}` rather than `{path}` -- it used to
+        # hardcode one machine's tools root and broke on any other root.
         #
         # ``--add-exports`` is REQUIRED on JDK >= 9 (measured 2026-10-19, JDK 24).
         # Without it the tool does not start at all:
@@ -423,10 +425,19 @@ _IR_REGISTRY: list[dict] = [
 
 
 def _render_cmd(entry: dict, path: str | None) -> str:
-    """Substitute the resolved path into the entry's command template."""
+    """Substitute the resolved path into the entry's command template.
+
+    ``{path}`` is the resolved file, ``{dir}`` its parent directory -- for tools
+    that load classes by directory (F5's ``-cp "<dir>" Extract``). The entry used
+    to hardcode one machine's tools root, so a relocated bundle produced a card
+    that "found" F5 but could not run it (2026-10-19).
+    """
     template = entry.get("cmd") or entry["name"]
+    resolved = path or entry["name"]
     if "{path}" in template:
-        return template.replace("{path}", path or entry["name"])
+        template = template.replace("{path}", resolved)
+    if "{dir}" in template:
+        template = template.replace("{dir}", str(Path(resolved).parent))
     return template
 
 

@@ -192,6 +192,30 @@ def test_relative_detection_works_under_any_root(monkeypatch, tmp_path):
     assert str(root / "sqlmap" / "sqlmap.py") in found
 
 
+def test_render_cmd_dir_placeholder(tmp_path):
+    """`{dir}` is the resolved file's parent -- F5 loads classes by directory."""
+    stego = tmp_path / "stego"
+    entry = {"name": "x", "cmd": 'java -cp "{dir}" Extract'}
+    assert tr._render_cmd(entry, str(stego / "Extract.class")) == (
+        f'java -cp "{stego}" Extract'
+    )
+
+
+def test_f5_cmd_uses_the_detected_bundle_dir(monkeypatch, tmp_path):
+    """Regression (2026-10-19): the cmd hardcoded one machine's tools root, so a
+    relocated bundle produced a card that "found" F5 but could not run it."""
+    root = tmp_path / "bundles"
+    stego = root / "stego"
+    stego.mkdir(parents=True)
+    (stego / "Extract.class").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VULNCLAW_TOOLS_DIR", str(root))
+    entry = next(e for e in tr._REGISTRY if e["name"] == "F5 隐写 (F5.jar)")
+    found = tr._detect(entry)
+    assert found is not None
+    assert f'-cp "{stego}"' in found
+    assert "E:\\vulnclaw" not in found
+
+
 def test_glob_detection_works_under_any_root(monkeypatch, tmp_path):
     root = tmp_path / "bundles"
     (root / "hashcat-beta" / "6.2.6").mkdir(parents=True)

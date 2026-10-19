@@ -30,6 +30,13 @@ _NVD_RATE_LIMIT_WITH_KEY = 0.6
 _rate_lock = asyncio.Lock()
 _last_nvd_request = 0.0
 
+#: How many NVD detail calls the alias route may make per query. Each one costs a
+#: full rate-limit window (6.5 s without an API key -- measured 2026-10-19), so an
+#: alias that surfaces ten CVE ids would otherwise hold the tool for over a
+#: minute. The ids are ranked by how many GitHub repos mention them, and the
+#: alias's own CVE is practically always first, so three covers the mapping.
+_ALIAS_DETAIL_LOOKUPS = 3
+
 
 # ── Data model ───────────────────────────────────────────────────────────────
 
@@ -296,6 +303,7 @@ async def resolve_alias_to_cves(
     max_results: int = 5,
     exploit_repos: int = 8,
     timeout: float = 20.0,
+    api_key: str = "",
 ) -> tuple[list[CVEEntry], list[dict[str, str]]]:
     """Turn a colloquial alias (``log4shell``) into real CVE entries.
 
@@ -318,7 +326,9 @@ async def resolve_alias_to_cves(
 
     Returns ``(entries, repos)``. The CVE ids are ranked by how many of the
     returned repositories mention them, so a repo that merely bundles many
-    exploits (a "CVE collection") does not outvote the alias's own CVE.
+    exploits (a "CVE collection") does not outvote the alias's own CVE. At most
+    ``_ALIAS_DETAIL_LOOKUPS`` ids are fetched in detail: each lookup pays the
+    full NVD rate-limit window, and the alias's own CVE is ranked first anyway.
     """
     repos = await search_exploits(query, max_results=exploit_repos, timeout=timeout)
     if not repos:
@@ -332,8 +342,10 @@ async def resolve_alias_to_cves(
         return [], repos
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:max_results]
     entries: list[CVEEntry] = []
-    for cve_id, _ in ranked:
-        entry = await lookup_cve_id(cve_id, timeout=timeout, with_exploits=False)
+    for cve_id, _ in ranked[:_ALIAS_DETAIL_LOOKUPS]:
+        entry = await lookup_cve_id(
+            cve_id, api_key=api_key, timeout=timeout, with_exploits=False
+        )
         if entry is not None:
             entries.append(entry)
     return entries, repos
@@ -414,7 +426,9 @@ async def cve_lookup_tool(agent: Any, args: dict[str, Any]) -> str:
         # -> 0 hits, 'log4j' -> a list of decade-old CVEs), while GitHub does.
         # Without this the agent reads "No CVEs found" for a vulnerability that is
         # famous by exactly that name, and the "use a new CVE" path dies here.
-        alias_entries, repos = await resolve_alias_to_cves(query, max_results=limit)
+        alias_entries, repos = await resolve_alias_to_cves(
+            query, max_results=limit, api_key=api_key
+        )
         if alias_entries:
             report = format_cve_report(
                 alias_entries, title=f"CVE search: {query} (via alias → GitHub)"
