@@ -42,12 +42,13 @@ class TestThePromptDistinguishesHostFromNetwork:
         for word in ("mirror", "GitHub reimplementation", "specification"):
             assert word in JOINED, word
 
-    def test_the_licence_covers_tools_only(self):
-        """实测副作用（2026-10-19，同一道题）：不受限的"找替代来源"被读成"去找答案"。
+    def test_reading_a_writeup_is_allowed_for_the_method(self):
+        """操作者纠正（2026-10-19）：比赛里看别人怎么解是正常做法，该禁的是照抄结果。
 
-        下一轮 run 用四步刷 Bing/CSDN，提交了从别人题解抄来的数字。平台接受了，
-        但那不是这个 run 解出来的，而且它把提示本身要堵的口子重新打开了。
+        平台多数按实例重生成 flag，抄来的值本来就提交不了 —— 所以"禁看题解"既拦
+        错了东西（方法），又和完成门重复（抄来的值过不了证据门）。
         """
-        assert "tools and format documentation only" in JOINED.lower()
-        for forbidden in ("walkthrough", "题解"):
-            assert forbidden in JOINED, forbidden
+        low = JOINED.lower()
+        assert "reading how others solved this challenge is also allowed" in low
+        assert "regenerate flags per instance" in low
+        assert "is still giving up on derivation" not in low

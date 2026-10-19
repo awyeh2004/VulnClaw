@@ -307,3 +307,37 @@ class TestOnlyAPureSearchTurnCounts:
                 ("fetch", "https://www.bing.com/search?q=x+writeup"),
             )
         )
+
+
+class TestReadingIsAllowedUnlessItReplacesProbing:
+    """操作者纠正（2026-10-19）：比赛里查题解学方法是正常做法。
+
+    多数平台按实例重生成 flag，抄来的值本来就提交不了；完成门也已经在拦"无法
+    落到本次证据上的答案"。所以护栏不该因为"看过题解"就终止 run。
+
+    真正该拦的是**停止碰目标**：连续多轮只有读取/搜索、一次探测都没有。这也是
+    原始实测（90 次 run）里失败 run 的实际形态 —— 20/24 搜了题解，而且每一个
+    都在搜索期间继续烧轮次。
+    """
+
+    def test_the_policy_constant_documents_the_relaxation(self):
+        import inspect
+
+        from vulnclaw.agent import solver as _solver
+
+        src = inspect.getsource(_solver._solve_impl)
+        # The old two-strike hard stop must be gone.
+        assert "writeup_search_count >= 2" not in src
+        # The new threshold is three CONSECUTIVE resource-only turns.
+        assert "writeup_search_count >= 3" in src
+        # And the wording must not tell the model to stop reading for the method.
+        assert "cannot pass the completion gate" not in src
+
+    def test_the_counter_resets_after_a_real_probe_turn(self):
+        import inspect
+
+        from vulnclaw.agent import solver as _solver
+
+        src = inspect.getsource(_solver._solve_impl)
+        # A turn that probed must clear the streak, otherwise "consecutive" is a lie.
+        assert "state.writeup_search_count = 0" in src

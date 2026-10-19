@@ -1588,24 +1588,27 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         # One dead host is a fact about that host, not about the network, and
         # generalising it cancels every remaining avenue at once.
         #
-        # The paragraph is deliberately SCOPED TO TOOLS below: the first version said
-        # "look for the same artefact elsewhere" without that boundary, and the next
-        # measured run (same challenge) read it as licence to search for the answer --
-        # it spent four steps hammering Bing/CSDN and submitted a number copied from
-        # other people's writeups. The platform accepted it, but that is not the run
-        # solving anything, and it silently widens the loophole this prompt exists to
-        # close. Tool, mirror, specification: yes. Flag, walkthrough, 题解: no.
+        # The paragraph used to end with a hard prohibition on looking up the
+        # challenge ("tools and format documentation only"), written after a run
+        # copied a flag out of other people's writeups. Re-scoped 2026-10-19: that
+        # prohibition was too broad. Reading HOW others solved it is normal
+        # practice, and on platforms that regenerate flags per instance a copied
+        # value is worthless anyway -- the technique is the transferable part.
+        # What must not happen is treating the reading as the work: a value taken
+        # from a writeup cannot be grounded in this run's evidence, so the
+        # completion gate rejects it automatically. The prompt says that instead
+        # of forbidding the lookup.
         "**A failed connection is a fact about that HOST, not about the network.** "
         "Before concluding that outbound access is unavailable, try at least one "
-        "unrelated source and quote the distinct result. If a specific vendor site is "
-        "unreachable, look for the same TOOL from another source — a mirror, a GitHub "
-        "reimplementation, the format's specification or the vendor's own download "
-        "page — rather than treating the tool as unobtainable. **That licence covers "
-        "tools and format documentation only.** Searching for the challenge's flag, a "
-        "walkthrough, or a 题解 is still giving up on derivation: a copied value cannot "
-        "be grounded in this run's evidence, and the completion gate will reject it. "
-        "If you do hand the run back, say which hosts you tried; 'the network is "
-        "blocked' without a second host is a premise the operator cannot check."
+        "unrelated source and quote the distinct result. A dead vendor page does not "
+        "mean the tool is unobtainable — look for it on a mirror, a GitHub "
+        "reimplementation, or its format specification. Reading how others solved "
+        "this challenge is also allowed and often the fastest route to the METHOD; "
+        "just remember that most platforms regenerate flags per instance, so a value "
+        "copied from a writeup will not submit — take the technique and run it "
+        "against THIS target. If you do hand the run back, say which hosts you "
+        "tried; 'the network is blocked' without a second host is a premise the "
+        "operator cannot check."
     )
     playbook_instruction = (
         "\n\n# Solve Playbooks\n"
@@ -2648,18 +2651,27 @@ async def _solve_impl(
                 emit("undecided_angles", {"open": _no_path_open_angles(agent)})
         except Exception:
             pass
-        # The counter lives on AgentState and PERSISTS across steps; a local
-        # ``writeup_search_streak`` here would be reset every iteration and could
-        # never reach the threshold (it was written that way first and was dead
-        # code). Declared field, so this assignment cannot be silently refused.
+        # ── Looking up how others solved it ──────────────────────────────────────
         #
-        # Only a turn that did NOTHING BUT search counts. Measured 2026-10-19 on
-        # 荷兰宽带数据泄露: a turn carried 7-8 real probes (unpack the zip, test
-        # ECB, sweep AES/RC4 keys) plus one ``fetch`` of a Bing writeup page. The
-        # first version counted that as a surrender turn, so two such turns ended
-        # an actively-working run in 3 steps / 32 tool calls -- against 118 calls
-        # when the same challenge was allowed to grind. "Stopped deriving" means
-        # the search REPLACED the probes, not that it rode along with them.
+        # RE-SCOPED 2026-10-19 (operator correction, and the right call): reading
+        # a writeup to learn the METHOD is normal competition practice, not
+        # surrender. Most platforms regenerate flags per instance, so a copied
+        # flag is worthless anyway -- the value of a writeup is the technique it
+        # reveals, and blocking that costs more than it protects.
+        #
+        # What the measurement actually showed (90 runs, 2026-10-18) is narrower:
+        # 20 of 24 failed runs searched, and every one kept burning turns WHILE
+        # SEARCHING INSTEAD OF PROBING. The problem was never "copied" -- it was a
+        # run that stopped touching the target. So the only thing still enforced
+        # is that narrower shape: consecutive turns with NOTHING but reads/searches
+        # and no probe at all. A turn carrying real probes never counts, however
+        # many searches it also contains.
+        #
+        # The old hard stop at 2 was also wrong for a second reason: a copied flag
+        # is already rejected downstream by the completion gate (it cannot be
+        # grounded in this run's evidence), so ending the run early was redundant
+        # with a check that already exists -- and it killed runs that were still
+        # working (measured: 3 steps / 32 calls vs 118 calls on the same challenge).
         record_writeup_search = False
         try:
             recent = state.tool_calls[before_tools:]
@@ -2678,10 +2690,12 @@ async def _solve_impl(
             ]
             if searched and not other_work:
                 state.add_correction_hint(
-                    "You are searching for a writeup instead of solving. A copied "
-                    "answer cannot pass the completion gate (the flag must appear in "
-                    "THIS run's evidence), so this turn is spent for nothing. Go back "
-                    "to the recorded evidence and state the next concrete hypothesis."
+                    "You are reading source material this turn rather than probing the "
+                    "target. That is fine for learning the METHOD — most platforms "
+                    "regenerate flags per instance, so a value copied from a writeup "
+                    "will not submit anyway. What it cannot do is replace a probe: take "
+                    "the technique you just read and run it against THIS target, then "
+                    "record what it told you."
                 )
                 record_writeup_search = True
         except Exception:
@@ -2689,13 +2703,18 @@ async def _solve_impl(
         if record_writeup_search:
             state.writeup_search_count += 1
             emit("writeup_search", {"count": state.writeup_search_count})
-            if state.writeup_search_count >= 2:
+            # Three consecutive resource-only turns: the run has stopped touching
+            # the target entirely. That is the measured death shape, and it is what
+            # this guard is for -- not for having consulted a writeup.
+            if state.writeup_search_count >= 3:
                 reason = (
-                    "gave up deriving: the model searched for a writeup twice instead of "
-                    "solving from evidence; stopping rather than burning the run"
+                    "three consecutive turns of reading only, with no probe of the "
+                    "target at all; stopping rather than burning the remaining budget"
                 )
                 state.complete_reason = reason
                 break
+        else:
+            state.writeup_search_count = 0
 
         stall_guard_message = ""
         stop_for_stall = False
