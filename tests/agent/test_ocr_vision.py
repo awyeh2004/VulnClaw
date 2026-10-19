@@ -168,3 +168,26 @@ class TestOcrThreadOffload:
             "the double-checked lock is not serializing"
         )
         assert outputs == ["text"] * 4
+
+
+# ── OCR 不得输出伪造的置信度（2026-10-19 实测） ──────────────────────────────
+#
+# 旧输出形如 ``[+] easyocr: flagleasyccr_ok} (confidence=0.87)``，其中 confidence 是
+# **字母占字符的比例**，与识读是否正确毫无关系。实测在一张真值 ``flag{easyocr_ok}``
+# 的合成图上，easyocr 返回 ``flagleasyccr_ok}``（两处替换 + 丢一个花括号），而这个
+# 比值照样是 0.87 —— 也就是说，读错的时候它反而更高。
+#
+# 一个模型可以引用的假数字比没有数字更糟：它会据此认定"高置信度，可以直接提交"。
+# 改成明确的口径：不给分数，并且直说 OCR 会替换形近字形，flag 必须与另一来源核对。
+
+
+def test_ocr_does_not_report_a_fake_confidence(fake_deepseek_config):
+    from vulnclaw.agent.tools.ocr import execute_ocr
+
+    class _Agent:
+        pass
+
+    out = execute_ocr(_Agent(), {"image_path": TEST_IMG, "method": "auto"})
+    assert "confidence=" not in out, out
+    assert "no confidence score" in out, out
+    assert "lookalike glyphs" in out, out

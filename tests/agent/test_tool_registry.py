@@ -321,3 +321,34 @@ class TestIRSectionIsIntentGated:
         """
         for phrase in ("应急响应", "被入侵", "webshell查杀", "挖矿", "勒索信", "日志分析"):
             assert tr._is_ir_goal(phrase.lower()), phrase
+
+
+# ── 注册了 ≠ 能用：每个 vendored 工具都要能用它自己的 cmd 启动 ────────────────
+#
+# 2026-10-19 实测：F5 的注册项写成
+#     java -cp "E:\vulnclaw\tools\stego" Extract
+# 在 JDK 24 上**一启动就死**：
+#     IllegalAccessError: class crypt.F5Random cannot access class
+#     sun.security.provider.SecureRandom (in module java.base)
+# 工具确实在磁盘上、_detect 也确实返回了路径，所以"存在性检查"全绿——但 agent
+# 照注册的 cmd 敲下去只会拿到一堆 Java 栈，然后浪费一轮去猜别的方法。
+#
+# 这两条钉住 cmd 的可启动性，避免再出现"注册了但跑不起来"。
+
+
+class TestF5CommandIsActuallyRunnable:
+    def _entry(self):
+        return next(e for e in tr._REGISTRY if "F5" in e["name"])
+
+    def test_the_command_carries_add_exports(self):
+        """JDK >= 9 封闭了 sun.security.provider，不给出口就起不来。"""
+        assert "--add-exports" in self._entry()["cmd"], (
+            "F5 needs --add-exports java.base/sun.security.provider=ALL-UNNAMED "
+            "or it dies on any modern JDK"
+        )
+
+    def test_the_command_shape_matches_the_real_cli(self):
+        """Extract 的密码参数是 -p；Embed 的位置参数是 cover 与 out。"""
+        usage = self._entry()["usage"]
+        assert "-p <password> <image.jpg>" in usage, usage
+        assert "Embed <cover.jpg> -e <file> -p <pw> <out.jpg>" in usage, usage

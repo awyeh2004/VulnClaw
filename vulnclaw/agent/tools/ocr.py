@@ -77,8 +77,21 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
             try:
                 text = _ocr_with_cached_reader(_easyocr, image_path, lang)
                 if text.strip():
-                    confidence = len([c for c in text if c.isalpha()]) / max(len(text), 1)
-                    results.append(f"[+] easyocr: {text.strip()} (confidence={confidence:.2f})")
+                    # NOTE (2026-10-19): this used to report a "confidence" computed as
+                    # the share of alphabetic characters in the output. That is not a
+                    # confidence -- it says nothing about whether the model read the
+                    # image correctly, and it reads HIGHEST on exactly the wrong output.
+                    # Measured on a synthetic image whose true text is
+                    # ``flag{easyocr_ok}``: easyocr returned ``flagleasyccr_ok}``
+                    # (two substitutions plus a dropped brace) and still scored 0.87.
+                    # A fabricated number the model can quote is worse than none, so
+                    # the value is gone and the caveat below replaces it.
+                    results.append(
+                        f"[+] easyocr: {text.strip()} "
+                        "(no confidence score: OCR substitutes lookalike glyphs — "
+                        "0/O, l/1, {/l, }/J — so a flag read from an image must be "
+                        "confirmed against another source before submitting)"
+                    )
                     if method == "easyocr":
                         return "\n".join(results)
             except Exception as e:

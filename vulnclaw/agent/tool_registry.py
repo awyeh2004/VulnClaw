@@ -192,7 +192,10 @@ _REGISTRY: list[dict] = [
     {
         "name": "F5 隐写 (F5.jar)",
         "rel": ("stego", "Extract.class"),
-        "cmd": 'java -cp "E:\\vulnclaw\\tools\\stego" Extract',
+        "cmd": (
+            'java --add-exports java.base/sun.security.provider=ALL-UNNAMED '
+            '-cp "E:\\vulnclaw\\tools\\stego" Extract'
+        ),
         # Why this entry exists (2026-10-18): JPEG F5 steganography is a BUUCTF
         # staple and the only extractor is F5.jar. Measured across two days of
         # logs, F5 was named in 52 of them -- the run would search the whole disk
@@ -200,10 +203,18 @@ _REGISTRY: list[dict] = [
         # files are now vendored under E:\vulnclaw\tools\stego so the tool is
         # always present. `cmd` is a compound because the classes are loaded by
         # class name from that directory (java needs the cwd).
+        #
+        # ``--add-exports`` is REQUIRED on JDK >= 9 (measured 2026-10-19, JDK 24).
+        # Without it the tool does not start at all:
+        #   IllegalAccessError: class crypt.F5Random cannot access class
+        #   sun.security.provider.SecureRandom (in module java.base)
+        # The module system stopped exporting that package, so the registered
+        # command was silently unusable -- "tool exists" was not "tool works".
         "keywords": ["jpg", "jpeg", "隐写", "stego", "f5", "图片", "image", "藏"],
         "usage": '-p <password> <image.jpg> (提取; 默认密码 abc123); '
-                 'Embed -p <pw> -e <file> <cover.jpg> <out.jpg> (嵌入)',
-        "when": "JPEG 的 F5 隐写提取/嵌入。**别的工具都解不了 F5**：steghide/outguess 是不同算法",
+                 'Embed <cover.jpg> -e <file> -p <pw> <out.jpg> (嵌入)',
+        "when": "JPEG 的 F5 隐写提取/嵌入。**别的工具都解不了 F5**：steghide/outguess 是不同算法。"
+                "先试默认密码 abc123，不行再用 run 里的口令线索",
     },
     {
         "name": "二维码/条码识别 (pyzbar + cv2)",
