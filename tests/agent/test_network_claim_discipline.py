@@ -38,6 +38,16 @@ class TestThePromptDistinguishesHostFromNetwork:
         assert "without a second host" in JOINED
 
     def test_it_points_at_alternatives_to_a_dead_vendor_site(self):
-        """A dead vendor page must not mean "this artefact is unobtainable"."""
+        """A dead vendor page must not mean "this tool is unobtainable"."""
         for word in ("mirror", "GitHub reimplementation", "specification"):
-            assert word in SOURCE, word
+            assert word in JOINED, word
+
+    def test_the_licence_covers_tools_only(self):
+        """实测副作用（2026-10-19，同一道题）：不受限的"找替代来源"被读成"去找答案"。
+
+        下一轮 run 用四步刷 Bing/CSDN，提交了从别人题解抄来的数字。平台接受了，
+        但那不是这个 run 解出来的，而且它把提示本身要堵的口子重新打开了。
+        """
+        assert "tools and format documentation only" in JOINED.lower()
+        for forbidden in ("walkthrough", "题解"):
+            assert forbidden in JOINED, forbidden

@@ -1587,12 +1587,23 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         # answered 200 the whole time. It then handed the run back on that premise.
         # One dead host is a fact about that host, not about the network, and
         # generalising it cancels every remaining avenue at once.
+        #
+        # The paragraph is deliberately SCOPED TO TOOLS below: the first version said
+        # "look for the same artefact elsewhere" without that boundary, and the next
+        # measured run (same challenge) read it as licence to search for the answer --
+        # it spent four steps hammering Bing/CSDN and submitted a number copied from
+        # other people's writeups. The platform accepted it, but that is not the run
+        # solving anything, and it silently widens the loophole this prompt exists to
+        # close. Tool, mirror, specification: yes. Flag, walkthrough, 题解: no.
         "**A failed connection is a fact about that HOST, not about the network.** "
         "Before concluding that outbound access is unavailable, try at least one "
-        "unrelated source (a search engine, a GitHub raw/release URL, a mirror) and "
-        "quote the distinct result. If a specific vendor site is unreachable, look for "
-        "the same artefact elsewhere — alternative mirrors, a GitHub reimplementation, "
-        "or the format's specification — rather than treating the tool as unobtainable. "
+        "unrelated source and quote the distinct result. If a specific vendor site is "
+        "unreachable, look for the same TOOL from another source — a mirror, a GitHub "
+        "reimplementation, the format's specification or the vendor's own download "
+        "page — rather than treating the tool as unobtainable. **That licence covers "
+        "tools and format documentation only.** Searching for the challenge's flag, a "
+        "walkthrough, or a 题解 is still giving up on derivation: a copied value cannot "
+        "be grounded in this run's evidence, and the completion gate will reject it. "
         "If you do hand the run back, say which hosts you tried; 'the network is "
         "blocked' without a second host is a premise the operator cannot check."
     )
