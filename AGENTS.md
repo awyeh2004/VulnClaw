@@ -151,20 +151,24 @@ stall guard 的动作是**交还给人**（`waiting for user input`），不是�
 
 - CTF 杂物不要留在仓库根；附件统一放 `E:\vulnclaw\work\`。
 - 提交前 `git status` 查并行会话的未提交改动（本仓库常有多个会话同时工作）。
-- 全量测试（5117 条，**必须带 `-n`**）：
+- 全量测试（5117 条）：
 
   ```bash
-  python -X utf8 -m pytest -q -n 8        # 实测 3 分 08 秒（32 核）
-  python -X utf8 -m pytest -q             # 单进程 14 分 11 秒，别用它
+  python -X utf8 -m pytest -q -n 4        # 约 4–5 分钟，安全
+  python -X utf8 -m pytest -q             # 单进程 14 分 11 秒
   ```
 
-  `pytest-xdist` 已于 2026-10-19 安装。单进程那条慢在完全没有并行，不是测试太多：
-  曾统计过每个目录，最慢的是 agent 1590 条，但没有哪个目录能整批删掉——2026-09 写的
-  `test_playbook_overlap_gate.py` 在 2026-10-19 拦下过一次错误的召回改动，
-  旧测试恰好是护栏。日常改哪个模块就跑哪个目录（改 playbook 只跑 `-k playbook`，约 20 秒），
-  一天收尾跑一次全量。
+  **⚠️ `-n 必须保守，别按 CPU 核数开。** 2026-10-19 实测：本机 32 核、16 GB 内存，
+  跑 `-n 8` 时 `tests/agent/test_ocr_vision.py` 真的调用 easyocr，每个 worker 各自
+  加载一份 torch + OCR 模型（数百 MB），8 份叠加把内存顶满，整机卡死。选 `-n 4`
+  以内，且**不要同时跑别的分析任务**（并发的 python 会再叠一份）。内存紧张时用单进程。
+
+  单进程慢在完全没有并行，不是测试太多：统计过每个目录，最慢的是 agent 1590 条，
+  但没有哪个目录能整批删掉——2026-09 写的 `test_playbook_overlap_gate.py` 在
+  2026-10-19 拦下过一次错误的召回改动，旧测试恰好是护栏。日常改哪个模块就跑哪个目录
+  （改 playbook 只跑 `-k playbook`，约 10–20 秒），一天收尾跑一次全量。
 - 并发下偶发：`tests/config/test_token_provider.py::test_chatgpt_login_and_refresh`
-  在早期的单进程全量里失败过一次，单独跑与 `-n 8` 全量都通过。见到它失败先单独重跑再判断。
+  在早期的单进程全量里失败过一次，单独跑与并行全量都通过。见到它失败先单独重跑再判断。
 - **`.test-tmp/` 会随测试增长**（每次跑测试新建上百个目录，conftest 只清 12 小时前的）。
   磁盘紧张时直接 `rm -rf .test-tmp`，测试会重建。
 - `.ir-tools/` 是本地取证工具包（1.1 GB，已 gitignore），不在仓库内容里，**不要删**——
