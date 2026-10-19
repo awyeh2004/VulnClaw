@@ -278,3 +278,47 @@ class TestOverlapFloorWithRarity:
         self._write(store, "zip-note", "zip 密码 解密 filler")
         rows = pb.lookup_playbook_multi([("target", "zip 密码")], limit=2)
         assert [r["slug"] for r in rows] == ["zip-note"]
+
+
+# ── challenge id vs ground id（2026-10-19） ────────────────────────────────────
+#
+# `ctf2:practice:<ground>:<challenge>` 的两截性质不同：ground id 被该练习场里每道题
+# 共享（保留它会让兄弟题互相命中，这正是 `_is_id_fragment` 存在的理由），而
+# challenge id 只属于一道题。实测 520 条真实笔记里有 8 条指纹形如
+# `ctf2:practice:<ground>:<challenge> capture the flag 解出附件 flag（misc
+# forensics 取证 incident response）`，它们**留存的 token 全是全库通用词**
+# （df 7..236），八条 tokenize 出完全相同的 11 个 token —— 任何共享这些词的查询
+# 都在这八条里随机挑一条。能把它们分开的 challenge id 就写在指纹里，却被丢掉了。
+
+
+class TestCtf2RefTokens:
+    REF = (
+        "ctf2:practice:b9bbb32f-f186-458f-b90b-12440c0f6aea:"
+        "de24e64e-f3b2-4c9b-aea3-4def8290ff62"
+    )
+
+    def test_the_challenge_id_survives_tokenization(self):
+        toks = pb._tokenize(self.REF)
+        assert "de24e64e-f3b2-4c9b-aea3-4def8290ff62" in toks, toks
+
+    def test_the_ground_id_still_does_not(self):
+        """Keeping the ground id would put every sibling challenge back in collision."""
+        toks = pb._tokenize(self.REF)
+        assert "b9bbb32f" not in toks
+        assert "f186" not in toks
+        assert "12440c0f6aea" not in toks
+
+    def test_a_bare_practice_string_is_still_empty(self):
+        """No challenge segment -> no rescue (pinned by the older test above too)."""
+        assert pb._tokenize(
+            "ctf2 practice b9bbb32f-f186-458f-b90b-12440c0f6aea"
+        ) == set()
+
+    def test_two_sibling_notes_are_no_longer_identical(self):
+        """The measured defect: eight notes tokenized to the same eleven tokens."""
+        ground = "b9bbb32f-f186-458f-b90b-12440c0f6aea"
+        tail = " capture the flag 解出附件 flag（misc forensics 取证 incident response）"
+        a = pb._tokenize(f"ctf2:practice:{ground}:de24e64e-f3b2-4c9b-aea3-4def8290ff62{tail}")
+        b = pb._tokenize(f"ctf2:practice:{ground}:575d4eb2-67c3-4e08-bb18-1b1ded78a9c7{tail}")
+        assert a != b
+        assert len(a - b) == 1 and len(b - a) == 1

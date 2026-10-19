@@ -373,6 +373,21 @@ def _tokenize(fingerprint: str) -> set[str]:
             continue
         tokens.add(tok)
     tokens |= _cjk_tokens(text)
+    # A ctf2 ref is the one shape whose two halves differ in kind: the GROUND id is
+    # shared by every challenge in that ground (must stay filtered, or all siblings
+    # collide -- that is why ``_is_id_fragment`` exists), while the CHALLENGE id names
+    # exactly one challenge and nothing else. Measured 2026-10-19: 8 stored notes read
+    # ``ctf2:practice:<ground>:<challenge> capture the flag 解出附件 flag（misc
+    # forensics 取证 incident response）``. Every SURVIVING token was store-wide
+    # boilerplate (df 7..236 of 520) and all eight tokenized to the SAME eleven tokens,
+    # so a query sharing those words picked one of them at random -- while the
+    # challenge id that would have told them apart had been thrown away.
+    #
+    # Unconditional (not part of the empty-set fallback below): the defect is present
+    # whenever the remaining tokens are all generic, not only when there are none.
+    # Adding a per-challenge token cannot make siblings collide, because it is unique
+    # per challenge by construction.
+    tokens |= set(_CTF2_REF_CHALLENGE.findall(text))
     if tokens:
         return tokens
     # Filtering ate everything. Restore the raw tokens ONLY when the text is a URL
@@ -384,6 +399,11 @@ def _tokenize(fingerprint: str) -> set[str]:
     if "://" in text or "http" in text:
         return unfiltered | _cjk_tokens(text)
     return set()
+
+
+#: ``ctf2:practice:<ground-uuid>:<challenge-uuid>`` -- captures the CHALLENGE uuid
+#: only. Ground ids are per practice ground and are deliberately not captured.
+_CTF2_REF_CHALLENGE = re.compile(r"ctf2:practice:[0-9a-f-]{36}:([0-9a-f-]{36})")
 
 
 @dataclass
