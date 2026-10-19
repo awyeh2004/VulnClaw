@@ -293,12 +293,34 @@ def _is_id_fragment(tok: str) -> bool:
     ``f186`` and ``12440c0f6aea`` are id fragments, while ``cafe``, ``face``,
     ``dead`` and ``beef`` -- real words that happen to be hex -- survive
     because they contain no digit.
+
+    LENGTH matters, and the old code had no upper bound (measured 2026-10-19).
+    Dropping short slices is right: ``ctf2:practice:<ground-uuid>`` contributes the
+    SAME four-character groups to every challenge in that ground, so keeping them
+    made all siblings collide. A LONG hex run is the opposite kind of token -- a
+    content address:
+    ``E:\\vulnclaw\\work\\0f72e624...c836e6e72.zip sha256:a6021ade3ee77547`` is a
+    fingerprint whose only identifying words are the 64-character file digest and
+    its 16-character prefix, and both were discarded, leaving
+    ``{sha256, vulnclaw, work, zip}`` -- four words that every attachment-based
+    AutoNotes entry shares. 41 of 520 real notes had no unique token at all for
+    this reason. So the fragment rule applies up to ``_HEX_ID_MAX_LEN``; anything
+    longer is treated as a content-address identity and kept.
     """
     return (
-        len(tok) >= _HEX_ID_MIN_LEN
+        _HEX_ID_MIN_LEN <= len(tok) < _HEX_ID_MAX_LEN
         and bool(_HEX_TOKEN.fullmatch(tok))
         and any(ch.isdigit() for ch in tok)
     )
+
+
+#: Length at/above which a hex run is a CONTENT ADDRESS rather than a UUID slice.
+#: A UUID group is at most 12 characters (``12440c0f6aea``); the digest prefix a
+#: fingerprint stores is exactly 16 (``sha256:a6021ade3ee77547``) and a full
+#: sha256 is 64. So 16 is the first length that must be KEPT -- the comparison in
+#: ``_is_id_fragment`` is strict (``< 16``), which drops up to 15 characters and
+#: keeps 16 and above.
+_HEX_ID_MAX_LEN = 16
 
 
 def _slugify(text: str) -> str:

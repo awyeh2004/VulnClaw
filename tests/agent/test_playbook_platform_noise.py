@@ -322,3 +322,61 @@ class TestCtf2RefTokens:
         b = pb._tokenize(f"ctf2:practice:{ground}:575d4eb2-67c3-4e08-bb18-1b1ded78a9c7{tail}")
         assert a != b
         assert len(a - b) == 1 and len(b - a) == 1
+
+
+# ── 内容寻址：长哈希必须是身份，不能当 id 切片丢掉（2026-10-19） ────────────────
+#
+# `_is_id_fragment` 丢掉短 hex 切片是对的：`ctf2:practice:<ground-uuid>` 给该练习场
+# 里的每道题贡献**同样的**四字符组，留着它们会让所有兄弟题互相命中。
+#
+# 但长 hex 是另一类东西 —— 内容地址。实测 520 条真实笔记里有 41 条**没有任何唯一
+# token**，最典型的两族：
+#
+#   E:\vulnclaw\work\0f72e624...c836e6e72.zip sha256:a6021ade3ee77547
+#       -> 只剩 {sha256, vulnclaw, work, zip}，每条附件笔记都相同
+#   http://3c9c63a8a879d2e133bfc9de.http-ctf2.dasctf.com:80 capture the flag
+#       -> 主机标签被丢，只剩 {capture, flag}
+#
+# 一个有界规则同时修两族：<=16 字符仍按 UUID 切片丢弃，更长的按内容地址保留。
+
+
+class TestContentAddressTokens:
+    def test_a_full_sha256_is_kept(self):
+        toks = pb._tokenize(
+            r"E:\vulnclaw\work\0f72e6246f81990e9b6374f61d0dc94ee5a99d272014771a0ecf090c836e6e72.zip"
+        )
+        assert (
+            "0f72e6246f81990e9b6374f61d0dc94ee5a99d272014771a0ecf090c836e6e72" in toks
+        ), toks
+
+    def test_a_sixteen_char_digest_prefix_is_kept(self):
+        """The 16-char prefix a fingerprint stores is a content address too."""
+        toks = pb._tokenize("sha256:a6021ade3ee77547")
+        assert "a6021ade3ee77547" in toks, toks
+
+    def test_short_uuid_slices_are_still_dropped(self):
+        """The original fix must survive: siblings must not collide on a ground id."""
+        toks = pb._tokenize(
+            "ctf2:practice:b9bbb32f-f186-458f-b90b-12440c0f6aea"
+        )
+        assert toks == set(), toks
+
+    def test_the_boundary_is_exactly_the_uuid_group_length(self):
+        """12 = the longest UUID group (dropped); 17 = beyond it (kept)."""
+        assert pb._is_id_fragment("12440c0f6aea")
+        assert not pb._is_id_fragment("12440c0f6aeab1c2d")
+
+    def test_hex_looking_english_words_are_unaffected(self):
+        toks = pb._tokenize("cafe face dead beef feed")
+        assert {"cafe", "face", "dead", "beef", "feed"} <= toks, toks
+
+    def test_two_attachment_notes_are_no_longer_identical(self):
+        """The measured collision: every attachment note tokenized to the same four words."""
+        a = pb._tokenize(
+            r"E:\vulnclaw\work\0f72e6246f81990e9b6374f61d0dc94ee5a99d272014771a0ecf090c836e6e72.zip"
+        )
+        b = pb._tokenize(
+            r"E:\vulnclaw\work\aa433fd9c6ae18d81fe44c6658bfa65e676ae495aa250e8c0cbf13617ccdc60a.zip"
+        )
+        assert a != b
+        assert len(a ^ b) == 2, (a, b)
