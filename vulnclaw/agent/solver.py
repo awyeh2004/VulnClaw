@@ -1580,7 +1580,21 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "end up re-probing the same ground and burning turns. Two habits matter most: "
         "record the LOCK once a probe settles what the challenge actually is (it stops you "
         "from drifting), and close an ANGLE the moment you learn something from it. "
-        "Unrecorded work is not just invisible to the stall guard — it is invisible to you."
+        "Unrecorded work is not just invisible to the stall guard — it is invisible to you.\n"
+        # Measured 2026-10-19 (荷兰宽带数据泄露): the model wanted RouterPassView,
+        # tried `www.nirsoft.net`, got a timeout (that host IS unreachable from this
+        # network), and recorded the fact "outbound egress is blocked". GitHub
+        # answered 200 the whole time. It then handed the run back on that premise.
+        # One dead host is a fact about that host, not about the network, and
+        # generalising it cancels every remaining avenue at once.
+        "**A failed connection is a fact about that HOST, not about the network.** "
+        "Before concluding that outbound access is unavailable, try at least one "
+        "unrelated source (a search engine, a GitHub raw/release URL, a mirror) and "
+        "quote the distinct result. If a specific vendor site is unreachable, look for "
+        "the same artefact elsewhere — alternative mirrors, a GitHub reimplementation, "
+        "or the format's specification — rather than treating the tool as unobtainable. "
+        "If you do hand the run back, say which hosts you tried; 'the network is "
+        "blocked' without a second host is a premise the operator cannot check."
     )
     playbook_instruction = (
         "\n\n# Solve Playbooks\n"
