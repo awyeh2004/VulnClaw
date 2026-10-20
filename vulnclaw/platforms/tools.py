@@ -685,7 +685,16 @@ async def submit_flag_via(adapter: Any, ref: ChallengeRef, flag: Any) -> str:
     guard.record(ref.key, accepted=result.accepted, flag=text)
     verdict = "ACCEPTED" if result.accepted else "not accepted"
     message = f" ({result.message})" if result.message else ""
-    return f"[platform] flag {verdict} for {ref.token()}{message}\n" + _format(result.raw)
+    # Echo the submitted value. Measured 2026-10-19 (假如给我三天光明): after three
+    # rejections the run could not tell whether attempt 1 had sent the string it
+    # decoded or a typo of it -- the platform does not echo, and neither did this
+    # message, so the model spent a turn re-reading evidence to answer "what did I
+    # actually submit?". The value is already in the model's own tool call, so
+    # repeating it leaks nothing and makes every attempt checkable from the log.
+    return (
+        f"[platform] flag {verdict} for {ref.token()}{message}\n"
+        f"(submitted: {text})\n" + _format(result.raw)
+    )
 
 
 async def _handle_submit(args: dict[str, Any]) -> str:
