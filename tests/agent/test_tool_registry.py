@@ -376,3 +376,36 @@ class TestF5CommandIsActuallyRunnable:
         usage = self._entry()["usage"]
         assert "-p <password> <image.jpg>" in usage, usage
         assert "Embed <cover.jpg> -e <file> -p <pw> <out.jpg>" in usage, usage
+
+
+# ── "不可用"必须明说（2026-10-20 实测） ───────────────────────────────────────
+#
+# 九连环（JPEG 隐写）那轮：模型要用 steghide，本机没有，于是去找包管理器、启动
+# Docker Desktop、等守护进程 —— Docker 在这台机器上起不来，8 步和好几分钟全花在
+# 装工具上，最后人工停掉。卡里什么都没说，"没列出来"被理解成"还没找到，去找吧"。
+
+
+class TestUnavailableToolsAreStated:
+    def test_a_stego_goal_is_told_steghide_is_missing(self):
+        card = tr.build_tool_card("Solve CTF challenge '九连环' jpg 隐写", mode="ctf")
+        assert "NOT available on this host" in card
+        assert "steghide" in card
+        assert "Do not try to install" in card
+
+    def test_a_non_ctf_goal_still_gets_keyword_gating(self):
+        """ctf 模式无条件渲染（附件格式永远不出现在 goal 里）；别的模式仍按关键词。
+
+        实测依据：九连环 的 goal 是 "Solve CTF2 challenge '九连环' (category MISC,
+        difficulty Easy)"，一个 stego 关键词都没有——按关键词把关的话，那条把
+        8 步耗在装 steghide 上的 run 根本不会看到这条提示。
+        """
+        card = tr.build_tool_card("attack http://10.0.0.1, capture the flag", mode="auto")
+        assert "Docker Desktop cannot start" not in card
+
+    def test_a_ctf_goal_gets_the_block_even_without_keywords(self):
+        goal = "Solve CTF2 challenge '九连环' (category MISC, difficulty Easy)"
+        assert "NOT available on this host" in tr.build_tool_card(goal, mode="ctf")
+
+    def test_the_block_says_what_to_do_instead(self):
+        card = tr.build_tool_card("stego image 隐写", mode="ctf")
+        assert "FFD9" in card, card

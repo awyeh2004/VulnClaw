@@ -538,6 +538,34 @@ def _is_ir_goal(goal_lower: str) -> bool:
     return _match(goal_lower, list(IR_INTENT_KEYWORDS))
 
 
+#: Tools the goal will make the model reach for that this host CANNOT run, plus what
+#: to do instead. Rendered as an explicit "not available" block.
+#:
+#: Why this exists (measured 2026-10-20, 九连环): the model wanted steghide for a JPEG
+#: stego challenge. It was not installed, so the model went looking for a package
+#: manager, then launched Docker Desktop and waited for the daemon — which cannot
+#: start on this host. It burned 8+ steps and several minutes on the installation
+#: attempt before the run had to be stopped by hand. Nothing in the card said "this
+#: tool does not exist here"; silence reads as "not detected yet, go find it".
+#:
+#: Keep this list SHORT and factual: it states what the host lacks, not whether the
+#: technique is worth trying.
+_UNAVAILABLE: tuple[dict[str, Any], ...] = (
+    {
+        "name": "steghide / outguess / zsteg",
+        "keywords": [
+            "jpg", "jpeg", "隐写", "stego", "steghide", "outguess", "zsteg",
+            "图片", "image", "藏", "wav", "音频", "音频隐写",
+        ],
+        "why": "not installed; no package manager is available, and Docker Desktop "
+               "cannot start on this host (the CLI exists but the daemon never comes up)",
+        "instead": "carve appended/embedded data by hand (trailing bytes after FFD9 / "
+                   "RIFF end, PK\\x03\\x04 header, LSB planes), and for F5 use the F5 "
+                   "entry above. Do not try to install a package or start Docker.",
+    },
+)
+
+
 def build_tool_card(goal: str, mode: str = "auto") -> str:
     """Build the capability card for this goal. Returns empty string if no tools match.
 
@@ -598,10 +626,33 @@ def build_tool_card(goal: str, mode: str = "auto") -> str:
         card += "These are installed and verified. Use shell_command to invoke them.\n"
         card += "\n".join(ir_lines)
 
-    # bg_launch hint when cracking tools are relevant (attack-side only)
+    # ``bg_launch`` hint when cracking tools are relevant (attack-side only)
     if mode != "ir" and any(k in goal_lower for k in ["hash", "crack", "破解", "密码", "爆破"]):
         card += (
             "\n- ⭐ Long-running cracking: use `bg_launch` to run hashcat/john "
             "in the background while you continue exploring."
         )
+
+    # What this host does NOT have, stated up front. Without it, "not in the card"
+    # reads as "not found yet" and the model starts installing things -- measured
+    # 2026-10-20, see _UNAVAILABLE.
+    #
+    # In ``ctf`` mode this renders UNCONDITIONALLY, for the same reason `always`
+    # entries do: a challenge attachment's format never appears in the goal text.
+    # The measured case proves it -- the goal for 九连环 is "Solve CTF2 challenge
+    # '九连环' (category MISC, difficulty Easy)", which contains no stego keyword at
+    # all, so a keyword-gated block would never have fired on the run that wasted
+    # 8 steps trying to install steghide.
+    missing = [
+        entry
+        for entry in _UNAVAILABLE
+        if mode == "ctf" or _match(goal_lower, entry.get("keywords", []))
+    ]
+    if missing:
+        card += "\n\n## NOT available on this host — do not try to install\n"
+        for entry in missing:
+            card += (
+                f"- **{entry['name']}**: {entry['why']}. "
+                f"Instead: {entry['instead']}\n"
+            )
     return card
