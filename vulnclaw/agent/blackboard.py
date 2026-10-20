@@ -1066,6 +1066,36 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
 
 
 
+def _angle_not_found(bb: "Blackboard", node_id: str) -> str:
+    """Error text for hit/miss on an id that is not an angle, listing the real ones.
+
+    Measured 2026-10-20 (九连环): the model called ``blackboard_miss_angle`` with
+    ``n2`` -- an id that belonged to a different node -- and got only
+    ``[!] blackboard: angle n2 not found``. It had no way to recover inside the
+    same turn, so the two angles it had just opened stayed undecided and the stall
+    guard handed the run back. The open ids are one line of text; naming them turns
+    a dead end into a retry.
+    """
+    open_nodes = []
+    try:
+        open_nodes = bb.open_angles()
+    except Exception:
+        open_nodes = []
+    if not open_nodes:
+        return (
+            f"[!] blackboard: angle {node_id} not found — no ANGLE is currently open. "
+            "Create one with blackboard_create_angle before deciding it."
+        )
+    listed = "; ".join(
+        f"{n.id}: {str(getattr(n, 'description', '') or '')[:80]}" for n in open_nodes[:6]
+    )
+    extra = f" (+{len(open_nodes) - 6} more)" if len(open_nodes) > 6 else ""
+    return (
+        f"[!] blackboard: angle {node_id} not found — open ANGLE ids are: "
+        f"{listed}{extra}. Use one of those ids."
+    )
+
+
 async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: dict) -> str:
     """Dispatch a blackboard tool call to the blackboard instance bound to this agent."""
     bb = getattr(agent.runtime, "blackboard", None)
@@ -1207,7 +1237,7 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         node_id = args.get("node_id", "")
         node = bb.hit_angle(node_id)
         if not node:
-            return f"[!] blackboard: angle {node_id} not found"
+            return _angle_not_found(bb, node_id)
         if node.status != NodeStatus.CONFIRMED:
             return (
                 f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
@@ -1219,7 +1249,7 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
         node_id = args.get("node_id", "")
         node = bb.miss_angle(node_id)
         if not node:
-            return f"[!] blackboard: angle {node_id} not found"
+            return _angle_not_found(bb, node_id)
         if node.status != NodeStatus.CHALLENGED:
             return (
                 f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "

@@ -239,3 +239,68 @@ async def test_intent_tools_reject_non_intent_nodes():
     assert "is not an intent" in out
     out = await execute_mcp_tool(agent, "blackboard_start_intent", {"node_id": ""})
     assert "requires 'node_id'" in out
+
+
+# ── 裁决角度时传错 id：必须告诉它合法的 id（2026-10-20 实测） ─────────────────
+#
+# 九连环 那轮：模型调用 blackboard_miss_angle 传了 n2（实际是个 intent），只收到
+# "[!] blackboard: angle n2 not found"。它无法在同一轮里自我纠正，刚开的两个角度
+# 因此都没被裁决，stall guard 直接把 run 交还。合法 id 只是一行文本，点名能把
+# 死胡同变成一次重试。
+
+
+@pytest.mark.asyncio
+async def test_hit_angle_with_a_non_angle_id_lists_the_open_angles():
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+
+    bb = Blackboard()
+    bb.create_intent("some intent")  # n1 — a valid node, but not an ANGLE
+    first = bb.create_angle("recover plaintext by CRC")
+    second = bb.create_angle("brute force zipcrypto")
+    agent = SimpleNamespace(
+        runtime=SimpleNamespace(blackboard=bb), context=SimpleNamespace(state=None)
+    )
+
+    out = await dispatch_blackboard_tool(
+        agent, "blackboard_miss_angle", {"node_id": "n1"}
+    )
+    assert "not found" in out
+    assert first.id in out and second.id in out, out
+    assert "recover plaintext by CRC" in out, out
+    assert "Use one of those ids" in out, out
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_id_also_lists_the_open_angles():
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+
+    bb = Blackboard()
+    only = bb.create_angle("the only open angle")
+    agent = SimpleNamespace(
+        runtime=SimpleNamespace(blackboard=bb), context=SimpleNamespace(state=None)
+    )
+    out = await dispatch_blackboard_tool(
+        agent, "blackboard_hit_angle", {"node_id": "n42"}
+    )
+    assert only.id in out, out
+
+
+@pytest.mark.asyncio
+async def test_with_no_open_angles_it_says_so_instead_of_listing_nothing():
+    from types import SimpleNamespace
+
+    from vulnclaw.agent.blackboard import Blackboard, dispatch_blackboard_tool
+
+    bb = Blackboard()
+    agent = SimpleNamespace(
+        runtime=SimpleNamespace(blackboard=bb), context=SimpleNamespace(state=None)
+    )
+    out = await dispatch_blackboard_tool(
+        agent, "blackboard_miss_angle", {"node_id": "n7"}
+    )
+    assert "no ANGLE is currently open" in out, out
+    assert "blackboard_create_angle" in out, out
