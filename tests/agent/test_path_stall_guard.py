@@ -349,3 +349,52 @@ class TestHandbackNamesTheOpenAngles:
         )
         # No open angle -> the "no untried angle remains" branch.
         assert "Still open:" not in message, message
+
+
+class TestTheHintGetsRoomToBeObeyed:
+    """提示后必须留出"遵守"的时间，否则守规的 run 会被杀在动作中途。
+
+    实测（2026-10-20/21，15 个 run）：5 个以
+    "stalled with angles registered but none decided" 结束，每个都先跑了 98-116 次
+    工具调用（pcap 流重建、摩斯/john、payload 解码）。提示本身要求**两步**：先把
+    探过的面标成 HIT/MISS，再登记未试的。模型通常一步开角度、下一步才裁决——
+    而原来提示后只隔 1 轮就交还，等于只给了一轮做两步。
+
+    宽限期是有界的（_STALL_HINT_GRACE 轮），而且**开角度仍然不重置 streak**，
+    所以"不停开新角度"的规避路径依旧会撞墙。
+    """
+
+    def _agent(self):
+        bb = Blackboard()
+        bb.create_angle("a surface")
+        return FakeAgent(bb)
+
+    def test_nothing_is_said_during_the_grace_window(self):
+        from vulnclaw.agent.solver import _STALL_HINT_GRACE
+
+        for age in range(_STALL_HINT_GRACE):
+            action, message = _stall_guard_decision(
+                self._agent(), streak=8, hint_sent=True, thin_windows=0, hint_age=age
+            )
+            assert action == "silent", (age, action)
+            assert message == "", message
+
+    def test_the_handback_happens_once_the_grace_is_used_up(self):
+        from vulnclaw.agent.solver import _STALL_HINT_GRACE
+
+        action, message = _stall_guard_decision(
+            self._agent(),
+            streak=8,
+            hint_sent=True,
+            thin_windows=0,
+            hint_age=_STALL_HINT_GRACE,
+        )
+        assert action == "ask", action
+        assert "not advanced" in message
+
+    def test_the_grace_is_bounded(self):
+        """只要有界就仍会结束：age 再大也只会 ask，不会回到 silent。"""
+        action, _ = _stall_guard_decision(
+            self._agent(), streak=99, hint_sent=True, thin_windows=0, hint_age=999
+        )
+        assert action == "ask"

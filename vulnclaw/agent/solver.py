@@ -803,12 +803,30 @@ def _no_path_coverage_thin(agent: AgentState) -> bool:
     return angles == 0 and facts < 2
 
 
+#: Turns to wait after the stall hint before handing the run back.
+#:
+#: Measured 2026-10-20/21 over 15 runs: 5 ended as "stalled with angles registered
+#: but none decided", every one of them after 98-116 tool calls of real analysis
+#: (pcap stream reconstruction, morse/john attempts, payload decoding). The guard's
+#: own hint asks for TWO actions -- mark the surfaces already probed, then register
+#: the untried ones -- and the model typically needs one turn to open the ANGLES and
+#: the NEXT one to decide them. With an immediate handback there was exactly one turn
+#: to do both, so a run that was complying got killed mid-compliance.
+#:
+#: Three turns keeps the guard bounded (it still always ends) while leaving room for
+#: that two-step response. The original anti-evasion argument is untouched: opening
+#: an angle still does not reset the streak, so a run that opens angles forever still
+#: hits this wall.
+_STALL_HINT_GRACE = 3
+
+
 def _stall_guard_decision(
     agent: AgentState,
     *,
     streak: int,
     hint_sent: bool,
     thin_windows: int,
+    hint_age: int = _STALL_HINT_GRACE,
 ) -> tuple[str, str]:
     """What the path-stall guard does now: ``("silent"|"hint"|"ask", message)``.
 
@@ -882,6 +900,12 @@ def _stall_guard_decision(
             "throttling front makes results look uninformative -- prefer one slower, "
             "decisive probe over many more of the same."
         )
+
+    # The hint asked for two steps (decide what was probed, then register what was
+    # not). Give it the turns to do both -- see _STALL_HINT_GRACE. Silence here is
+    # deliberate: repeating the same nudge every turn trains the model to ignore it.
+    if hint_age < _STALL_HINT_GRACE:
+        return "silent", ""
 
     # The nudge was already given and the path STILL has not advanced, while angles
     # remain open. This used to return "silent" -- i.e. an open angle was treated as
@@ -2523,6 +2547,8 @@ async def _solve_impl(
     path_stall_streak = 0
     path_stall_hint_sent = False
     path_stall_thin_windows = 0
+    # Turns elapsed since the stall hint (see _STALL_HINT_GRACE).
+    path_stall_hint_age = 0
     last_path_fingerprint: tuple | None = None
     needs_user = False
     reason = "runaway safety budget reached"
@@ -2856,10 +2882,13 @@ async def _solve_impl(
         fingerprint = _path_progress_fingerprint(agent)
         if fingerprint == last_path_fingerprint:
             path_stall_streak += 1
+            if path_stall_hint_sent:
+                path_stall_hint_age += 1
         else:
             path_stall_streak = 0
             path_stall_hint_sent = False
             path_stall_thin_windows = 0
+            path_stall_hint_age = 0
             last_path_fingerprint = fingerprint
 
         stall_action, stall_message = _stall_guard_decision(
@@ -2867,11 +2896,13 @@ async def _solve_impl(
             streak=path_stall_streak,
             hint_sent=path_stall_hint_sent,
             thin_windows=path_stall_thin_windows,
+            hint_age=path_stall_hint_age,
         )
         if stall_action == "hint":
             state.add_correction_hint(stall_message)
             stall_guard_message = f"[path stall] {stall_message}"
             path_stall_hint_sent = True
+            path_stall_hint_age = 0
             emit("stall_guard", {
                 "action": "hint",
                 "streak": path_stall_streak,
