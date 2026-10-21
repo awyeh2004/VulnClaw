@@ -220,3 +220,22 @@ def test_ctf2_goal_still_forbids_attacking_the_platform(captured_solve, monkeypa
     assert FORBIDDEN_BLANKET_BAN not in goal
     assert "out of bounds" in goal
     assert "no scanning or" in goal
+
+
+def test_ctf2_forwards_operator_hints(captured_solve, monkeypatch):
+    """--hint 必须真的到达 run，而不是被 sentinel 吞掉。
+
+    操作者用它给卡住的 run 喂一个假设（例如 flag 格式），而不必自己提交 ——
+    AGENTS.md 的角色分工是"给提示或改代码，不要接管"。默认值必须解包成 []，
+    否则 `list(OptionInfo)` 直接抛 "not iterable"（本命令的真实回归）。
+    """
+    async def fake_read(practice_id, challenge_id):
+        return {"data": {"name": "stack"}}
+
+    monkeypatch.setattr(main, "ctf2_read_challenge", fake_read)
+    main.ctf2("challenge-id", "practice-id", hint=["flag 可能是 CTF2{} 形式"])
+    assert captured_solve["hint"] == ["flag 可能是 CTF2{} 形式"]
+
+    # And the default (sentinel when called from Python) must be a real list.
+    main.ctf2("challenge-id", "practice-id")
+    assert captured_solve["hint"] == []

@@ -30,6 +30,12 @@ def ctf2(
     max_steps: int = typer.Option(
         240, "--max-steps", help="Runaway safety budget for autonomous turns"
     ),
+    hint: list[str] = typer.Option(
+        [],
+        "--hint",
+        help="Operator hint injected into the run (repeatable). Use it to steer a "
+        "stuck run -- e.g. a flag-format hypothesis -- without taking the solve over.",
+    ),
 ) -> None:
     """Solve a CTF2 (DASCTF) challenge directly from its ids.
 
@@ -147,6 +153,10 @@ def ctf2(
             target=ref_token,
             goal=goal,
             max_steps=_from_main("_cli_value")(max_steps, 240),
+            # Same sentinel problem as every other flag here: when `ctf2()` is called
+            # from Python the default is a truthy `OptionInfo`, and `list()` on it
+            # raises "not iterable". `_cli_value` unwraps it to the real default.
+            hint=_from_main("_cli_value")(hint, []),
             resume=False,
         )
     )

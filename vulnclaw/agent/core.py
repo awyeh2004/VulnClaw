@@ -866,6 +866,7 @@ class AgentCore:
         stream_sink: Optional["StreamSink"] = None,
         on_event: Optional[Callable[[str, dict], None]] = None,
         task_constraints: Optional[TaskConstraints] = None,
+        hints: Optional[list[str]] = None,
     ) -> Any:
         """运行模型主导 solve。"""
         from vulnclaw.agent.solver import solve as run_solve
@@ -890,6 +891,7 @@ class AgentCore:
                 max_tool_rounds=max_tool_rounds,
                 stream_sink=stream_sink,
                 on_event=on_event,
+                hints=hints,
             )
         except BaseException:
             # Ctrl+C (or any error escaping the loop) cancels this coroutine, and

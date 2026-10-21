@@ -521,6 +521,12 @@ def solve(
             "'glm' (force glm-5.3), or 'ds' (force deepseek-v4-pro)"
         ),
     ),
+    hint: list[str] = typer.Option(
+        [],
+        "--hint",
+        help="Operator hint injected into the run (repeatable). Steers a stuck run "
+        "without taking the solve over.",
+    ),
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = _from_main("load_config")()
@@ -562,6 +568,7 @@ def solve(
                 max_tool_rounds=max_tool_rounds,
                 stream_sink=sink,
                 on_event=on_event,
+                hints=list(hint or []),
             )
             holder["agent_state"] = agent.context.state.agent_state.get_summary()
             holder["agent"] = agent
