@@ -2416,13 +2416,25 @@ async def solve(
     # the token burn (seen in practice). Stale locks (dead pid) auto-clear.
     lock_holder = _acquire_solve_lock(origin)
     if lock_holder is not None:
+        blocked_reason = (
+            f"another solve run is active for this target "
+            f"(pid {lock_holder.get('pid')}, started {lock_holder.get('started')}); "
+            "stop it first or wait for it to finish"
+        )
+        # Record it on the state as well. Measured 2026-10-21: this branch set only
+        # `SolveResult.reason`, while the CLI prints `agent_state.complete_reason`
+        # -- so a lock-blocked run showed "⊘ 未达成 ... 原因: 仍未达到完成条件"
+        # (the generic placeholder) with steps=0, giving no hint that another
+        # process held the lock. Twice today that read as "the agent did nothing"
+        # and cost a manual investigation. One line here makes the cause visible
+        # where the operator actually looks.
+        try:
+            agent.context.state.agent_state.complete_reason = blocked_reason
+        except Exception:
+            pass
         return SolveResult(
             completed=False,
-            reason=(
-                f"another solve run is active for this target "
-                f"(pid {lock_holder.get('pid')}, started {lock_holder.get('started')}); "
-                "stop it first or wait for it to finish"
-            ),
+            reason=blocked_reason,
             steps=0,
             evidence=0,
             agent_state=agent.context.state.agent_state,

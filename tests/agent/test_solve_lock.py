@@ -193,3 +193,43 @@ def test_concurrent_instances_cannot_both_acquire(tmp_path):
         f"({results})"
     )
     assert results.count("blocked") == racers - 1
+
+
+@pytest.mark.asyncio
+async def test_a_lock_blocked_run_says_so_where_the_operator_looks(lock_dir):
+    """steps=0 时必须说清"另一个 run 占着锁"，而不是通用的"仍未达到完成条件"。
+
+    实测（2026-10-21，两次）：被锁挡住的 run 只把原因写进 `SolveResult.reason`，
+    而 CLI 打印的是 `agent_state.complete_reason` —— 于是面板显示
+    "⊘ 未达成 … 原因: 仍未达到完成条件"，steps=0、零证据，看起来像"agent 什么都没做"，
+    两次都被误读成需要人工排查。
+    """
+    from types import SimpleNamespace
+
+    path = solver._solve_lock_path(TARGET)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A LIVE holder that is NOT this process: the guard treats a lock naming its
+    # own pid as "mine" and overwrites it, so the test must use a different live
+    # pid. The parent process is alive for the duration of the test.
+    other_pid = os.getppid()
+    holder = {
+        "pid": other_pid,
+        "start": solver._process_start_token(other_pid) or "",
+        "target": TARGET,
+        "started": "00:00:00",
+    }
+    _write(path, holder)
+    assert not solver._lock_is_stale(holder), "the fixture must present a LIVE holder"
+
+    from vulnclaw.agent.agent_state import AgentState
+
+    state = AgentState()
+    agent = SimpleNamespace(
+        context=SimpleNamespace(state=SimpleNamespace(agent_state=state))
+    )
+    result = await solver.solve(agent, origin=TARGET, goal="g", max_steps=1)
+
+    assert result.steps == 0
+    assert "another solve run is active" in result.reason
+    # The line the CLI actually prints:
+    assert "another solve run is active" in state.complete_reason, state.complete_reason
