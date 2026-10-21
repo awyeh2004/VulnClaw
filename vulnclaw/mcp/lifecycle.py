@@ -21,7 +21,7 @@ from vulnclaw.config.source_render import render_highlighted_source_block
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V1 违规 — mcp/ 基础设施层不应反向依赖 agent/ 领域层，
 #          改为从 config/url_utils.py 导入纯 URL 工具函数。
-from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url
+from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url, is_research_host
 from vulnclaw.mcp._probe_mixin import ProbeMixin
 from vulnclaw.mcp.registry import HealthStatus, MCPRegistry
 from vulnclaw.mcp.session_owner import OwnedMcpSession, _describe_exception
@@ -178,7 +178,29 @@ class MCPLifecycleManager(ProbeMixin):
         if port is None:
             port = None
 
-        if constraints.allowed_hosts and host and not host_in_scope(host, constraints.allowed_hosts):
+        # ── Read-only research is not part of the engagement scope ───────────
+        #
+        # Measured 2026-10-21 (piapiapia): with a challenge target set, the run's
+        # allowed_hosts is exactly that instance, so `fetch` of
+        # html.duckduckgo.com and api.github.com both came back
+        # `constraint_violation`. That is the wrong boundary: looking up HOW
+        # something is done is normal practice and is explicitly permitted (see
+        # the writeup policy in solver.py) — what the scope gate exists to bound
+        # is traffic sent AT a target, not reading public documentation.
+        #
+        # The escalation surface this must not open: an attacker-controlled page
+        # fetched from a research host is still just a GET to that host, and
+        # `blocked_hosts` is checked FIRST below, so an operator who forbids a
+        # host still forbids it here. Attack tools (http_probe_batch / nmap /
+        # brute force) are untouched — they do not go through this method.
+        research = is_research_host(host)
+
+        if (
+            not research
+            and constraints.allowed_hosts
+            and host
+            and not host_in_scope(host, constraints.allowed_hosts)
+        ):
             allowed_hosts = ", ".join(constraints.allowed_hosts)
             return self._tool_result(
                 ok=False,

@@ -124,3 +124,58 @@ def _safe_parsed_port(parsed: Any) -> int | None:
     if parsed.scheme == "http":
         return 80
     return None
+
+
+#: Hosts that serve public documentation / source / vulnerability data / web search.
+#:
+#: Why a scope EXEMPTION list lives in this module (2026-10-21): the engagement
+#: scope exists to bound traffic sent AT a target. Reading how something is done is
+#: normal practice and is explicitly permitted by the solve loop's writeup policy,
+#: but with a challenge target set, ``allowed_hosts`` is exactly that one instance
+#: -- so a ``fetch`` of ``api.github.com`` or ``html.duckduckgo.com`` came back
+#: ``constraint_violation`` and the run lost its research channel entirely.
+#:
+#: This lives here rather than in ``agent/`` because ``mcp/`` must not import the
+#: agent layer (see the note at the top of ``mcp/lifecycle.py``).
+#:
+#: An attacker-controlled page fetched from one of these hosts is still just a GET
+#: to that host, and ``blocked_hosts`` is evaluated BEFORE this list, so an operator
+#: who forbids a host still forbids it. Attack tools never consult this list.
+RESEARCH_HOSTS: tuple[str, ...] = (
+    # source / advisory
+    "github.com",
+    "raw.githubusercontent.com",
+    "githubusercontent.com",
+    "gitee.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "sourceforge.net",
+    "pypi.org",
+    "vulhub.org",
+    "nvd.nist.gov",
+    "cve.mitre.org",
+    "cve.org",
+    "cvedetails.com",
+    "exploit-db.com",
+    "packetstormsecurity.com",
+    "readthedocs.io",
+    "wikipedia.org",
+    # web search (the measured case)
+    "duckduckgo.com",
+    "bing.com",
+    "google.com",
+    "baidu.com",
+    "so.com",
+)
+
+
+def is_research_host(host: str) -> bool:
+    """Whether ``host`` is a public research/documentation/search host.
+
+    Suffix-matched like :func:`host_in_scope`, so ``html.duckduckgo.com`` and
+    ``api.github.com`` both qualify while ``evil-github.com`` does not.
+    """
+    host = (host or "").lower().rstrip(".")
+    if not host:
+        return False
+    return any(host == ref or host.endswith("." + ref) for ref in RESEARCH_HOSTS)

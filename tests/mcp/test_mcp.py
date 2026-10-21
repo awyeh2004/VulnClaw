@@ -889,3 +889,90 @@ class TestTheKillIsWaitedFor:
         await manager._terminate_process(proc)
 
         assert proc.signals == [], "a dead process must not be signalled at all"
+
+
+class TestResearchHostsAreNotPartOfTheEngagementScope:
+    """查资料不属于"对目标发流量"，不该被靶机范围门拦（2026-10-21 实测）。
+
+    piapiapia 那轮：靶机是 `fc9f2bf7....http-ctf2.dasctf.com`，于是
+    `allowed_hosts` 就只有它；run 想查 `html.duckduckgo.com` 和 `api.github.com`
+    都拿到 `constraint_violation`，研究通道整个被切断。而"读别人怎么解"是被明确
+    允许的（见 solver 的 writeup 策略）。
+
+    要守住的边界：`blocked_hosts` 优先（操作者明令禁止的主机仍然禁止），靶机自身的
+    越界仍然拦，攻击类工具完全不走这条路径。
+    """
+
+    def _manager(self, constraints):
+        from vulnclaw.config.schema import (
+            BUILTIN_MCP_SERVERS,
+            MCPServerConfig,
+            VulnClawConfig,
+        )
+        from vulnclaw.mcp.lifecycle import MCPLifecycleManager
+
+        manager = MCPLifecycleManager(VulnClawConfig())
+        manager.registry.register_server("fetch")
+        manager._start_server("fetch", MCPServerConfig(**BUILTIN_MCP_SERVERS["fetch"]))
+        manager.set_task_constraints(constraints)
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_a_search_engine_is_reachable_under_a_challenge_scope(self):
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(allowed_hosts=["abc.http-ctf2.dasctf.com"], strict_mode=True)
+        )
+        guard = manager._check_fetch_constraints({"url": "https://html.duckduckgo.com/html/?q=x"})
+        assert guard is None, guard
+
+    @pytest.mark.asyncio
+    async def test_a_code_host_is_reachable_under_a_challenge_scope(self):
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(allowed_hosts=["abc.http-ctf2.dasctf.com"], strict_mode=True)
+        )
+        guard = manager._check_fetch_constraints(
+            {"url": "https://api.github.com/search/code?q=x"}
+        )
+        assert guard is None, guard
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_outsider_is_still_refused(self):
+        """放宽只针对公认的研究站点，别的一律照旧。"""
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(allowed_hosts=["abc.http-ctf2.dasctf.com"], strict_mode=True)
+        )
+        guard = manager._check_fetch_constraints({"url": "https://evil.test/x"})
+        assert guard is not None
+        assert guard["error_type"] == "constraint_violation"
+
+    @pytest.mark.asyncio
+    async def test_blocked_hosts_still_win_over_the_exemption(self):
+        """操作者明令禁止的主机，即使是研究站点也照禁。"""
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(
+                allowed_hosts=["abc.http-ctf2.dasctf.com"],
+                blocked_hosts=["github.com"],
+                strict_mode=True,
+            )
+        )
+        guard = manager._check_fetch_constraints({"url": "https://api.github.com/x"})
+        assert guard is not None, "blocked must be evaluated first"
+        assert "blocked" in guard["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_lookalike_domain_is_not_exempt(self):
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(allowed_hosts=["abc.http-ctf2.dasctf.com"], strict_mode=True)
+        )
+        guard = manager._check_fetch_constraints({"url": "https://evil-github.com/x"})
+        assert guard is not None
