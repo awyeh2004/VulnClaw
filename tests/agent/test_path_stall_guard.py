@@ -362,6 +362,13 @@ class TestTheHintGetsRoomToBeObeyed:
 
     宽限期是有界的（_STALL_HINT_GRACE 轮），而且**开角度仍然不重置 streak**，
     所以"不停开新角度"的规避路径依旧会撞墙。
+
+    2026-10-21 修正的是计数语义，不是宽限的长度：hint 那一轮 age=0；之后每一轮
+    silent 才把 age+1。所以 hint 之后**真正有 _STALL_HINT_GRACE 轮**不会交还，
+    第 _STALL_HINT_GRACE 轮之后才 ask。原来的实现在判定前先自增，第一个 silent
+    轮就已经是 age=1，等于实际只宽限了 _STALL_HINT_GRACE-1 轮——正是那 5 个
+    "stalled with angles registered but none decided" 里守规的 run 被杀在动作
+    中途的直接原因。
     """
 
     def _agent(self):
@@ -398,3 +405,49 @@ class TestTheHintGetsRoomToBeObeyed:
             self._agent(), streak=99, hint_sent=True, thin_windows=0, hint_age=999
         )
         assert action == "ask"
+
+
+class TestEveryHandbackPathHonoursTheGrace:
+    """宽限必须作用在**每一条**交还路径上，不只是其中一条。
+
+    实测（2026-10-22，萌萌哒的八戒）：提示 17:58:01 发出，17:58:39 就交还 —— 38 秒、
+    一轮。原因是我第一版只给"有未裁决角度"那条分支加了宽限，而这次走的是
+    "黑板全空"（thin board）分支，它仍然一轮后 ask。同一类缺陷，同一个修复。
+
+    三条路径都要覆盖：thin board、无开角度、有开角度。
+    """
+
+    def test_thin_board_goes_silent_during_the_grace(self):
+        from vulnclaw.agent.solver import _STALL_HINT_GRACE
+
+        # Empty board = thin; hint already delivered once.
+        for age in range(_STALL_HINT_GRACE):
+            action, _msg = _stall_guard_decision(
+                FakeAgent(_bb()), streak=8, hint_sent=True, thin_windows=1, hint_age=age
+            )
+            assert action == "silent", (age, action)
+
+    def test_thin_board_hands_back_after_the_grace(self):
+        from vulnclaw.agent.solver import _STALL_HINT_GRACE
+
+        action, msg = _stall_guard_decision(
+            FakeAgent(_bb()),
+            streak=8,
+            hint_sent=True,
+            thin_windows=1,
+            hint_age=_STALL_HINT_GRACE,
+        )
+        assert action == "ask", action
+        assert "blackboard is" in msg
+
+    def test_the_no_open_angle_path_also_waits(self):
+        from vulnclaw.agent.solver import _STALL_HINT_GRACE
+
+        bb = Blackboard()
+        a = bb.create_angle("closed by this run")
+        bb.miss_angle(a.id)
+        for age in range(_STALL_HINT_GRACE):
+            action, _ = _stall_guard_decision(
+                FakeAgent(bb), streak=8, hint_sent=True, thin_windows=0, hint_age=age
+            )
+            assert action == "silent", (age, action)

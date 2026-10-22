@@ -876,6 +876,12 @@ def _stall_guard_decision(
                 "Step 1 is the one that matters: deciding an angle is proof a path was "
                 "resolved, opening one is only a promise to look."
             )
+        # Same grace as the branch below. Measured 2026-10-22 (萌萌哒的八戒): this
+        # path went straight to "ask" one turn after its hint -- 17:58:01 hint,
+        # 17:58:39 handback, 38 seconds -- while the model was still working out
+        # what to record. The two-step instruction needs the same room here.
+        if hint_age < _STALL_HINT_GRACE:
+            return "silent", ""
         return "ask", (
             f"The current path has not advanced for {streak} turns and the blackboard is "
             "still empty: no ANGLE node has been recorded, so I cannot tell you whether an "
@@ -884,6 +890,11 @@ def _stall_guard_decision(
         )
 
     if _no_path_open_angles(agent) == 0:
+        # Grace applies on every path that hands the run back, not just the one
+        # below: the model gets the same few turns to register something after
+        # being nudged, whichever branch produced the nudge.
+        if hint_age < _STALL_HINT_GRACE:
+            return "silent", ""
         return "ask", (
             f"The current path has not advanced for {streak} turns "
             "(no confirmed fact and no angle decided), and no untried angle "
@@ -2397,6 +2408,28 @@ def _prepare_state(agent: AgentContext, *, origin: str, goal: str) -> AgentState
     return state
 
 
+def _record_operator_hints(state: AgentState, hints: Optional[list[str]]) -> None:
+    """Record ``--hint`` text on ``AgentState.operator_hints``.
+
+    Own field, NOT ``compact_summary`` (see the field's comment in
+    ``agent_state.py``): appending to compact_summary made auto-compaction
+    erase the hints mid-run, which is precisely the long stuck run an operator
+    gives hints for. Each hint is clipped to one prompt-safe line and
+    duplicates are dropped, so a repeated ``--hint`` costs nothing extra.
+
+    Also replaces the old ``" | ".join(hints)`` rendering: a hint that itself
+    contains ``" | "`` is now one line of its own and cannot be read as two
+    hints, and whitespace-only hints are dropped instead of becoming a blank
+    bullet in the prompt.
+    """
+    if not hints:
+        return
+    incoming = [one_line(str(item), 400) for item in hints if str(item).strip()]
+    if not incoming:
+        return
+    state.operator_hints = list(dict.fromkeys(list(state.operator_hints or []) + incoming))
+
+
 async def solve(
     agent: AgentContext,
     *,
@@ -2546,9 +2579,7 @@ async def _solve_impl(
     except Exception:
         pass
     if hints:
-        state.compact_summary = (
-            state.compact_summary + "\nUser hints: " + " | ".join(hints)
-        ).strip()
+        _record_operator_hints(state, hints)
 
     repeated_errors = 0
     observation_only_streak = 0
@@ -2894,8 +2925,6 @@ async def _solve_impl(
         fingerprint = _path_progress_fingerprint(agent)
         if fingerprint == last_path_fingerprint:
             path_stall_streak += 1
-            if path_stall_hint_sent:
-                path_stall_hint_age += 1
         else:
             path_stall_streak = 0
             path_stall_hint_sent = False
@@ -2910,6 +2939,7 @@ async def _solve_impl(
             thin_windows=path_stall_thin_windows,
             hint_age=path_stall_hint_age,
         )
+
         if stall_action == "hint":
             state.add_correction_hint(stall_message)
             stall_guard_message = f"[path stall] {stall_message}"
@@ -2923,6 +2953,14 @@ async def _solve_impl(
             _notify_operator(stream_sink, f"[stall guard] {stall_message}")
             if _no_path_coverage_thin(agent):
                 path_stall_thin_windows += 1
+        elif stall_action == "silent":
+            # Count silent turns AFTER the decision, not before it. The age=0
+            # turn is the one that emitted the hint; every later no-progress turn
+            # that returns silent is exactly one more turn of grace spent. The
+            # previous ordering incremented before the decision, so the first
+            # silent turn was already age=1 and a grace of 3 handed back after
+            # two turns instead of three (measured 2026-10-21).
+            path_stall_hint_age += 1
         elif stall_action == "ask":
             state.ask_user(stall_message)
             needs_user = True
