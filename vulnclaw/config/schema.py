@@ -359,6 +359,16 @@ class ReconConfig(BaseModel):
     zoomeye_key: str = Field(default="", description="ZoomEye (钟馗之眼) API key")
     shodan_key: str = Field(default="", description="Shodan API key")
     zerozone_key: str = Field(default="", description="零零信安 0.zone API key")
+    github_token: str = Field(
+        default="",
+        description=(
+            "GitHub API token used by intel lookups (exploit_intel's nuclei "
+            "template index). Unauthenticated the API allows 60 requests/hour; "
+            "a token raises it to 5,000. Optional — absence degrades to a slower "
+            "path, never to a failed lookup. GITHUB_TOKEN in the environment is "
+            "read first."
+        ),
+    )
     http_timeout: float = Field(default=15.0, description="Per-request HTTP timeout (s)")
     max_concurrency: int = Field(default=20, description="Max concurrent recon requests")
     space_size: int = Field(default=100, description="Default result size per space-mapping query")

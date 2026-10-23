@@ -485,6 +485,20 @@ def _detect(entry: dict) -> str | None:
     return None
 
 
+def _unavailable_on_host(entry: dict[str, Any]) -> bool:
+    """Whether every named alternative is absent from the process PATH.
+
+    The old block hardcoded one developer machine's Docker/package-manager
+    state and rendered it on every CTF run. Only the absence of the actual
+    alternatives is portable and verifiable here; host-specific installation
+    policy is deliberately not asserted.
+    """
+    for command in entry.get("commands", ()):
+        if shutil.which(command):
+            return False
+    return True
+
+
 def _match(goal_lower: str, keywords: list[str]) -> bool:
     """Keyword match with word boundaries for pure-ASCII tokens.
 
@@ -557,11 +571,12 @@ _UNAVAILABLE: tuple[dict[str, Any], ...] = (
             "jpg", "jpeg", "隐写", "stego", "steghide", "outguess", "zsteg",
             "图片", "image", "藏", "wav", "音频", "音频隐写",
         ],
-        "why": "not installed; no package manager is available, and Docker Desktop "
-               "cannot start on this host (the CLI exists but the daemon never comes up)",
-        "instead": "carve appended/embedded data by hand (trailing bytes after FFD9 / "
-                   "RIFF end, PK\\x03\\x04 header, LSB planes), and for F5 use the F5 "
-                   "entry above. Do not try to install a package or start Docker.",
+        "why": "not detected on this host's PATH or configured tool roots. "
+               "Do not try to install it or spend solve steps setting up a package manager "
+               "or container runtime: carve appended/embedded data by hand instead "
+               "(trailing bytes after FFD9 / RIFF end, PK\\x03\\x04 header, LSB planes); "
+               "for F5 use the F5 entry above.",
+        "commands": ("steghide", "outguess", "zsteg"),
     },
 )
 
@@ -614,17 +629,26 @@ def build_tool_card(goal: str, mode: str = "auto") -> str:
                 f"- **{entry['name']}**: `{cmd}` — {entry['usage']} ({entry['when']})"
             )
 
-    if not lines and not ir_lines:
+    missing = [
+        entry
+        for entry in _UNAVAILABLE
+        if _unavailable_on_host(entry)
+        and (mode == "ctf" or _match(goal_lower, entry.get("keywords", [])))
+    ]
+
+    if not lines and not ir_lines and not missing:
         return ""
 
-    card = "\n\n# External tools available on this host\n"
-    card += "These are installed and verified. Use shell_command to invoke them.\n"
-    if lines:
-        card += "\n".join(lines)
-    if ir_lines:
-        card += "\n\n## Incident-response / evidence-handling tools\n"
+    card = ""
+    if lines or ir_lines:
+        card = "\n\n# External tools available on this host\n"
         card += "These are installed and verified. Use shell_command to invoke them.\n"
-        card += "\n".join(ir_lines)
+        if lines:
+            card += "\n".join(lines)
+        if ir_lines:
+            card += "\n\n## Incident-response / evidence-handling tools\n"
+            card += "These are installed and verified. Use shell_command to invoke them.\n"
+            card += "\n".join(ir_lines)
 
     # ``bg_launch`` hint when cracking tools are relevant (attack-side only)
     if mode != "ir" and any(k in goal_lower for k in ["hash", "crack", "破解", "密码", "爆破"]):
@@ -634,25 +658,11 @@ def build_tool_card(goal: str, mode: str = "auto") -> str:
         )
 
     # What this host does NOT have, stated up front. Without it, "not in the card"
-    # reads as "not found yet" and the model starts installing things -- measured
-    # 2026-10-20, see _UNAVAILABLE.
-    #
-    # In ``ctf`` mode this renders UNCONDITIONALLY, for the same reason `always`
-    # entries do: a challenge attachment's format never appears in the goal text.
-    # The measured case proves it -- the goal for 九连环 is "Solve CTF2 challenge
-    # '九连环' (category MISC, difficulty Easy)", which contains no stego keyword at
-    # all, so a keyword-gated block would never have fired on the run that wasted
-    # 8 steps trying to install steghide.
-    missing = [
-        entry
-        for entry in _UNAVAILABLE
-        if mode == "ctf" or _match(goal_lower, entry.get("keywords", []))
-    ]
+    # reads as "not found yet" and the model starts installing things. The text
+    # is intentionally detection-backed and portable: it does not claim anything
+    # about Docker, package managers, or another machine's desktop state.
     if missing:
         card += "\n\n## NOT available on this host — do not try to install\n"
         for entry in missing:
-            card += (
-                f"- **{entry['name']}**: {entry['why']}. "
-                f"Instead: {entry['instead']}\n"
-            )
+            card += f"- **{entry['name']}**: {entry['why']}\n"
     return card

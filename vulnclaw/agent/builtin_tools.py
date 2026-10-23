@@ -1503,6 +1503,16 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "traffic_list",
     "traffic_view",
     "traffic_bind_evidence",
+    # Vulnerability-intelligence lookups are pinned for exactly the reason the
+    # platform verbs below are: `_infer_allowed_tools` prunes from the goal text,
+    # and a CTF goal naming a CVE ("Solve ... CVE-2021-44228 ... web rce") matches
+    # the web bundle, which does NOT contain these two -- measured 2026-10-21,
+    # `exploit_intel=False` on a CTF goal that names the CVE. The scenario where
+    # the lookup matters most was the one where the tool disappeared. They are
+    # read-only, cheap, and answer "is this worth pursuing" before any step is
+    # spent, so they belong on every face.
+    "cve_lookup",
+    "exploit_intel",
     # NOTE: the GCS tools used to be pinned here by hand. That list had drifted
     # from reality -- it named 6 of the 9 gcs_* tools, so three were prunable
     # while six were force-kept. The GCS tool face is now controlled by one
@@ -1551,6 +1561,9 @@ _TASK_TOOL_BUNDLES: dict[str, set[str]] = {
         "subdomain_enum",
         "js_recon",
         "cve_lookup",
+        # "Is this CVE worth pursuing" belongs with the OSINT lookups: same
+        # read-only external sources, and the bundle already carries cve_lookup.
+        "exploit_intel",
         "osint_recon",
         "fetch",
     },

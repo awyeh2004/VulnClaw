@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 # target, no host-changing action.
 READ_ONLY_INTEL_TOOLS: set[str] = {
     "cve_lookup",
+    "exploit_intel",
     "compliance_map",
     "remediation_advice",
     "topology_build",
@@ -89,6 +90,34 @@ def intel_tool_schemas() -> list[dict[str, Any]]:
                         },
                     },
                     "required": ["domain"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "exploit_intel",
+                "description": (
+                    "Decide whether a CVE is actually exploitable, separating three "
+                    "signals cve_lookup does not: (1) CISA KEV membership — confirmed "
+                    "in-the-wild exploitation, with vendor/product and ransomware "
+                    "flags; (2) whether a runnable nuclei template exists (returns the "
+                    "exact command); (3) how to read the combination. Use after "
+                    "cve_lookup when the question is 'can I use this' rather than "
+                    "'what is it'. Read-only: queries CISA and GitHub, never the target."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cve_id": {
+                            "type": "string",
+                            "description": (
+                                "One or more CVE ids, e.g. 'CVE-2021-44228' or "
+                                "'CVE-2021-44228, CVE-2023-4966'. Up to 5."
+                            ),
+                        },
+                    },
+                    "required": ["cve_id"],
                 },
             },
         },
@@ -296,6 +325,7 @@ def _build_handlers() -> dict[str, Callable[[Any, dict[str, Any]], Awaitable[str
     from vulnclaw.intel.attack import attack_map_tool
     from vulnclaw.intel.compliance import compliance_map_tool
     from vulnclaw.intel.cve import cve_lookup_tool
+    from vulnclaw.intel.exploit_intel import exploit_intel_tool
     from vulnclaw.intel.findings import findings_diff_tool, findings_report_tool
     from vulnclaw.intel.osint import osint_recon_tool
     from vulnclaw.intel.remediation import remediation_advice_tool
@@ -303,6 +333,7 @@ def _build_handlers() -> dict[str, Callable[[Any, dict[str, Any]], Awaitable[str
 
     return {
         "cve_lookup": cve_lookup_tool,
+        "exploit_intel": exploit_intel_tool,
         "osint_recon": osint_recon_tool,
         "topology_build": topology_build_tool,
         "compliance_map": compliance_map_tool,

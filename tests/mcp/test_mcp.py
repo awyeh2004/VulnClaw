@@ -968,6 +968,16 @@ class TestResearchHostsAreNotPartOfTheEngagementScope:
         assert "blocked" in guard["message"]
 
     @pytest.mark.asyncio
+    async def test_research_host_match_is_case_and_trailing_dot_insensitive(self):
+        from vulnclaw.agent.context import TaskConstraints
+
+        manager = self._manager(
+            TaskConstraints(allowed_hosts=["abc.http-ctf2.dasctf.com"], strict_mode=True)
+        )
+        for url in ("https://API.GITHUB.COM/x", "https://api.github.com./x"):
+            assert manager._check_fetch_constraints({"url": url}) is None
+
+    @pytest.mark.asyncio
     async def test_a_lookalike_domain_is_not_exempt(self):
         from vulnclaw.agent.context import TaskConstraints
 

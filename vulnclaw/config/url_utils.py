@@ -139,8 +139,8 @@ def _safe_parsed_port(parsed: Any) -> int | None:
 #: agent layer (see the note at the top of ``mcp/lifecycle.py``).
 #:
 #: An attacker-controlled page fetched from one of these hosts is still just a GET
-#: to that host, and ``blocked_hosts`` is evaluated BEFORE this list, so an operator
-#: who forbids a host still forbids it. Attack tools never consult this list.
+#: to that host. The research exemption skips only ``allowed_hosts``; the later
+#: blocked/path/port checks still reject a host or route the operator forbids.
 RESEARCH_HOSTS: tuple[str, ...] = (
     # source / advisory
     "github.com",

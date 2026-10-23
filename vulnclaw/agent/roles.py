@@ -44,6 +44,11 @@ ROLE_REGISTRY: dict[str, AgentRole] = {
             "unauth_test",
             "osint_recon",
             "cve_lookup",
+            # Exploitability signals (KEV + nuclei template). Same read-only
+            # external-lookup class as cve_lookup: no target egress, and the
+            # researcher role is exactly who needs to answer "is this worth
+            # pursuing" before the executor spends steps.
+            "exploit_intel",
             "topology_build",
             "fetch",
             "http_probe_batch",
@@ -75,6 +80,7 @@ ROLE_REGISTRY: dict[str, AgentRole] = {
             "python_execute",
             "crypto_decode",
             "cve_lookup",
+            "exploit_intel",
             "topology_build",
             "findings_*",
             "remediation_advice",

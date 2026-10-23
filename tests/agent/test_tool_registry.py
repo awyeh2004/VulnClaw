@@ -392,6 +392,27 @@ class TestUnavailableToolsAreStated:
         assert "steghide" in card
         assert "Do not try to install" in card
 
+    def test_the_unavailable_block_is_portable_not_machine_specific(self):
+        """The block must describe detected tool absence, not one host's Docker state.
+
+        2026-10-21: the first version hardcoded "Docker Desktop cannot start on
+        this host", which is a fact about the author's machine rather than a
+        detection result and is false on another host. Detection is limited to
+        the portable PATH/tool-root probe below; if these commands are present,
+        the block must disappear instead of telling the model to avoid them.
+        """
+        card = tr.build_tool_card("stego image 隐写", mode="ctf")
+        assert "Docker Desktop cannot start" not in card
+        assert "not detected on this host" in card
+
+        monkeypatch_which = tr.shutil.which
+        tr.shutil.which = lambda name: "/usr/bin/steghide" if name == "steghide" else None
+        try:
+            filtered = tr.build_tool_card("stego image 隐写", mode="ctf")
+        finally:
+            tr.shutil.which = monkeypatch_which
+        assert "NOT available on this host" not in filtered
+
     def test_a_non_ctf_goal_still_gets_keyword_gating(self):
         """ctf 模式无条件渲染（附件格式永远不出现在 goal 里）；别的模式仍按关键词。
 
