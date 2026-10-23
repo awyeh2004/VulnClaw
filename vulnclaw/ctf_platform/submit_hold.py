@@ -39,7 +39,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -49,8 +49,22 @@ from typing import Any, Awaitable, Callable, Optional
 #: direction, so the scheduler aims slightly early and re-checks the window.
 _FIRE_LEAD_SECONDS = 0.8
 
-#: Scheduler poll interval while something is pending.
-_TICK_SECONDS = 0.25
+#: First-blood submissions aim EARLIER than that. The sprint window opens at a
+#: fixed second and first-blood credit goes to whoever lands first, so the whole
+#: value of the submission is in the first few hundred milliseconds of the band.
+#: Aiming 0.3s early means the request is in flight as the band opens rather than
+#: queued behind it.
+_FIRSTBLOOD_LEAD_SECONDS = 0.3
+
+#: How long a window without an explicit ``until`` stays open. 60s matches the
+#: 卡点 band the rulebook defines; a first-blood window uses the same grace so a
+#: late tick still fires instead of dropping the submission.
+_IMPLICIT_WINDOW_SECONDS = 60
+
+#: Scheduler poll interval while something is pending. Tight enough for the
+#: first-blood race: a 1s poll could place the request up to a second into a band
+#: where being first is the entire point.
+_TICK_SECONDS = 0.05
 
 
 def _now() -> datetime:
@@ -77,6 +91,64 @@ def parse_local_deadline(text: str) -> Optional[datetime]:
 
 
 @dataclass
+class SubmitWindow:
+    """One named submission window.
+
+    The 1024 sprint needs TWO of these, and they are not interchangeable:
+
+    * ``firstblood`` at 19:10:24 — the instant the sprint window opens. Its value
+      is being EARLY (first-blood weighting), so it fires as soon as the clock
+      reaches it and there is no tolerance for "roughly around then".
+    * ``peak`` at 19:24:00 — the 卡点 question, which pays full marks only for
+      submissions that LAND inside 19:24:00–19:24:59. Here arriving early is
+      worthless, so ``until`` matters as much as ``at``.
+
+    Modelling both as one shared deadline would make the first-blood submission
+    late by however long the model kept working, and would give the 卡点 one the
+    same instant as the sprint opener -- which is a different score event.
+    """
+
+    name: str
+    at: str
+    until: str = ""
+    note: str = ""
+
+    def fire_time(self) -> Optional[datetime]:
+        return parse_local_deadline(self.at)
+
+    def close_time(self) -> Optional[datetime]:
+        """When this window stops being worth firing into.
+
+        An explicit ``until`` wins. Without one, the window holds for
+        ``_IMPLICIT_WINDOW_SECONDS`` after ``at`` rather than closing instantly:
+        a scheduler tick that lands 200ms after the target is still inside a
+        60-second band, and treating the opening second as the entire window
+        would drop exactly the submission the window exists for. That was a real
+        bug in the first cut of this file (a first-blood window with no ``until``
+        expired before the first tick could fire it).
+        """
+        explicit = parse_local_deadline(self.until)
+        if explicit is not None:
+            return explicit
+        start = self.fire_time()
+        if start is None:
+            return None
+        return start + timedelta(seconds=_IMPLICIT_WINDOW_SECONDS)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "at": self.at, "until": self.until, "note": self.note}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SubmitWindow":
+        return cls(
+            name=str(data.get("name", "")),
+            at=str(data.get("at", "")),
+            until=str(data.get("until", "")),
+            note=str(data.get("note", "")),
+        )
+
+
+@dataclass
 class HeldSubmit:
     """One submission waiting for its window."""
 
@@ -86,6 +158,8 @@ class HeldSubmit:
     arguments: dict[str, Any]
     fire_at: str
     created_at: str
+    window: str = ""
+    close_at: str = ""
     fired: bool = False
     result: str = ""
     error: str = ""
@@ -99,6 +173,8 @@ class HeldSubmit:
             "arguments": self.arguments,
             "fire_at": self.fire_at,
             "created_at": self.created_at,
+            "window": self.window,
+            "close_at": self.close_at,
             "fired": self.fired,
             "result": self.result,
             "error": self.error,
@@ -114,6 +190,8 @@ class HeldSubmit:
             arguments=dict(data.get("arguments") or {}),
             fire_at=str(data.get("fire_at", "")),
             created_at=str(data.get("created_at", "")),
+            window=str(data.get("window", "")),
+            close_at=str(data.get("close_at", "")),
             fired=bool(data.get("fired")),
             result=str(data.get("result", "")),
             error=str(data.get("error", "")),
@@ -135,13 +213,50 @@ class SubmitHoldQueue:
         *,
         hold_until: str = "",
         window_end: str = "",
+        windows: Optional[list[SubmitWindow]] = None,
+        default_window: str = "",
     ) -> None:
         self.state_path = Path(state_path) if state_path else None
         self._hold_until = hold_until
         self._window_end = window_end
+        self._windows = list(windows or [])
+        self._default_window = default_window
         self._lock = threading.RLock()
         self._items: dict[str, HeldSubmit] = {}
         self._load()
+
+    # -- windows -----------------------------------------------------------
+
+    @property
+    def windows(self) -> list[SubmitWindow]:
+        return list(self._windows)
+
+    def window(self, name: str = "") -> Optional[SubmitWindow]:
+        """Resolve a window by name, falling back to the configured default."""
+        target = (name or self._default_window or "").strip()
+        if not target:
+            return None
+        for window in self._windows:
+            if window.name == target:
+                return window
+        return None
+
+    def next_window(self, *, now: Optional[datetime] = None) -> Optional[SubmitWindow]:
+        """The soonest window that has not closed yet.
+
+        "Not closed" is what makes a late find useful: a flag found at 19:23 is
+        still eligible for the 19:24 卡点 window, and one found at 19:26 falls
+        through to the next window instead of being fired backwards in time.
+        """
+        moment = now or _now()
+        candidates = [
+            window
+            for window in self._windows
+            if (close := window.close_time()) is not None and moment <= close
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda w: w.fire_time() or datetime.max)
 
     # -- configuration -----------------------------------------------------
 
@@ -162,15 +277,18 @@ class SubmitHoldQueue:
     def should_hold(self, *, now: Optional[datetime] = None) -> bool:
         """Whether a submit arriving now should be queued rather than sent.
 
-        False once the deadline has passed: after that the queue has already
-        fired (or will on the next tick), and a NEW submit -- a corrected flag,
-        a second challenge -- must go out immediately or it misses the window it
-        was waiting for.
+        Three ways to say "hold": named windows exist and one is still ahead;
+        the legacy single deadline has not passed. Either way the answer goes
+        False once nothing remains ahead -- a flag found after the last window
+        must go out immediately (a later window may still exist, and holding with
+        no target would drop it).
         """
+        moment = now or _now()
+        if self._windows:
+            return self.next_window(now=moment) is not None
         deadline = self.hold_deadline
         if deadline is None:
             return False
-        moment = now or _now()
         return moment < deadline
 
     # -- queue operations ---------------------------------------------------
@@ -182,17 +300,30 @@ class SubmitHoldQueue:
         tool: str,
         arguments: dict[str, Any],
         key: str = "",
+        window: str = "",
     ) -> Optional[HeldSubmit]:
         """Persist a submission for later firing. Returns None when not holding.
 
-        The key defaults to ``tool + sorted(arguments)``, so the SAME payload
-        submitted twice while held collapses to one entry: a model that retries
-        its submit call must not spend two attempts at 19:24.
+        ``window`` names the target window (``firstblood`` / ``peak``); empty uses
+        the configured default, and if that name is unknown the soonest open
+        window is used. The key defaults to ``tool + sorted(arguments)``, so the
+        SAME payload submitted twice while held collapses to one entry: a model
+        that retries its submit call must not spend two attempts.
         """
         if not self.should_hold():
             return None
-        deadline = self.hold_deadline
-        assert deadline is not None  # should_hold() guarantees it
+        target = self.window(window) or self.next_window()
+        if target is not None:
+            fire_at = target.fire_time()
+            close_at = target.close_time()
+            window_name = target.name
+        else:
+            # Legacy single-deadline mode.
+            fire_at = self.hold_deadline
+            close_at = self.window_end
+            window_name = ""
+        if fire_at is None:
+            return None
         identity = key or self._identity(server, tool, arguments)
         with self._lock:
             existing = self._items.get(identity)
@@ -203,8 +334,10 @@ class SubmitHoldQueue:
                 server=server,
                 tool=tool,
                 arguments=dict(arguments),
-                fire_at=deadline.isoformat(timespec="seconds"),
+                fire_at=fire_at.isoformat(timespec="seconds"),
                 created_at=_now().isoformat(timespec="seconds"),
+                window=window_name,
+                close_at=close_at.isoformat(timespec="seconds") if close_at else "",
             )
             self._items[identity] = item
             self._save()
@@ -339,34 +472,58 @@ class SubmitScheduler:
             self._stop.wait(_TICK_SECONDS)
 
     def tick(self, *, now: Optional[datetime] = None) -> int:
-        """Fire everything due. Returns how many submissions were sent."""
+        """Fire everything due. Returns how many submissions were sent.
+
+        Each item carries its OWN window bounds (``fire_at`` / ``close_at``), so
+        two submissions targeting different windows do not interfere: the
+        first-blood one goes at 19:10:24 while the 卡点 one waits for 19:24.
+        """
         moment = now or _now()
-        deadline = self._queue.hold_deadline
-        window_end = self._queue.window_end
+        global_end = self._queue.window_end
         fired = 0
         for item in self._queue.pending():
             target = parse_local_deadline(item.fire_at)
             if target is None:
                 self._queue.drop(item.key, "unparseable fire_at")
                 continue
-            if window_end is not None and moment > window_end:
-                # The portal is closed. Sending now is an invalid operation;
-                # dropping keeps the audit trail and avoids the penalty.
-                self._queue.drop(item.key, f"submission window closed at {window_end}")
+            # Per-item close, with the legacy global bound as a backstop: an item
+            # queued under the old single-deadline config has no close_at.
+            close = parse_local_deadline(item.close_at) or global_end
+            if close is not None and moment > close:
+                # The window has closed. Sending now earns nothing (or is an
+                # invalid operation); dropping keeps the audit trail.
+                self._queue.drop(item.key, f"submission window closed at {close}")
                 self._emit(
                     "submit_hold_dropped",
-                    {"key": item.key, "reason": "window closed", "window_end": str(window_end)},
+                    {
+                        "key": item.key,
+                        "reason": "window closed",
+                        "window": item.window,
+                        "close_at": str(close),
+                    },
                 )
                 continue
-            if deadline is None:
-                continue
-            due = target.timestamp() - _FIRE_LEAD_SECONDS
+            due = target.timestamp() - self._lead_for(item)
             if moment.timestamp() < due:
                 continue
             # Fire even if slightly late: a tick that arrived 1s after the target
-            # is still inside a 60s window, and refusing would lose the reward.
+            # is still inside the window, and refusing would lose the reward.
             fired += self._fire(item)
         return fired
+
+    @staticmethod
+    def _lead_for(item: HeldSubmit) -> float:
+        """How early to send, per window purpose.
+
+        A first-blood window pays for arriving FIRST, so it aims a hair early
+        (the platform timestamps arrival, and an early request still lands inside
+        the sprint window). A 卡点 window pays for landing INSIDE a 60-second
+        band, where being 0.8s early is worthless if the band has not opened --
+        so it aims at the stated second and lets the tolerance absorb jitter.
+        """
+        if item.window == "firstblood":
+            return _FIRSTBLOOD_LEAD_SECONDS
+        return _FIRE_LEAD_SECONDS
 
     def _fire(self, item: HeldSubmit) -> int:
         try:

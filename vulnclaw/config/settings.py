@@ -641,20 +641,45 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
     # seconds before the match, not by editing the config file.
     #   export VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL=2026-10-24T19:24:00
     #   export VULNCLAW_COMPETITION__SUBMIT_WINDOW_END=2026-10-24T20:00:00
-    for field_name, env_names in (
-        (
-            "submit_hold_until",
-            ("VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL", "VULNCLAW_COMPETITION_SUBMIT_HOLD_UNTIL"),
-        ),
-        (
-            "submit_window_end",
-            ("VULNCLAW_COMPETITION__SUBMIT_WINDOW_END", "VULNCLAW_COMPETITION_SUBMIT_WINDOW_END"),
-        ),
+    for env_name in (
+        "VULNCLAW_COMPETITION__SUBMIT_WINDOWS", "VULNCLAW_COMPETITION_SUBMIT_WINDOWS",
     ):
-        for env_name in env_names:
-            if v := os.environ.get(env_name):
-                setattr(config.competition, field_name, v.strip())
-                break
+        if v := os.environ.get(env_name):
+            # Compact spelling for the shell, because a YAML list cannot be
+            # exported from cmd/PowerShell without quoting games:
+            #   name@HH:MM:SS[+SEC][,name@HH:MM:SS[+SEC]]...
+            #   firstblood@19:10:24,peak@19:24:00+59
+            # Times are interpreted on the same calendar day as "now", which is
+            # what a one-hour match wants (and what avoids hardcoding the date).
+            parsed = _parse_submit_windows_env(v.strip())
+            if parsed:
+                config.competition.submit_windows = parsed
+            break
+
+    for env_name in (
+        "VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL",
+        "VULNCLAW_COMPETITION_SUBMIT_HOLD_UNTIL",
+    ):
+        if v := os.environ.get(env_name):
+            config.competition.submit_hold_until = v.strip()
+            break
+
+    for env_name in (
+        "VULNCLAW_COMPETITION__SUBMIT_WINDOW_END",
+        "VULNCLAW_COMPETITION_SUBMIT_WINDOW_END",
+    ):
+        if v := os.environ.get(env_name):
+            config.competition.submit_window_end = v.strip()
+            break
+
+    for env_name in (
+        "VULNCLAW_COMPETITION__SUBMIT_DEFAULT_WINDOW",
+        "VULNCLAW_COMPETITION_SUBMIT_DEFAULT_WINDOW",
+    ):
+        if v := os.environ.get(env_name):
+            config.competition.submit_default_window = v.strip()
+            break
+
 
     # ── Recon: space-mapping API keys ────────────────────────────────
     # Accept both the short form (FOFA_KEY) and the prefixed form
@@ -795,3 +820,40 @@ def fetch_provider_models_async(
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     return t
+
+
+def _parse_submit_windows_env(raw: str) -> list[dict]:
+    """Parse ``name@HH:MM:SS[+SEC][,name@HH:MM:SS[+SEC]]`` into window dicts.
+
+    Returns [] for anything unparseable so a typo degrades to "no windows" (the
+    legacy single-deadline behaviour) instead of silently queueing submissions
+    against a nonsense time.
+    """
+    from datetime import datetime, timedelta
+
+    out: list[dict] = []
+    today = datetime.now().date()
+    for chunk in str(raw or "").split(","):
+        piece = chunk.strip()
+        if not piece or "@" not in piece:
+            continue
+        name, _, spec = piece.partition("@")
+        name = name.strip()
+        spec = spec.strip()
+        span = ""
+        if "+" in spec:
+            spec, _, span = spec.partition("+")
+        try:
+            hour, minute, second = (int(part) for part in spec.split(":"))
+            at = datetime(
+                today.year, today.month, today.day, hour, minute, second
+            )
+        except (ValueError, TypeError):
+            continue
+        entry: dict = {"name": name, "at": at.isoformat(timespec="seconds")}
+        if span.strip().isdigit():
+            entry["until"] = (
+                at + timedelta(seconds=int(span.strip()))
+            ).isoformat(timespec="seconds")
+        out.append(entry)
+    return out

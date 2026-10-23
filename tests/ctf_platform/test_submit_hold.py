@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from vulnclaw.ctf_platform.submit_hold import (
+    HeldSubmit,
     SubmitHoldQueue,
     SubmitScheduler,
     parse_local_deadline,
@@ -203,3 +204,148 @@ class TestToolMatching:
         for name in ("ctf2_list_competition_challenges", "ctf2_get_competition_challenge",
                      "platform_submit", "fetch"):
             assert not _is_submission_tool(name), name
+
+
+# ── Named windows: the 1024 sprint needs TWO departure points ─────────────────
+#
+# 19:10:24 opens the sprint window (double points, first-blood credit for whoever
+# lands first) and 19:24:00–19:24:59 is the 卡点 band (full marks inside, half
+# outside). One shared deadline cannot express both: it would either delay the
+# first-blood send by however long the model kept working, or send the 卡点
+# answer at the sprint opener, which is a different scoring event.
+
+
+def _windows(tmp_path, *, past_firstblood=True):
+    from datetime import datetime, timedelta
+
+    from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue, SubmitWindow
+
+    base = datetime.now()
+    fb = base + (timedelta(seconds=-30) if past_firstblood else timedelta(minutes=2))
+    peak = base + timedelta(minutes=10)
+    windows = [
+        SubmitWindow(name="firstblood", at=fb.isoformat(timespec="seconds")),
+        SubmitWindow(
+            name="peak",
+            at=peak.isoformat(timespec="seconds"),
+            until=(peak + timedelta(seconds=59)).isoformat(timespec="seconds"),
+        ),
+    ]
+    return SubmitHoldQueue(tmp_path / "q.json", windows=windows), fb, peak
+
+
+class TestNamedWindows:
+    def test_the_soonest_open_window_is_picked(self, tmp_path):
+        # An explicit `until` in the past: without one a window stays open for
+        # the implicit 60s grace, so "started 30s ago" is still an open window.
+        from datetime import datetime, timedelta
+
+        from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue, SubmitWindow
+
+        base = datetime.now()
+        fb_at = (base - timedelta(minutes=5)).isoformat(timespec="seconds")
+        peak_at = base + timedelta(minutes=10)
+        q = SubmitHoldQueue(
+            tmp_path / "q.json",
+            windows=[
+                SubmitWindow(name="firstblood", at=fb_at, until=fb_at),
+                SubmitWindow(
+                    name="peak",
+                    at=peak_at.isoformat(timespec="seconds"),
+                    until=(peak_at + timedelta(seconds=59)).isoformat(timespec="seconds"),
+                ),
+            ],
+        )
+        peak = peak_at
+        item = q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+        assert item is not None
+        assert item.window == "peak"
+        assert parse_local_deadline(item.fire_at) == parse_local_deadline(
+            peak.isoformat(timespec="seconds")
+        )
+
+    def test_an_explicit_window_wins(self, tmp_path):
+        q, _fb, peak = _windows(tmp_path, past_firstblood=False)
+        item = q.enqueue(
+            server="ctf2",
+            tool="ctf2_submit_competition_flag",
+            arguments={"flag": "x"},
+            window="peak",
+        )
+        assert item.window == "peak"
+
+    def test_a_firstblood_window_aims_earlier_than_a_peak_window(self, tmp_path):
+        """First blood pays for arriving first; 卡点 pays for the band opening."""
+        from vulnclaw.ctf_platform.submit_hold import SubmitScheduler
+
+        fb = HeldSubmit(
+            key="a", server="s", tool="t", arguments={}, fire_at="", created_at="",
+            window="firstblood",
+        )
+        peak = HeldSubmit(
+            key="b", server="s", tool="t", arguments={}, fire_at="", created_at="",
+            window="peak",
+        )
+        assert SubmitScheduler._lead_for(fb) < SubmitScheduler._lead_for(peak)
+
+    def test_each_item_closes_with_its_own_window(self, tmp_path):
+        """The 卡点 band closes; a first-blood item must not be judged by it."""
+        q, _fb, peak = _windows(tmp_path, past_firstblood=False)
+        q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "fb"})
+        sent: list = []
+
+        async def dispatch(server, tool, arguments):
+            sent.append(arguments["flag"])
+            return "ok"
+
+        from vulnclaw.ctf_platform.submit_hold import SubmitScheduler
+
+        sched = SubmitScheduler(q, dispatch)
+        # At firstblood time: only the firstblood item is due.
+        firstblood_item = [i for i in q.pending() if i.window == "firstblood"][0]
+        target = parse_local_deadline(firstblood_item.fire_at)
+        sched.tick(now=target + __import__("datetime").timedelta(seconds=1))
+        assert sent == ["fb"]
+
+    def test_all_windows_closed_means_send_immediately(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue, SubmitWindow
+
+        past = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+        q = SubmitHoldQueue(
+            tmp_path / "q.json",
+            windows=[SubmitWindow(name="firstblood", at=past, until=past)],
+        )
+        assert q.should_hold() is False
+        assert q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={}) is None
+
+    def test_a_late_hold_still_targets_a_window_that_has_not_closed(self, tmp_path):
+        """A flag found at 19:23 must still go into the 19:24 band."""
+        from datetime import datetime, timedelta
+
+        from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue, SubmitWindow
+
+        now = datetime.now()
+        q = SubmitHoldQueue(
+            tmp_path / "q.json",
+            windows=[
+                SubmitWindow(name="firstblood", at=(now - timedelta(minutes=13)).isoformat(timespec="seconds")),
+                SubmitWindow(
+                    name="peak",
+                    at=(now + timedelta(minutes=1)).isoformat(timespec="seconds"),
+                    until=(now + timedelta(minutes=1, seconds=59)).isoformat(timespec="seconds"),
+                ),
+            ],
+        )
+        assert q.should_hold() is True
+        item = q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+        assert item.window == "peak"
+
+    def test_a_legacy_single_deadline_still_works(self, tmp_path):
+        """Existing configs (submit_hold_until) must keep behaving as before."""
+        q = _queue(tmp_path, hold_until=_future())
+        item = q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+        assert item is not None
+        assert item.window == ""
+        assert item.close_at == ""

@@ -160,7 +160,7 @@ def _get_submit_hold():
     too early or never.
     """
     global _submit_hold
-    from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue
+    from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue, SubmitWindow
     from vulnclaw.config.settings import CONFIG_DIR, load_config
 
     try:
@@ -169,16 +169,32 @@ def _get_submit_hold():
         return None
     hold_until = str(getattr(competition, "submit_hold_until", "") or "")
     window_end = str(getattr(competition, "submit_window_end", "") or "")
+    raw_windows = list(getattr(competition, "submit_windows", None) or [])
+    default_window = str(getattr(competition, "submit_default_window", "") or "")
+    windows = [
+        SubmitWindow.from_dict(entry)
+        for entry in raw_windows
+        if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+    ]
+    signature = (
+        hold_until,
+        window_end,
+        tuple((w.name, w.at, w.until) for w in windows),
+        default_window,
+    )
     with _submit_hold_lock:
         current = _submit_hold
-        if (
-            current is not None
-            and current._hold_until == hold_until  # noqa: SLF001 - same module's invariant
-            and current._window_end == window_end  # noqa: SLF001
-        ):
+        if current is not None and getattr(current, "_signature", None) == signature:
             return current
         state = Path(CONFIG_DIR) / "submit_hold" / "queue.json"
-        fresh = SubmitHoldQueue(state, hold_until=hold_until, window_end=window_end)
+        fresh = SubmitHoldQueue(
+            state,
+            hold_until=hold_until,
+            window_end=window_end,
+            windows=windows,
+            default_window=default_window,
+        )
+        fresh._signature = signature  # noqa: SLF001 - rebuild key for this factory
         if current is not None:
             # Keep whatever the old window queued: a reload is not a reason to
             # forget a flag the run already found.

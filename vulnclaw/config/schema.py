@@ -1009,6 +1009,40 @@ class CompetitionConfig(BaseModel):
             "upper bound."
         ),
     )
+    # The 1024 sprint needs TWO departure points, and they serve different rules:
+    #
+    #   * 19:10:24 — the sprint window opens; solves inside it score double, and
+    #     first-blood credit goes to whoever lands first. Value = being EARLY.
+    #   * 19:24:00–19:24:59 — the 卡点 question pays full marks only inside that
+    #     band, half elsewhere. Value = landing INSIDE the band, not before it.
+    #
+    # One shared deadline cannot express both: it would either make the
+    # first-blood submission late by however long the model kept working, or send
+    # the 卡点 answer at the sprint opener (a different score event).
+    #   yaml:
+    #     competition:
+    #       submit_windows:
+    #         - name: firstblood
+    #           at: "2026-10-24T19:10:24"
+    #         - name: peak
+    #           at: "2026-10-24T19:24:00"
+    #           until: "2026-10-24T19:24:59"
+    submit_windows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Named submission windows, each {name, at, until?, note?}. A submit can "
+            "name one (the goal can say 'submit into the firstblood window'); empty "
+            "uses submit_default_window, else the soonest window still open. When "
+            "empty, only the legacy submit_hold_until deadline applies."
+        ),
+    )
+    submit_default_window: str = Field(
+        default="",
+        description=(
+            "Window name used when a submit does not name one and the queue cannot "
+            "pick the soonest. Empty = pick the soonest still-open window."
+        ),
+    )
 
 
 class SSHHostConfig(BaseModel):
