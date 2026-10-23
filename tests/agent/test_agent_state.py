@@ -80,6 +80,41 @@ def test_agent_state_manual_compact_summary_is_prompt_memory():
     assert "Recent evidence" in summary
 
 
+def test_operator_hints_survive_context_compaction():
+    """Operator hints must NOT be erased by auto-compaction.
+
+    Measured 2026-10-21: ``9ea529b`` appended ``--hint`` text to
+    ``compact_summary``. But ``to_prompt_summary`` renders that field only
+    behind an ``elif`` (skipped once ``context_digest.summary`` is non-empty),
+    and ``update_context_digest`` — called by ``context_budget`` whenever
+    ``context_auto_compact`` (default ON) fires — overwrites the whole field.
+    So on any run long enough to trigger compaction, the operator's hint
+    silently vanished, exactly on the stuck long runs that needed it most.
+    ``operator_hints`` is a separate field rendered unconditionally.
+    """
+    state = AgentState(origin="o", goal="g")
+    state.operator_hints = ["flag may use CTF2{} format"]
+
+    # Simulate auto-compaction: it assigns BOTH digest.summary and compact_summary.
+    state.update_context_digest("compacted older turns", ["e001"])
+    assert state.context_digest.summary  # the elif path is now taken
+    assert "compacted older turns" in state.to_prompt_summary()
+
+    prompt = state.to_prompt_summary()
+    assert "Operator hints" in prompt
+    assert "flag may use CTF2{} format" in prompt
+
+
+def test_operator_hints_render_even_when_context_digest_is_set():
+    """The digest elif must not hide hints (regression for the elif bug)."""
+    state = AgentState(origin="o", goal="g")
+    state.update_context_digest("digest only", ["e001"])
+    state.operator_hints = ["hint survives digest"]
+    prompt = state.to_prompt_summary()
+    assert "hint survives digest" in prompt
+    assert "digest only" in prompt
+
+
 def test_agent_state_completion_claim_records_evidence_ids():
     state = AgentState(origin="o", goal="flag")
     record = state.remember_tool_result(
