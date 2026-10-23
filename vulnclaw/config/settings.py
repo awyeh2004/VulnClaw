@@ -636,6 +636,26 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
             config.competition.allow_flag_submission = v.lower() in ("1", "true", "yes", "on")
             break
 
+    # Submission timing (2026-10-24 sprint rulebook). Both spellings, same as
+    # above: the scoring window is usually set from the command line a few
+    # seconds before the match, not by editing the config file.
+    #   export VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL=2026-10-24T19:24:00
+    #   export VULNCLAW_COMPETITION__SUBMIT_WINDOW_END=2026-10-24T20:00:00
+    for field_name, env_names in (
+        (
+            "submit_hold_until",
+            ("VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL", "VULNCLAW_COMPETITION_SUBMIT_HOLD_UNTIL"),
+        ),
+        (
+            "submit_window_end",
+            ("VULNCLAW_COMPETITION__SUBMIT_WINDOW_END", "VULNCLAW_COMPETITION_SUBMIT_WINDOW_END"),
+        ),
+    ):
+        for env_name in env_names:
+            if v := os.environ.get(env_name):
+                setattr(config.competition, field_name, v.strip())
+                break
+
     # ── Recon: space-mapping API keys ────────────────────────────────
     # Accept both the short form (FOFA_KEY) and the prefixed form
     # (VULNCLAW_RECON_FOFA_KEY); short form wins if both are set.

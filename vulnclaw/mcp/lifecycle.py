@@ -8,10 +8,12 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 import weakref
 from contextlib import suppress
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 from vulnclaw.config.schema import MCPServerConfig, VulnClawConfig
@@ -128,6 +130,97 @@ def _is_tls_verification_error(exc: BaseException) -> bool:
         current = current.__cause__ or current.__context__
         seen += 1
     return False
+
+
+# ── Deferred submission (time-windowed scoring) ──────────────────────────────
+
+#: Tool names that SEND an answer to a scoring platform. Matched by suffix so the
+#: platform-native competition verbs are covered without enumerating them:
+#: ``ctf2_submit_competition_flag`` never reaches our own dispatch table (it is a
+#: passthrough to the platform's MCP server), and it is exactly the route a
+#: competition uses.
+_SUBMISSION_TOOL_SUFFIXES = ("_submit_flag", "_submit_competition_flag")
+
+
+def _is_submission_tool(tool_name: str) -> bool:
+    name = str(tool_name or "")
+    return any(name.endswith(suffix) for suffix in _SUBMISSION_TOOL_SUFFIXES)
+
+
+_submit_hold_lock = threading.Lock()
+_submit_hold: Any = None
+_submit_scheduler: Any = None
+
+
+def _get_submit_hold():
+    """The process-wide hold queue, rebuilt when the configured window changes.
+
+    Rebuilt rather than mutated because the config can be reloaded mid-run (the
+    REPL's `config set`) and a queue carrying the OLD deadline would either fire
+    too early or never.
+    """
+    global _submit_hold
+    from vulnclaw.ctf_platform.submit_hold import SubmitHoldQueue
+    from vulnclaw.config.settings import CONFIG_DIR, load_config
+
+    try:
+        competition = getattr(load_config(), "competition", None)
+    except Exception:
+        return None
+    hold_until = str(getattr(competition, "submit_hold_until", "") or "")
+    window_end = str(getattr(competition, "submit_window_end", "") or "")
+    with _submit_hold_lock:
+        current = _submit_hold
+        if (
+            current is not None
+            and current._hold_until == hold_until  # noqa: SLF001 - same module's invariant
+            and current._window_end == window_end  # noqa: SLF001
+        ):
+            return current
+        state = Path(CONFIG_DIR) / "submit_hold" / "queue.json"
+        fresh = SubmitHoldQueue(state, hold_until=hold_until, window_end=window_end)
+        if current is not None:
+            # Keep whatever the old window queued: a reload is not a reason to
+            # forget a flag the run already found.
+            for item in current.all_items():
+                fresh._items.setdefault(item.key, item)  # noqa: SLF001
+        _submit_hold = fresh
+        return fresh
+
+
+def _start_submit_scheduler(manager: "MCPLifecycleManager") -> None:
+    """Start the background firer once, bound to this manager's dispatch."""
+    global _submit_scheduler
+    from vulnclaw.ctf_platform.submit_hold import SubmitScheduler
+
+    hold = _get_submit_hold()
+    if hold is None:
+        return
+    with _submit_hold_lock:
+        if _submit_scheduler is not None and _submit_scheduler._thread is not None:
+            if _submit_scheduler._thread.is_alive():
+                return
+        _submit_scheduler = SubmitScheduler(hold, manager._fire_held_submission)
+
+
+def _held_result(tool_name: str, fire_at: str) -> dict[str, Any]:
+    """What the model sees instead of a platform verdict, while the value waits.
+
+    Deliberately NOT an error: the submission is going to happen, and a model told
+    "failed" would re-submit (collapsing into the same queue entry) or go looking
+    for a different flag.
+    """
+    return {
+        "ok": True,
+        "queued": True,
+        "tool": tool_name,
+        "fire_at": fire_at,
+        "message": (
+            f"Submission QUEUED for {fire_at} (local time) to land inside the scoring "
+            "window. It will be sent automatically -- do not submit again, and do not "
+            "wait for it: continue with the remaining challenges."
+        ),
+    }
 
 
 class MCPLifecycleManager(ProbeMixin):
@@ -1447,6 +1540,23 @@ class MCPLifecycleManager(ProbeMixin):
         if not server_name:
             raise ValueError(f"Unknown tool: {tool_name}")
 
+        # ── Time-windowed submission (see ctf_platform/submit_hold) ──────────
+        #
+        # Some competitions pay DOUBLE for a solve submitted inside a defined
+        # window, and the server timestamps arrival. When the operator sets
+        # ``competition.submit_hold_until``, a submit arriving before that moment
+        # is persisted with its exact arguments and fired by a background
+        # scheduler at the deadline -- instead of being sent now, at 1x.
+        #
+        # This sits in ``call_tool`` on purpose: it is the ONE funnel every MCP
+        # tool call passes through, including the platform-native
+        # ``ctf2_submit_competition_flag`` that never reaches our own dispatch
+        # table. Anything narrower would miss exactly the route the competition
+        # uses.
+        held = self._maybe_hold_submission(server_name, tool_name, arguments)
+        if held is not None:
+            return held
+
         async with self._server_call_gate(server_name):
             # Liveness gate: if a tracked subprocess died, attempt a bounded restart
             # before dispatching the call.
@@ -1462,6 +1572,39 @@ class MCPLifecycleManager(ProbeMixin):
             finally:
                 latency_ms = (time.monotonic() - call_started) * 1000.0
                 self.registry.set_last_call_latency(server_name, latency_ms)
+
+    # -- deferred submission ------------------------------------------------
+
+    def _maybe_hold_submission(
+        self, server_name: str, tool_name: str, arguments: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        """Queue a submit for its scoring window, or None to send it now."""
+        if not _is_submission_tool(tool_name):
+            return None
+        hold = _get_submit_hold()
+        if hold is None or not hold.should_hold():
+            return None
+        item = hold.enqueue(server=server_name, tool=tool_name, arguments=arguments)
+        if item is None:
+            return None
+        _start_submit_scheduler(self)
+        return _held_result(tool_name, item.fire_at)
+
+    async def _fire_held_submission(
+        self, server_name: str, tool_name: str, arguments: dict[str, Any]
+    ) -> Any:
+        """Send a held submission for real, bypassing the hold.
+
+        Goes straight to the dispatcher rather than through ``call_tool``: calling
+        the public entry would re-enter ``_maybe_hold_submission`` and, once the
+        deadline has passed, happen to work -- but relying on that timing coupling
+        would re-queue the submission if the scheduler fires a tick early.
+        """
+        if server_name in self._processes and not self._is_process_alive(server_name):
+            await self._restart_server(server_name)
+        server_state = self.registry.get_all_servers().get(server_name)
+        mode = server_state.execution_mode if server_state else "unknown"
+        return await self._dispatch_call_tool(server_name, tool_name, arguments, mode)
 
     def _server_call_gate(self, server_name: str) -> asyncio.Semaphore:
         """Return the shared per-server gate for the current event loop."""

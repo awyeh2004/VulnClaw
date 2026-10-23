@@ -971,6 +971,46 @@ class CompetitionConfig(BaseModel):
     )
 
 
+    # ── Submission timing (1024 sprint scoring windows) ──────────────────────
+    #
+    # Some competitions score by WHEN a correct submission lands, not just whether
+    # it is correct. The 1024 sprint rulebook (2026-10-24) has two such windows:
+    #
+    #   * 「1024 秒闪电战」19:10:24–19:27:28 — every solve in the window is
+    #     worth DOUBLE;
+    #   * 「19:24 卡点题」 — submitting inside 19:24:00–19:24:59 scores full
+    #     marks, any other time scores half.
+    #
+    # Both rewards are decided server-side from the submission timestamp, so the
+    # only thing the agent can control is WHEN the request leaves. A run that finds
+    # the flag at 19:20 and submits immediately collects 1x for a challenge that
+    # would have paid 2x four minutes later.
+    #
+    # ``submit_hold_until`` makes the agent's submit call a HOLD: the value is
+    # persisted with its exact arguments and fired by a background scheduler at
+    # that wall-clock time, instead of being sent immediately. Empty (the default)
+    # means "send now", i.e. every existing behaviour is unchanged.
+    submit_hold_until: str = Field(
+        default="",
+        description=(
+            "Hold flag submissions until this local wall-clock time "
+            "(ISO 8601, e.g. '2026-10-24T19:24:00'). While held, submit calls are "
+            "persisted with their exact arguments and sent automatically at that "
+            "moment; the model is told the submission is queued rather than that it "
+            "failed. Empty = submit immediately (default)."
+        ),
+    )
+    submit_window_end: str = Field(
+        default="",
+        description=(
+            "Stop firing held submissions at this local time (ISO 8601). Guards "
+            "against a hold that would otherwise fire after the submission portal "
+            "closes, which the rulebook counts as an invalid operation. Empty = no "
+            "upper bound."
+        ),
+    )
+
+
 class SSHHostConfig(BaseModel):
     """One remote host the agent may reach over SSH for live IR / pentest.
 
