@@ -319,6 +319,60 @@ _QUIZ_INSTRUCTION = (
 )
 
 
+def _competition_windows_instruction(agent: Any) -> str:
+    """Guidance for a match whose scoring depends on submission TIMING.
+
+    Measured need (2026-10-24 1024 sprint rulebook, plus the debug round): the
+    sprint window opens at 19:10:24 and pays double, and the 卡点 question pays
+    full marks only inside 19:24:00–19:24:59. Two consequences the model cannot
+    infer on its own:
+
+    * between kickoff and the first window it should be racing the EASIEST
+      challenge to completion, not opening the most interesting one -- an
+      unsolved challenge has nothing to submit when the window opens, and the
+      window is worth 2x whatever it pays;
+    * the submit call is held automatically until the window (see the deferred
+      submission queue in the platform-side submission module), so a ``queued``
+      answer means DONE -- the model must move on instead of re-submitting or
+      waiting.
+
+    Returns "" when no windows are configured, so every non-competition run is
+    byte-identical to before.
+    """
+    try:
+        config = getattr(agent, "config", None)
+        competition = getattr(config, "competition", None)
+        if competition is None:
+            return ""
+        windows = list(getattr(competition, "submit_windows", None) or [])
+        if not windows:
+            return ""
+        described = ", ".join(
+            f"{str(w.get('name', '?'))} at {str(w.get('at', '?'))}"
+            + (f"–{str(w.get('until'))}" if w.get("until") else "")
+            for w in windows
+            if isinstance(w, dict)
+        )
+    except Exception:
+        return ""
+    return (
+        "\n\n# Match timing (scoring depends on WHEN you submit)\n"
+        f"Configured submission windows: {described}.\n"
+        "Two things follow, and both cost points if you get them wrong:\n"
+        "1. **Before the FIRST window opens, race the EASIEST challenge to a "
+        "finished answer.** A challenge still unsolved when the window opens has "
+        "nothing to submit, and a submit inside the window scores double. Read the "
+        "challenge list, pick the one you can finish fastest (smallest, most "
+        "standard, fewest moving parts) rather than the most interesting.\n"
+        "2. **A submission answered with `queued` is DONE.** It is held and sent "
+        "automatically at the window; do not submit it again, and do not wait for "
+        "it. Go straight to the next challenge.\n"
+        "After a window's submission is queued, keep solving: the next window is a "
+        "separate scoring event, and holding several finished answers for it is "
+        "exactly what the queue is for."
+    )
+
+
 def _looks_like_quiz(goal: str) -> bool:
     """Return True when ``goal`` reads as a knowledge/theory quiz task."""
     lowered = (goal or "").lower()
@@ -1694,6 +1748,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     )
     fanout_guidance = prompt_guidance(agent)
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
+    competition_instruction = _competition_windows_instruction(agent)
     runtime = getattr(agent, "runtime", None)
     prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
     # Deterministic capability card: goal-relevant external tools this host has.
@@ -1796,6 +1851,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "When user input is required, write `ASK_USER:` with the exact question. "
         "When no viable path remains, write `NO_PATH:` with the evidence-backed reason.\n"
         f"{quiz_instruction}"
+        f"{competition_instruction}"
         f"Origin: {state.origin}\n"
         f"Goal: {state.goal}"
         f"{constraints}"

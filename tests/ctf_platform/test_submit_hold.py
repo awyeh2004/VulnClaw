@@ -349,3 +349,62 @@ class TestNamedWindows:
         assert item is not None
         assert item.window == ""
         assert item.close_at == ""
+
+
+# ── What the model is TOLD about the windows ──────────────────────────────────
+#
+# The queue alone is not enough: a model that does not know a window is coming
+# will happily spend the ten minutes before it on the most interesting challenge,
+# and then have nothing to submit when the window opens.
+
+
+class TestThePromptExplainsTheWindows:
+    def _agent(self, windows):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            config=SimpleNamespace(competition=SimpleNamespace(submit_windows=windows))
+        )
+
+    def test_no_windows_means_no_instruction(self):
+        """Every non-competition run must stay byte-identical."""
+        from vulnclaw.agent.solver import _competition_windows_instruction
+
+        assert _competition_windows_instruction(self._agent([])) == ""
+
+    def test_the_windows_are_named_with_their_times(self):
+        from vulnclaw.agent.solver import _competition_windows_instruction
+
+        text = _competition_windows_instruction(
+            self._agent(
+                [
+                    {"name": "firstblood", "at": "2026-10-24T19:10:24"},
+                    {
+                        "name": "peak",
+                        "at": "2026-10-24T19:24:00",
+                        "until": "2026-10-24T19:24:59",
+                    },
+                ]
+            )
+        )
+        assert "firstblood" in text and "19:10:24" in text
+        assert "peak" in text and "19:24:00" in text
+
+    def test_it_says_to_race_the_easiest_challenge_first(self):
+        """An unsolved challenge has nothing to submit when the window opens."""
+        from vulnclaw.agent.solver import _competition_windows_instruction
+
+        text = _competition_windows_instruction(
+            self._agent([{"name": "firstblood", "at": "2026-10-24T19:10:24"}])
+        ).lower()
+        assert "easiest" in text
+        assert "nothing to submit" in text
+
+    def test_it_says_queued_means_done(self):
+        from vulnclaw.agent.solver import _competition_windows_instruction
+
+        text = _competition_windows_instruction(
+            self._agent([{"name": "peak", "at": "2026-10-24T19:24:00"}])
+        ).lower()
+        assert "queued" in text
+        assert "do not submit it again" in text
