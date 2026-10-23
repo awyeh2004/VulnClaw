@@ -12,6 +12,7 @@ import json
 import httpx
 import pytest
 
+from vulnclaw.config.domain_models import TaskConstraints
 from vulnclaw.config.schema import VulnClawConfig
 from vulnclaw.mcp.lifecycle import MCPLifecycleManager
 
@@ -50,7 +51,87 @@ async def test_call_fetch_defaults_to_get_and_supports_https_without_tls_verific
     assert "Request: GET https://example.com/" in result
     assert "Status: 200" in result
     assert seen_client_kwargs[0]["verify"] is False
-    assert seen_client_kwargs[0]["follow_redirects"] is True
+    # Redirects are followed by the scoped redirect guard, not by httpx. The
+    # client must stay ``follow_redirects=False`` so every destination host can
+    # be checked before it is requested (measured 2026-10-21).
+    assert seen_client_kwargs[0]["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_fetch_rejects_a_redirect_from_a_research_host_to_an_out_of_scope_host(
+    monkeypatch,
+):
+    """The research-host exemption must not become a redirect pivot.
+
+    Measured 2026-10-21: ``follow_redirects`` defaulted True while constraints
+    were checked only for the initial URL, so a 302 from a research host could
+    send the request to any internal/blocked host. Each hop is now checked with
+    the research exemption disabled.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://duckduckgo.com/":
+            return httpx.Response(302, headers={"location": "https://internal.test/secret"})
+        raise AssertionError(f"unexpected request {request.url}")
+
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    manager.set_task_constraints(
+        TaskConstraints(allowed_hosts=["example.com"], strict_mode=True)
+    )
+    result = await manager._call_fetch({"url": "https://duckduckgo.com/"})
+
+    assert "任务范围拦截" in result, result
+    assert "internal.test" in result, result
+
+
+@pytest.mark.asyncio
+async def test_call_fetch_follows_a_redirect_to_an_in_scope_host(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.com/old":
+            return httpx.Response(301, headers={"location": "https://example.com/new"})
+        assert str(request.url) == "https://example.com/new"
+        return httpx.Response(200, text="landed")
+
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    manager.set_task_constraints(
+        TaskConstraints(allowed_hosts=["example.com"], strict_mode=True)
+    )
+    result = await manager._call_fetch({"url": "https://example.com/old"})
+
+    assert "Final URL: https://example.com/new" in result
+    assert "landed" in result
+
+
+@pytest.mark.asyncio
+async def test_call_fetch_stops_after_a_bounded_number_of_redirects(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://example.com/loop"})
+
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    result = await manager._call_fetch({"url": "https://example.com/loop"})
+
+    assert "redirect limit" in result, result
+
+
+@pytest.mark.asyncio
+async def test_call_fetch_stops_when_redirect_chain_budget_is_exhausted(monkeypatch):
+    import vulnclaw.mcp.lifecycle as lifecycle
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("budget should prevent the first request")
+
+    monkeypatch.setattr(lifecycle, "_FETCH_CHAIN_BUDGET", 0.0)
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    result = await manager._call_fetch({"url": "https://example.com/loop"})
+
+    assert "redirect chain budget exceeded" in result, result
 
 
 @pytest.mark.asyncio

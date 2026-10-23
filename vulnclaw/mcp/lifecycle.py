@@ -12,7 +12,7 @@ import time
 import weakref
 from contextlib import suppress
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from vulnclaw.config.schema import MCPServerConfig, VulnClawConfig
 from vulnclaw.config.source_render import render_highlighted_source_block
@@ -61,6 +61,38 @@ _FETCH_METHOD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 _FETCH_DEFAULT_TIMEOUT = 30.0
 _FETCH_MAX_TIMEOUT = 120.0
 _FETCH_DEFAULT_BODY_CHARS_LIMIT = 0
+#: Redirect statuses fetch follows by hand so every hop can be scope-checked.
+_FETCH_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+#: A redirect chain gets a wall-clock budget in addition to the hop count.
+_FETCH_CHAIN_BUDGET = 120.0
+
+
+class _FetchScopeViolation(Exception):
+    """A redirect target left the task scope; stop and report, never follow it.
+
+    Measured 2026-10-21: ``follow_redirects`` defaulted to True while only the
+    INITIAL url passed ``_check_fetch_constraints``, so ``blocked_hosts`` or the
+    research-host exemption on hop one could pivot the request to any host on
+    hop two. This exception is raised from the redirect guard and converted
+    into a structured ``constraint_violation`` by ``_call_fetch``.
+    """
+
+    def __init__(self, url: str, message: str) -> None:
+        super().__init__(message)
+        self.url = url
+
+
+class _FetchRedirectLimit(Exception):
+    """The redirect hop or wall-clock budget was exhausted before a final response arrived."""
+
+    def __init__(self, url: str, limit: int | str) -> None:
+        if isinstance(limit, str):
+            message = f"{limit} for {url}"
+        else:
+            message = f"redirect limit ({limit}) exceeded for {url}"
+        super().__init__(message)
+        self.url = url
+        self.limit = limit
 
 
 def _suppress_cleanup_errors() -> suppress:
@@ -158,7 +190,12 @@ class MCPLifecycleManager(ProbeMixin):
         """Attach current task constraints for tool-level enforcement."""
         self._task_constraints = constraints
 
-    def _check_fetch_constraints(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    def _check_fetch_constraints(
+        self,
+        arguments: dict[str, Any],
+        *,
+        allow_research: bool = True,
+    ) -> dict[str, Any] | None:
         constraints = self._task_constraints
         if constraints is None or constraints.is_empty():
             return None
@@ -188,12 +225,15 @@ class MCPLifecycleManager(ProbeMixin):
         # the writeup policy in solver.py) — what the scope gate exists to bound
         # is traffic sent AT a target, not reading public documentation.
         #
-        # The escalation surface this must not open: an attacker-controlled page
-        # fetched from a research host is still just a GET to that host, and
-        # `blocked_hosts` is checked FIRST below, so an operator who forbids a
-        # host still forbids it here. Attack tools (http_probe_batch / nmap /
-        # brute force) are untouched — they do not go through this method.
-        research = is_research_host(host)
+        # The research exemption only skips ``allowed_hosts`` for the first hop.
+        # The ordinary allowed-host check runs before blocked-host/path/port checks;
+        # a blocked host is still rejected whenever it reaches that check.
+        #
+        # NOTE: the research exemption is only consulted for the FIRST hop here.
+        # Every redirect hop is re-checked by ``_fetch_redirect_guard`` with the
+        # exemption disabled, so a 302 from a research host to an internal or
+        # blocked host is stopped rather than followed (measured 2026-10-21).
+        research = is_research_host(host) if allow_research else False
 
         if (
             not research
@@ -1608,6 +1648,13 @@ class MCPLifecycleManager(ProbeMixin):
         Reuses and updates the shared ``_fetch_cookies`` jar so that a
         session established elsewhere (e.g. ``brute_force_login``) carries
         over to subsequent fetch calls against the same target.
+
+        Redirects are followed explicitly rather than by httpx. The original
+        implementation checked task constraints once, then let httpx follow
+        every redirect without re-checking the destination. That made a
+        research-host exemption (or an in-scope first hop) a pivot to an
+        arbitrary host. Each hop now passes the same host/path/port guard
+        before it is requested.
         """
         try:
             import httpx
@@ -1623,51 +1670,165 @@ class MCPLifecycleManager(ProbeMixin):
 
             # The fetch target is model-chosen and routinely an internal host;
             # the proxy-aware factory keeps a running system proxy from turning
-            # it into a silent "unreachable".
-            #
-            # An operator-configured egress proxy (network.http_proxy /
-            # VULNCLAW_HTTP_PROXY - e.g. `ssh -D 1080 jumpbox`) is the opposite
-            # case and *is* honoured for those internal hosts; loopback stays
-            # direct inside the factory. The TLS-retry client below needs the
-            # same proxy, otherwise the downgrade would silently leave the
-            # tunnel.
-            fetch_targets = (request.get("kwargs") or {}).get("url")
+            # it into a silent "unreachable". Keep the original scalar target:
+            # this is part of the proxy wiring contract and lets tests observe
+            # exactly which URL is handed to the factory.
+            fetch_target = request["url"]
             fetch_proxy = resolve_egress_proxy(getattr(self, "config", None))
-            try:
-                async with async_http_client(
-                    targets=fetch_targets,
-                    proxy=fetch_proxy,
-                    verify=request["verify_tls"],
-                    timeout=request["timeout"],
-                    follow_redirects=request["follow_redirects"],
-                    cookies=jar,
-                ) as client:
-                    response = await client.request(**request["kwargs"])
-                    jar.extract_cookies(response)
-            except httpx.TransportError as exc:
-                if request["verify_tls"] and _is_tls_verification_error(exc):
-                    request = {**request, "verify_tls": False, "tls_retry": True}
-                    async with async_http_client(
-                        targets=fetch_targets,
-                        proxy=fetch_proxy,
-                        verify=False,
-                        timeout=request["timeout"],
-                        follow_redirects=request["follow_redirects"],
-                        cookies=jar,
-                    ) as client:
-                        response = await client.request(**request["kwargs"])
-                        jar.extract_cookies(response)
-                else:
-                    raise
+            response = await self._fetch_with_scoped_redirects(
+                request,
+                jar=jar,
+                httpx=httpx,
+                async_http_client=async_http_client,
+                fetch_proxy=fetch_proxy,
+                first_target=fetch_target,
+            )
 
             body_digest = hashlib.sha256(response.content or b"").hexdigest()[:12]
             request["_body_digest"] = body_digest
             return self._format_fetch_response(response, request)
 
+        except _FetchScopeViolation as exc:
+            return self._fetch_scope_violation_result(str(exc))
+        except _FetchRedirectLimit as exc:
+            return self._fetch_scope_violation_result(str(exc))
         except ImportError:
             return "[!] httpx 未安装，无法执行 fetch 请求"
         except Exception as e:
             return f"[!] fetch 请求失败: {e}"
+
+    def _fetch_scope_violation_result(self, message: str) -> str:
+        """Render a scoped redirect rejection for the local fetch tool."""
+        return f"[!] fetch 请求被任务范围拦截: {message}"
+
+    async def _fetch_with_scoped_redirects(
+        self,
+        request: dict[str, Any],
+        *,
+        jar: Any,
+        httpx: Any,
+        async_http_client: Any,
+        fetch_proxy: str | None,
+        first_target: str,
+    ) -> Any:
+        """Request each redirect hop only after validating its destination.
+
+        The initial URL is checked by ``_dispatch_call_tool``. Redirects are
+        deliberately requested with ``follow_redirects=False`` so httpx cannot
+        silently cross the engagement boundary. The guard validates host,
+        path, port, and blocked lists for every subsequent URL; the research
+        exemption is disabled for those hops, because a research page is not a
+        reason to trust the host it redirects to.
+        """
+        current = dict(request)
+        max_redirects = 20
+        deadline = time.monotonic() + _FETCH_CHAIN_BUDGET
+        if time.monotonic() >= deadline:
+            raise _FetchRedirectLimit(current["url"], "redirect chain budget exceeded")
+        for _ in range(max_redirects + 1):
+            if time.monotonic() > deadline:
+                raise _FetchRedirectLimit(current["url"], "redirect chain budget exceeded")
+            target = first_target if current["url"] == request["url"] else current["url"]
+            response = await self._fetch_one_request(
+                current,
+                jar=jar,
+                httpx=httpx,
+                async_http_client=async_http_client,
+                fetch_proxy=fetch_proxy,
+                target=target,
+            )
+            # ``_fetch_one_request`` mutates the hop metadata for its own retry
+            # path; keep the outer request in sync for response formatting and
+            # downstream redirect hops.
+            if current.get("tls_retry"):
+                request["tls_retry"] = True
+                request["verify_tls"] = False
+            if current["follow_redirects"] and response.status_code in _FETCH_REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if not location:
+                    return response
+                next_url = urljoin(current["url"], location)
+                violation = self._check_fetch_constraints(
+                    {"url": next_url},
+                    allow_research=False,
+                )
+                if violation is not None:
+                    raise _FetchScopeViolation(next_url, violation["message"])
+                next_request = self._redirect_request(current, next_url, response.status_code)
+                current = {**current, "url": next_url, "kwargs": next_request}
+                continue
+            return response
+        raise _FetchRedirectLimit(current["url"], max_redirects)
+
+    async def _fetch_one_request(
+        self,
+        request: dict[str, Any],
+        *,
+        jar: Any,
+        httpx: Any,
+        async_http_client: Any,
+        fetch_proxy: str | None,
+        target: str,
+    ) -> Any:
+        """Execute one hop, retrying once without TLS verification if needed."""
+        try:
+            async with async_http_client(
+                targets=target,
+                proxy=fetch_proxy,
+                verify=request["verify_tls"],
+                timeout=request["timeout"],
+                follow_redirects=False,
+                cookies=jar,
+            ) as client:
+                response = await client.request(**request["kwargs"])
+                jar.extract_cookies(response)
+                return response
+        except httpx.TransportError as exc:
+            if not request["verify_tls"] or not _is_tls_verification_error(exc):
+                raise
+            retry_request = {**request, "verify_tls": False, "tls_retry": True}
+            async with async_http_client(
+                targets=target,
+                proxy=fetch_proxy,
+                verify=False,
+                timeout=retry_request["timeout"],
+                follow_redirects=False,
+                cookies=jar,
+            ) as client:
+                response = await client.request(**retry_request["kwargs"])
+                jar.extract_cookies(response)
+                request.update(tls_retry=True, verify_tls=False)
+                return response
+
+    @staticmethod
+    def _redirect_request(
+        request: dict[str, Any], next_url: str, status_code: int
+    ) -> dict[str, Any]:
+        """Build the next-hop request with safe method/header handling."""
+        original_url = request["url"]
+        old = urlparse(original_url)
+        new = urlparse(next_url)
+        cross_origin = (old.scheme, old.hostname, old.port) != (
+            new.scheme,
+            new.hostname,
+            new.port,
+        )
+        method = request["method"]
+        kwargs = dict(request["kwargs"])
+        if status_code in {301, 302, 303} and method not in {"GET", "HEAD"}:
+            method = "GET"
+            kwargs.pop("content", None)
+            kwargs.pop("data", None)
+            kwargs.pop("json", None)
+        kwargs["method"] = method
+        kwargs["url"] = next_url
+        if cross_origin:
+            headers = dict(kwargs.get("headers") or {})
+            for name in list(headers):
+                if name.lower() in {"authorization", "proxy-authorization", "cookie"}:
+                    headers.pop(name, None)
+            kwargs["headers"] = headers
+        return kwargs
 
     def _prepare_fetch_request(self, args: dict) -> dict[str, Any]:
         url = str(args.get("url", "") or "").strip()

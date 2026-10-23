@@ -26,6 +26,8 @@ _HTTP_PROBE_ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", 
 _HTTP_PROBE_MAX_REQUESTS = 30
 _HTTP_PROBE_DEFAULT_TIMEOUT = 10.0
 _HTTP_PROBE_DEFAULT_BODY_CHARS_LIMIT = 0
+_HTTP_PROBE_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_HTTP_PROBE_BATCH_BUDGET = 300.0
 _HTTP_PROBE_SENSITIVE_HEADER_NAMES = {
     "authorization",
     "proxy-authorization",
@@ -107,6 +109,8 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
 
     def _run() -> str:
         results: list[dict[str, Any]] = []
+        deadline = time.monotonic() + _HTTP_PROBE_BATCH_BUDGET
+        budget_exhausted = time.monotonic() >= deadline
         # Group the batch by whether a request must bypass the system proxy.
         #
         # targets= keeps the system proxy out of the way for loopback/private
@@ -144,7 +148,24 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
                 headers={"User-Agent": "VulnClaw-http_probe_batch/1.0"},
             ) as client:
                 for item in group:
-                    results.append(_execute_one_http_probe(client, item, max_body_chars))
+                    if budget_exhausted or time.monotonic() >= deadline:
+                        budget_exhausted = True
+                        results.append(
+                            {
+                                **item,
+                                "error": "[budget_exceeded] batch time budget exceeded",
+                            }
+                        )
+                        continue
+                    results.append(
+                        _execute_one_http_probe(
+                            client,
+                            item,
+                            max_body_chars,
+                            agent=agent,
+                            follow_redirects=follow_redirects,
+                        )
+                    )
 
         # Two groups means the append order is no longer spec order.
         results.sort(key=lambda entry: entry.get("index") or 0)
@@ -299,18 +320,24 @@ def _execute_one_http_probe(
     client: httpx.Client,
     item: dict[str, Any],
     max_body_chars: int,
+    *,
+    agent: AgentContext,
+    follow_redirects: bool,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     try:
-        response = client.request(
-            item["method"],
-            item["url"],
-            params=item.get("params"),
-            headers=item.get("headers") or None,
-            cookies=item.get("cookies") or None,
-            data=item.get("data"),
-            json=item.get("json"),
+        response, redirect_error = _request_with_scoped_redirects(
+            client,
+            item,
+            agent=agent,
+            follow_redirects=follow_redirects,
         )
+        if redirect_error:
+            return {
+                **item,
+                "error": redirect_error,
+                "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+            }
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         body = response.text or ""
         body_output, body_truncated = _body_with_optional_limit(body, max_body_chars)
@@ -339,6 +366,89 @@ def _execute_one_http_probe(
             "error": f"{exc.__class__.__name__}: {one_line(str(exc), 220)}",
             "duration_ms": duration_ms,
         }
+
+
+def _request_with_scoped_redirects(
+    client: httpx.Client,
+    item: dict[str, Any],
+    *,
+    agent: AgentContext,
+    follow_redirects: bool,
+) -> tuple[httpx.Response, str | None]:
+    """Follow probe redirects only after checking every destination host/path.
+
+    ``http_probe_batch`` used to pass ``follow_redirects=True`` to httpx after
+    validating only the initial URL. A target-controlled 302 could therefore
+    pivot the batch outside task constraints. Keep httpx on one hop and apply
+    the same host/path/port gates before each next request.
+
+    Credentials follow the same-origin rule as MCP fetch: a cross-origin hop
+    must not keep Authorization, Proxy-Authorization, Cookie, or the caller's
+    cookie jar. Otherwise a scope-valid redirect could leak a session token to
+    an unrelated host.
+    """
+    current = dict(item)
+    method = str(current["method"])
+    current_url = str(current["url"])
+    for _ in range(21):
+        response = client.request(
+            method,
+            current_url,
+            params=current.get("params"),
+            headers=current.get("headers") or None,
+            cookies=current.get("cookies") or None,
+            data=current.get("data"),
+            json=current.get("json"),
+        )
+        if not follow_redirects or response.status_code not in _HTTP_PROBE_REDIRECT_STATUSES:
+            return response, None
+        location = response.headers.get("location")
+        if not location:
+            return response, None
+        next_url = urljoin(current_url, location)
+        parsed = urlparse(next_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return response, (
+                f"[constraint_violation] redirect target is not an http(s) URL: {next_url}"
+            )
+        from vulnclaw.agent import builtin_tools as _bt
+        violation = _bt.enforce_host_path_constraints(
+            agent,
+            host=parsed.hostname.lower(),
+            path=(parsed.path or "/").rstrip("/") or "/",
+            target=parsed.hostname,
+        )
+        if violation:
+            return response, f"{violation} (redirect target: {next_url})"
+        port = infer_port_from_url(next_url)
+        if port is not None:
+            port_violation = _bt.enforce_port_constraints(agent, [port], target=parsed.hostname)
+            if port_violation:
+                return response, f"{port_violation} (redirect target: {next_url})"
+
+        old = urlparse(current_url)
+        cross_origin = (old.scheme, old.hostname, old.port or infer_port_from_url(current_url)) != (
+            parsed.scheme,
+            parsed.hostname,
+            port or infer_port_from_url(next_url),
+        )
+        if cross_origin:
+            headers = dict(current.get("headers") or {})
+            for name in list(headers):
+                if str(name).lower() in {"authorization", "proxy-authorization", "cookie"}:
+                    headers.pop(name, None)
+            current["headers"] = headers or None
+            current["cookies"] = None
+
+        current_url = next_url
+        if response.status_code in {301, 302, 303} and method not in {"GET", "HEAD"}:
+            method = "GET"
+            current["data"] = None
+            current["json"] = None
+    return (
+        httpx.Response(508, request=httpx.Request("GET", current_url)),
+        "[constraint_violation] redirect limit exceeded",
+    )
 
 
 def _extract_html_title(body: str) -> str:

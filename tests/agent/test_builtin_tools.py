@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import vulnclaw.agent.builtin_tools as builtin_tools
 
@@ -388,6 +389,195 @@ class TestBuiltinPythonExecute:
         assert "body_length=" in result
         assert "body:" in result
         assert "Same-body groups" in result
+
+    async def test_http_probe_batch_stops_a_redirect_outside_scope(self, monkeypatch):
+        """A redirect cannot bypass the scope checked on the initial URL.
+
+        httpx used to follow redirects internally after only the first URL had
+        been checked, so a target-controlled 302 could pivot the probe to any
+        host/path. Each hop is now checked before it is requested.
+        """
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        calls: list[str] = []
+
+        class DummyResponse:
+            def __init__(self, status, url, location=""):
+                self.status_code = status
+                self.url = url
+                self.text = "body"
+                self.content = b"body"
+                self.headers = {}
+                if location:
+                    self.headers["location"] = location
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **kwargs):
+                calls.append(url)
+                if url == "https://example.com/start":
+                    return DummyResponse(302, url, "https://internal.test/secret")
+                raise AssertionError(f"unexpected request {url}")
+
+        def enforce_host_path_constraints(agent, *, host="", path="", target=""):
+            if host == "internal.test":
+                return "[constraint_violation] Host internal.test is outside allowed scope."
+            return None
+
+        monkeypatch.setattr(builtin_tools, "make_http_client", lambda **kwargs: DummyClient())
+        monkeypatch.setattr(builtin_tools, "enforce_host_path_constraints", enforce_host_path_constraints)
+        monkeypatch.setattr(builtin_tools, "enforce_port_constraints", lambda *a, **k: None)
+
+        result = await builtin_tools.execute_http_probe_batch(
+            DummyAgent(),
+            {
+                "base_url": "https://example.com",
+                "requests": [{"url": "start"}],
+            },
+        )
+
+        assert calls == ["https://example.com/start"], calls
+        assert "[constraint_violation]" in result
+        assert "internal.test" in result
+
+    async def test_http_probe_batch_strips_credentials_on_cross_origin_redirect(self, monkeypatch):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        calls: list[tuple[str, dict[str, Any], Any]] = []
+
+        class DummyResponse:
+            def __init__(self, status, url, location=""):
+                self.status_code = status
+                self.url = url
+                self.text = "body"
+                self.content = b"body"
+                self.headers = {}
+                if location:
+                    self.headers["location"] = location
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **kwargs):
+                calls.append((url, dict(kwargs.get("headers") or {}), kwargs.get("cookies")))
+                if url == "https://example.com/start":
+                    return DummyResponse(302, url, "https://allowed.test/next")
+                return DummyResponse(200, url)
+
+        monkeypatch.setattr(builtin_tools, "make_http_client", lambda **kwargs: DummyClient())
+        monkeypatch.setattr(builtin_tools, "enforce_host_path_constraints", lambda *a, **k: None)
+        monkeypatch.setattr(builtin_tools, "enforce_port_constraints", lambda *a, **k: None)
+
+        result = await builtin_tools.execute_http_probe_batch(
+            DummyAgent(),
+            {
+                "base_url": "https://example.com",
+                "requests": [
+                    {
+                        "url": "start",
+                        "headers": {"Authorization": "Bearer secret", "X-Trace": "keep"},
+                        "cookies": {"session": "secret"},
+                    }
+                ],
+            },
+        )
+
+        assert calls[1][0] == "https://allowed.test/next", calls
+        assert calls[1][1] == {"X-Trace": "keep"}, calls[1]
+        assert calls[1][2] is None, calls[1]
+        assert "http_probe_batch results" in result
+
+    async def test_http_probe_batch_keeps_credentials_on_same_origin_redirect(self, monkeypatch):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+
+        calls: list[tuple[str, dict[str, Any], Any]] = []
+
+        class DummyResponse:
+            def __init__(self, status, url, location=""):
+                self.status_code = status
+                self.url = url
+                self.text = "body"
+                self.content = b"body"
+                self.headers = {}
+                if location:
+                    self.headers["location"] = location
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **kwargs):
+                calls.append((url, dict(kwargs.get("headers") or {}), kwargs.get("cookies")))
+                if url == "https://example.com/start":
+                    return DummyResponse(302, url, "/next")
+                return DummyResponse(200, url)
+
+        monkeypatch.setattr(builtin_tools, "make_http_client", lambda **kwargs: DummyClient())
+        monkeypatch.setattr(builtin_tools, "enforce_host_path_constraints", lambda *a, **k: None)
+        monkeypatch.setattr(builtin_tools, "enforce_port_constraints", lambda *a, **k: None)
+
+        await builtin_tools.execute_http_probe_batch(
+            DummyAgent(),
+            {
+                "base_url": "https://example.com",
+                "requests": [
+                    {
+                        "url": "start",
+                        "headers": {"Authorization": "Bearer secret"},
+                        "cookies": {"session": "secret"},
+                    }
+                ],
+            },
+        )
+
+        assert calls[1][0] == "https://example.com/next", calls
+        assert calls[1][1] == {"Authorization": "Bearer secret"}, calls[1]
+        assert calls[1][2] == {"session": "secret"}, calls[1]
+
+    async def test_http_probe_batch_stops_new_requests_after_time_budget(self, monkeypatch):
+        import vulnclaw.agent.builtin_tools as builtin_tools
+        import vulnclaw.agent.tools.http_probe as http_probe
+
+        calls: list[str] = []
+
+        class DummyClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def request(self, method, url, **kwargs):
+                calls.append(url)
+                raise AssertionError("budget should prevent every request")
+
+        monkeypatch.setattr(http_probe, "_HTTP_PROBE_BATCH_BUDGET", 0.0)
+        monkeypatch.setattr(builtin_tools, "make_http_client", lambda **kwargs: DummyClient())
+        monkeypatch.setattr(builtin_tools, "enforce_host_path_constraints", lambda *a, **k: None)
+        monkeypatch.setattr(builtin_tools, "enforce_port_constraints", lambda *a, **k: None)
+
+        result = await builtin_tools.execute_http_probe_batch(
+            DummyAgent(),
+            {
+                "base_url": "https://example.com",
+                "requests": [{"url": "one"}, {"url": "two"}],
+            },
+        )
+
+        assert calls == []
+        assert result.count("batch time budget exceeded") == 2
 
     async def test_http_probe_batch_exposes_response_headers_and_defaults_tls_off(
         self, monkeypatch
@@ -1069,6 +1259,35 @@ class TestMcpToolsSurviveGoalPruning:
             "traffic_bind_evidence",
         ):
             assert name in allowed, f"{name} was pruned from the tool face"
+
+    def test_vulnerability_lookups_survive_every_task_bundle(self):
+        """cve_lookup / exploit_intel must not be pruned by goal keywords.
+
+        Measured 2026-10-21: a CTF goal that names a CVE
+        ("Solve CTF2 challenge 'log4shell' CVE-2021-44228 web rce") matched the
+        web bundle, which contains neither name, so ``exploit_intel`` was absent
+        from the schema exactly when the CVE id was in the goal. Neither tool was
+        on ``_ALWAYS_KEEP_TOOLS`` -- ``cve_lookup`` had the same latent gap and
+        only happened to survive through the osint bundle.
+        """
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        goals = [
+            "Solve CTF2 challenge 'log4shell' CVE-2021-44228 web rce",
+            "解一道 jpg 隐写题，找 flag",
+            "后台登录页面 sql注入 测试",
+            "RSA 解密，给了一串 base64",
+            "对目标做渗透测试，参考 CVE-2021-44228",
+        ]
+        for goal in goals:
+            allowed = _infer_allowed_tools(goal)
+            if allowed is None:
+                continue  # full toolset: visible by definition
+            for name in ("cve_lookup", "exploit_intel"):
+                assert name in allowed, (
+                    f"{name} was pruned for goal {goal!r}; the CVE lookup must stay "
+                    "visible on every task face"
+                )
 
     def test_pentest_escape_is_judged_on_the_latest_goal(self):
         """A poisoned history must not kill the general-pentest escape.
