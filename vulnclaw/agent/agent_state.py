@@ -72,7 +72,11 @@ def clip_text(value: str, limit: int, *, marker: str = "...[truncated]...") -> s
 def one_line(value: str, limit: int = 240) -> str:
     """Collapse whitespace and clip to one prompt-safe line."""
 
-    return clip_text(re.sub(r"\s+", " ", str(value or "")).strip(), limit)
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    clipped = clip_text(text, limit) if limit > 0 else text
+    return re.sub(r"\s+", " ", clipped).strip()
 
 
 def parse_status_code(output: str) -> int:
@@ -412,6 +416,18 @@ class AgentState(BaseModel):
     tool_health: dict[str, ToolHealth] = Field(default_factory=dict)
     pending_questions: list[str] = Field(default_factory=list)
     compact_summary: str = ""
+    #: Operator hints (``--hint``), kept out of ``compact_summary``.
+    #:
+    #: Measured 2026-10-21: hints were appended to ``compact_summary``, which
+    #: ``to_prompt_summary`` renders only while ``context_digest.summary`` is
+    #: empty (``elif``), and ``update_context_digest`` overwrites
+    #: ``compact_summary`` wholesale. Auto-compaction (``context_auto_compact``
+    #: defaults on, see ``context_budget.py``) therefore erased the operator's
+    #: hints mid-run -- on the exact long runs where a stuck model needs them.
+    #: This field is never touched by compaction, so it stays readable for the
+    #: whole run. Declared explicitly: pydantic v2 rejects undeclared setattr
+    #: (see the guard-counter note below).
+    operator_hints: list[str] = Field(default_factory=list)
     llm_usage_prompt_tokens: int = 0
     llm_usage_completion_tokens: int = 0
     llm_requests: int = 0
@@ -507,6 +523,10 @@ class AgentState(BaseModel):
         self.tool_health = {}
         self.pending_questions = []
         self.compact_summary = ""
+        # Operator hints are a per-goal input (the CLI passes them for THIS run's
+        # goal); reset_for_goal already clears compact_summary, and keeping
+        # hints from a previous goal would steer the new one wrongly.
+        self.operator_hints = []
         self.context_digest = ContextDigest()
         self.context_compactions = []
         self.completion_rejections = []
@@ -982,6 +1002,14 @@ class AgentState(BaseModel):
             sections.append(f"\nContext digest:\n{clip_text(digest.summary, 1800)}")
         elif self.compact_summary:
             sections.append(f"\nManual compact summary:\n{clip_text(self.compact_summary, 1800)}")
+        # Operator hints render unconditionally (never behind the digest elif):
+        # they are instructions the operator passed for THIS run, and auto
+        # compaction replaces both compact_summary and the digest (see the field
+        # comment on operator_hints). Each hint is its own line, so the " | "
+        # join that used to live in solver could not confuse two hints.
+        if self.operator_hints:
+            rendered = "\n".join(f"- {one_line(hint, 400)}" for hint in self.operator_hints)
+            sections.append(f"\nOperator hints (from the human running this solve):\n{rendered}")
         if self.verified_claims:
             sections.append("\nVerified claims:")
             sections.extend(
