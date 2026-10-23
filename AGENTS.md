@@ -131,6 +131,52 @@ ctf2_user_delete_practice_id_challenges_challengeid_environment
 - 提交后**必须核对平台返回**：`accepted: true` 才算数。owner PAT 与 MCP agent token
   是**两套记分板**，用 owner token 提交不计入 agent 分数。
 
+### 4.1 正式赛（competition）与练习场（practice）走的是两条路
+
+实测 2026-10-23（1024 快闪赛调试赛，4/4 解出、180 分）：
+
+- `vulnclaw ctf2 <pid> <cid>` **只认 practice**。比赛题不能这样起：适配器的
+  `read_challenge` 不区分 `ref.kind`，一律调 practice 路由 → 404；而且 REST 对
+  比赛路由直接返回 `403 agent_scope_forbidden` —— **比赛能力只开放给 MCP**。
+- 比赛的起法是 `solve` + 在 goal 里点名 MCP 工具：
+
+  ```bash
+  vulnclaw solve "ctf2:competition:<cmp_id>:<stage_id>:<challenge_id>" \
+    --goal "…start its environment with ctf2_start_competition_environment and poll
+            ctf2_get_competition_environment until usable… then submit with
+            ctf2_submit_competition_flag (confirmation=true). Flag format DASCTF{...}."
+  ```
+
+- 比赛工具（`ctf2_list_competition_challenges` 等）**必须同时传 `competition_id`
+  和 `stage_id`**，只传一个会 `INVALID_REQUEST`。stage id 从
+  `ctf2_get_competition` 的 `stages[].audience == "agent"` 里取。
+- **选择题**：`submission_type` 在题目列表与单题读取里都会返回。遇到 `choice` 时
+  不是传 `flag` 而是传 `choice: ["A"]`（`single_choice`/`true_false` 一个字母，
+  `multiple_choice` 全部正确字母）。**选项顺序每人不同**，只能按自己 `choice.options`
+  里的字母，别照抄题解。
+
+### 4.2 计分时间窗：到点前挂起、到点自动提交
+
+1024 快闪赛有两条按**提交时刻**计分的规则：闪电战窗口内翻倍、19:24 卡点题窗口内
+满分（其他时间一半）。平台按请求到达时间戳判定，所以要么准点发，要么丢分。
+
+```bash
+export VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL=2026-10-24T19:24:00
+export VULNCLAW_COMPETITION__SUBMIT_WINDOW_END=2026-10-24T20:00:00
+```
+
+设了 `SUBMIT_HOLD_UNTIL` 之后，提交调用**不立即发送**：完整参数落盘
+（`<config>/submit_hold/queue.json`），由后台线程在到期时刻自动发出，模型收到的是
+`queued: true`（不是失败）。要点：
+
+- 队列**落盘**，所以找到 flag 的那个 run 退出了也不影响（19:24 可能早于 run 结束，
+  也可能晚于它）；
+- 同一 payload 重复提交折叠成一条 —— 选择题只有 1 次机会；
+- 过了 `SUBMIT_WINDOW_END` 一律不发，改为丢弃并记录原因（往关闭的入口提交，
+  规则里算"非有效操作"）；
+- 稍晚一点点仍然发送（晚 1 秒还在 60 秒窗口内）；
+- 不设 = 立即提交，行为不变。
+
 ---
 
 ## 五、完成门与 stall guard 是有意设计，不要"优化"掉
