@@ -67,6 +67,18 @@ E:\vulnclaw\vulnclaw-e.cmd ctf2 <challenge_id> <practice_id> --max-steps 40
 `C:\Users\<user>\AppData` 仍占 76 GB，那是系统目录，不要在里面 rm -rf。
 可安全清理的是 `AppData\Local\Temp`（超过 1 天的文件）。
 
+### `E:\vulnclaw\tmp` 是共享 TEMP，不是 VulnClaw 专属目录（2026-10-24 实测）
+
+当日复测：全目录 4,908 文件 / 约 1.21 GiB，其中 **VulnClaw 自己只有约 25 MiB**
+（`*.events.ndjson` ≈ 1 MiB + run 短名 `.log` ≈ 24 MiB）；其余是 oopz（≈276 MiB）、
+PCL（≈103 MiB）、VS/WinRAR/pip-unpack 等借道 TEMP 的产物。所以：
+
+- **绝不按扩展名全局清理这个目录**（`.log/.tmp/.dll/.exe` 大部分是别的程序的
+  运行时文件，删了会坏人家）；
+- 可安全清的只有确认属于 VulnClaw 的 `*.events.ndjson` 和 run `.log`，先按修改
+  时间归档再删（具体口径见 TECH-DEBT §F）；
+- E 盘空间告急时先看 oopz/PCL/VS 这些大户，别把账算到 VulnClaw 头上。
+
 ---
 
 ## 二、环境变量生效时机
@@ -170,6 +182,8 @@ ctf2_user_delete_practice_id_challenges_challengeid_environment
 # 环境变量（推荐，比赛现场改一行就行）
 export VULNCLAW_COMPETITION__SUBMIT_WINDOWS="firstblood@19:10:24,peak@19:24:00+59"
 export VULNCLAW_COMPETITION__SUBMIT_WINDOW_END=2026-10-24T20:00:00
+# 只让指定的题等窗口（不设 = 所有题都等）。2026-10-24 实战的用法：
+export VULNCLAW_COMPETITION__SUBMIT_WINDOW_CHALLENGES=c47066a1-4e5e-4f2e-bae0-194faedb1532
 ```
 
 ```yaml
@@ -179,6 +193,7 @@ competition:
     - {name: firstblood, at: "2026-10-24T19:10:24"}
     - {name: peak,       at: "2026-10-24T19:24:00", until: "2026-10-24T19:24:59"}
   submit_default_window: peak
+  submit_window_challenges: ["c47066a1-4e5e-4f2e-bae0-194faedb1532"]
 ```
 
 设了窗口之后，提交调用**不立即发送**：完整参数落盘
@@ -186,11 +201,15 @@ competition:
 `queued: true`（不是失败）。行为细节：
 
 - 不指定窗口时选**最近一个尚未关闭**的窗口 —— 19:23 找到的 flag 仍进得了 19:24 带；
-- 队列**落盘**，找到 flag 的 run 退出了也照样发；
+- 队列**落盘**，找到 flag 的 run 退出了也照样发（任何 MCP 调用都会把调度线程拉起来；
+  HEAD 的版本漏了 `.start()`，队列看着已排队却整点没发，见 TECH-DEBT）；
+- `submit_window_challenges` 非空时**只有这几道**进队列，其余解出即发 ——
+  2026-10-24 现场改的就是这条：卡点题等 19:24，其他题正常提交；
 - 同一 payload 折叠成一条（选择题只有 1 次机会）；
 - 每项按**自己的**窗口关闭：首血项不会被卡点窗口的终点误杀；
 - 过了窗口终点一律不发，改为丢弃并记录原因（往关闭的入口提交算"非有效操作"）；
-- 首血提前量 0.3s、卡点 0.8s，tick 间隔 0.05s；
+- 首血提前量 0.3s；**卡点不提前**（带内满分，早 0.8s 落到带外就只有一半），
+  tick 间隔 0.05s；
 - 完全不设 = 立即提交，行为不变。
 
 **注意**：这个机制只负责"到时才发"。19:24 那一刻没解出题，队列里就没东西可发。
