@@ -81,5 +81,6 @@ routing:
 - `references/ir-competition-strategy.md` — **应急响应赛答题制策略**（IR 赛必读）
 - `knowledge-quiz` — 知识竞赛/理论题批量作答策略，开局抢分首选
 - `ctf-web` / `ctf-crypto` / `ctf-misc` / `crypto-toolkit` — 具体题型的攻击知识
+- `security-hardening` — 安全加固/防守题：先找 checker、快照、逐项修并验证；30–40 分钟，不套用 8-turn fail-fast
 - `incident-response` — 应急响应完整方法论 + 出题方教材 14 案例知识库
 - solve playbook（`lookup_playbook`/`save_playbook` 工具）— 同题新靶机复用已解路径，比赛换实例时尤其省时间
