@@ -27,6 +27,7 @@ CA -- and a certificate failure now says exactly that (``_describe_download_erro
 
 from __future__ import annotations
 
+import hashlib
 import os
 import ssl
 import uuid
@@ -38,6 +39,21 @@ from vulnclaw.utils.atomic_write import replace_with_retry
 
 DEFAULT_TIMEOUT = 60.0
 CHUNK = 8192
+#: Hard ceiling per attachment. An unlimited stream once had no bound at all:
+#: the (usually absent) declared size was only compared AFTER the whole body
+#: was on disk (audit item G, 2026-10-24). Override with VULNCLAW_MAX_ATTACHMENT_MB.
+DEFAULT_MAX_ATTACHMENT_BYTES = 1024 * 1024 * 1024
+
+
+def _max_attachment_bytes() -> int:
+    raw = (os.environ.get("VULNCLAW_MAX_ATTACHMENT_MB") or "").strip()
+    try:
+        mb = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_ATTACHMENT_BYTES
+    if mb <= 0:
+        return DEFAULT_MAX_ATTACHMENT_BYTES
+    return int(mb * 1024 * 1024)
 
 
 @dataclass(frozen=True)
@@ -49,6 +65,9 @@ class AttachmentDownload:
     path: str = ""
     size: int = 0
     error: str = ""
+    #: sha256 of the bytes actually written (hex). Empty unless the download
+    #: completed -- callers log it so a later analysis step can re-verify.
+    sha256: str = ""
 
     @property
     def ok(self) -> bool:
@@ -166,7 +185,27 @@ def download_attachment(
     partial = f"{local}.{os.getpid()}-{uuid.uuid4().hex[:8]}.part"
     os.makedirs(dest_dir, exist_ok=True)
 
+    # Hard size ceiling (audit item G): declared or not, a stream that exceeds
+    # the cap is aborted MID-DOWNLOAD and discarded. The declared-size check
+    # used to run only after the whole body was on disk, so a lying (or absent)
+    # size let an unbounded file land first and be judged later.
+    cap = _max_attachment_bytes()
+    declared_size = getattr(attachment, "size", None)
+    if declared_size is not None and declared_size > cap:
+        return AttachmentDownload(
+            name=label,
+            url=url,
+            error=(
+                f"declared size {declared_size} exceeds the download cap ({cap} bytes); "
+                "raise VULNCLAW_MAX_ATTACHMENT_MB if this file is expected"
+            ),
+        )
+    declared_md5 = str(getattr(attachment, "md5", "") or "").strip().lower()
+
+    sha256 = hashlib.sha256()
+    md5 = hashlib.md5()
     written = 0
+    over_cap = False
     try:
         with client.stream("GET", url, follow_redirects=True) as response:  # type: ignore[attr-defined]
             if response.status_code != 200:
@@ -177,14 +216,32 @@ def download_attachment(
                 for chunk in response.iter_bytes(CHUNK):
                     handle.write(chunk)
                     written += len(chunk)
+                    sha256.update(chunk)
+                    md5.update(chunk)
+                    if written > cap:
+                        # Leaving the loop closes the stream; the partial file is
+                        # discarded below so a capped download is never usable.
+                        over_cap = True
+                        break
     except Exception as exc:  # noqa: BLE001 - reported, not raised
         _discard_partial(partial)
         return AttachmentDownload(name=label, url=url, error=_describe_download_error(exc))
 
+    if over_cap:
+        _discard_partial(partial)
+        return AttachmentDownload(
+            name=label,
+            url=url,
+            size=written,
+            error=(
+                f"download aborted at {written} bytes: exceeds the cap ({cap} bytes); "
+                "raise VULNCLAW_MAX_ATTACHMENT_MB if this file is expected"
+            ),
+        )
+
     # Verify what the platform told us, when it told us anything. CTF2 publishes no
-    # md5 (verified), so size is the available check -- and it catches a truncated
+    # md5 (verified), so size is the available check there -- and it catches a truncated
     # body, which is the failure that silently breaks a pwn/RE analysis later.
-    declared_size = getattr(attachment, "size", None)
     if declared_size is not None and written != declared_size:
         # A truncated artifact is worthless for analysis, and leaving it at the
         # canonical path is how a later step ends up reading half a binary. Discard it
@@ -197,6 +254,19 @@ def download_attachment(
             error=(
                 f"size mismatch (declared {declared_size}, got {written}) -- "
                 f"discarded the partial file; re-run to fetch it again"
+            ),
+        )
+    if declared_md5 and declared_md5 != md5.hexdigest():
+        # The declared md5 was never actually checked before (audit item G): the
+        # download "succeeded" and analysis ran on corrupted/wrong bytes.
+        _discard_partial(partial)
+        return AttachmentDownload(
+            name=label,
+            url=url,
+            size=written,
+            error=(
+                f"md5 mismatch (declared {declared_md5}, got {md5.hexdigest()}) -- "
+                f"discarded the downloaded file; re-run to fetch it again"
             ),
         )
 
@@ -212,7 +282,9 @@ def download_attachment(
         return AttachmentDownload(
             name=label, url=url, error=f"could not move the download into place: {exc}"
         )
-    return AttachmentDownload(name=label, url=url, path=local, size=written)
+    return AttachmentDownload(
+        name=label, url=url, path=local, size=written, sha256=sha256.hexdigest()
+    )
 
 
 def _discard_partial(path: str) -> None:

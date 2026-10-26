@@ -368,3 +368,77 @@ class TestCertificateFailuresAreActionable:
         )
 
         assert result.error == "HTTP 500"
+
+
+class TestDownloadIntegrityAndCap:
+    """Audit item G (2026-10-24): streaming size cap and hash verification.
+
+    The declared size used to be checked only after the whole body was on disk
+    and the declared md5 was never verified at all; a stream also had no bound
+    when the platform declared none.
+    """
+
+    def test_success_reports_streaming_sha256(self, tmp_path):
+        import hashlib
+
+        body = b"attachment-bytes" * 10
+        client = _FakeClient(_FakeResponse(200, body))
+        result = att.download_attachment(
+            client, Attachment(name="a.zip", url="https://h/a.zip"), str(tmp_path)
+        )
+        assert result.ok
+        assert result.sha256 == hashlib.sha256(body).hexdigest()
+
+    def test_declared_md5_mismatch_discards_the_file(self, tmp_path):
+        body = b"corrupted payload"
+        client = _FakeClient(_FakeResponse(200, body))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a.zip", url="https://h/a.zip", md5="0" * 32),
+            str(tmp_path),
+        )
+        assert not result.ok
+        assert "md5 mismatch" in result.error
+        assert list(tmp_path.iterdir()) == []
+
+    def test_declared_md5_match_succeeds(self, tmp_path):
+        import hashlib
+
+        body = b"good payload"
+        client = _FakeClient(_FakeResponse(200, body))
+        result = att.download_attachment(
+            client,
+            Attachment(
+                name="a.zip", url="https://h/a.zip", md5=hashlib.md5(body).hexdigest()
+            ),
+            str(tmp_path),
+        )
+        assert result.ok
+        assert Path(result.path).exists()
+
+    def test_declared_size_over_cap_is_refused_before_streaming(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_MAX_ATTACHMENT_MB", "0.001")  # 1048 bytes
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="big.zip", url="https://h/big.zip", size=10**6),
+            str(tmp_path),
+        )
+        assert not result.ok
+        assert "exceeds the download cap" in result.error
+        assert client.requested == []  # never touched the network
+
+    def test_midstream_cap_aborts_and_discards(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_MAX_ATTACHMENT_MB", "0.001")  # 1048 bytes
+        body = b"z" * 5000  # no declared size: the cap is the only bound
+        client = _FakeClient(_FakeResponse(200, body))
+        result = att.download_attachment(
+            client, Attachment(name="big.zip", url="https://h/big.zip"), str(tmp_path)
+        )
+        assert not result.ok
+        assert "aborted" in result.error
+        assert list(tmp_path.iterdir()) == []  # no partial survived
+
+    def test_invalid_cap_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_MAX_ATTACHMENT_MB", "not-a-number")
+        assert att._max_attachment_bytes() == att.DEFAULT_MAX_ATTACHMENT_BYTES

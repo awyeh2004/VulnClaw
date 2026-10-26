@@ -94,7 +94,11 @@ def append_builtin_tool_schemas(
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum characters to return, capped internally (default 12000).",
+                            "description": (
+                                "Maximum characters to return. Hard cap 32768 per call and "
+                                "262144 cumulative per evidence per run; 0/negative is "
+                                "rejected -- there is no unlimited read. Default 12000."
+                            ),
                         },
                     },
                     "required": ["evidence_id"],

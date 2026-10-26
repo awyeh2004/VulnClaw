@@ -19,8 +19,22 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from vulnclaw.utils.redaction import redact_credentials
 
 DEFAULT_EVIDENCE_PREVIEW_CHARS = 3500
-DEFAULT_EVIDENCE_VIEW_CHARS = 0
-FULL_EVIDENCE_RANGE_END = 2**63 - 1
+#: Default evidence_view window. This used to be 0 = "no limit", which let one
+#: call pull a whole multi-megabyte attachment into the prompt (measured
+#: 2026-10-21, audit item G: 6.03M tokens burned on a 2.3 MB attachment while
+#: the paging parameters existed). 12000 matches the tool schema's documented
+#: default, so every path that omits ``limit`` sees the same bounded window.
+DEFAULT_EVIDENCE_VIEW_CHARS = 12000
+#: Hard per-call ceiling for evidence_view. Larger explicit limits are clamped,
+#: never honoured in full.
+MAX_EVIDENCE_VIEW_CHARS = 32768
+#: Cumulative chars one evidence body may feed into the prompt per run. Beyond
+#: it the model must switch to evidence_search or a script that extracts
+#: conclusions -- raw stays on disk either way.
+EVIDENCE_VIEW_BUDGET_CHARS = 262144
+#: Bodies larger than this carry a redirect-to-search notice on their first
+#: window: they are the shape that historically got read wholesale.
+EVIDENCE_RAW_LARGE_CHARS = 131072
 MAX_STORED_EVIDENCE = 240
 MAX_STORED_TOOL_CALLS = 400
 MAX_STORED_STEPS = 400
@@ -428,6 +442,10 @@ class AgentState(BaseModel):
     #: whole run. Declared explicitly: pydantic v2 rejects undeclared setattr
     #: (see the guard-counter note below).
     operator_hints: list[str] = Field(default_factory=list)
+    #: Cumulative chars each evidence body has fed into the prompt this run via
+    #: evidence_view (audit item G, 2026-10-24). Raw content is always kept for
+    #: evidence_search; this meter is what bounds repeated wholesale reads.
+    evidence_view_spend: dict[str, int] = Field(default_factory=dict)
     llm_usage_prompt_tokens: int = 0
     llm_usage_completion_tokens: int = 0
     llm_requests: int = 0
@@ -527,6 +545,8 @@ class AgentState(BaseModel):
         # goal); reset_for_goal already clears compact_summary, and keeping
         # hints from a previous goal would steer the new one wrongly.
         self.operator_hints = []
+        # Reading budget is per-goal: a new goal starts every body's meter at 0.
+        self.evidence_view_spend = {}
         self.context_digest = ContextDigest()
         self.context_compactions = []
         self.completion_rejections = []
@@ -677,8 +697,12 @@ class AgentState(BaseModel):
         except (TypeError, ValueError):
             limit = DEFAULT_EVIDENCE_VIEW_CHARS
         if limit <= 0:
-            return evidence_id, start, FULL_EVIDENCE_RANGE_END
-        return evidence_id, start, start + limit
+            limit = DEFAULT_EVIDENCE_VIEW_CHARS
+        # Clamp to the same ceiling format_evidence_view enforces, so a recorded
+        # call claims exactly the range it actually served (a pre-cap record of
+        # limit=10**9 would suppress future views of bytes never shown).
+        end = start + min(limit, MAX_EVIDENCE_VIEW_CHARS)
+        return evidence_id, start, end
 
     def evidence_view_redundancy_reason(
         self,
@@ -972,20 +996,51 @@ class AgentState(BaseModel):
         item = self.get_evidence(evidence_id)
         if item is None:
             return f"Evidence not found: {evidence_id}"
-        start = max(0, int(offset or 0))
         raw = item.content or ""
+        start = max(0, int(offset or 0))
         try:
-            max_chars = int(limit)
+            requested = int(limit)
         except (TypeError, ValueError):
-            max_chars = DEFAULT_EVIDENCE_VIEW_CHARS
-        if max_chars <= 0:
-            max_chars = max(0, len(raw) - start)
-        chunk = raw[start : start + max_chars]
-        end = start + len(chunk)
+            requested = DEFAULT_EVIDENCE_VIEW_CHARS
+        if requested <= 0:
+            # "0 = everything" is what burned 6.03M tokens on one attachment
+            # (audit item G). There is no unlimited read any more.
+            return (
+                f"[!] evidence_view needs a positive limit (max "
+                f"{MAX_EVIDENCE_VIEW_CHARS} per call). Page with offset/limit, or "
+                "use evidence_search to locate the exact bytes."
+            )
+        max_chars = min(requested, MAX_EVIDENCE_VIEW_CHARS)
+
+        spent = self.evidence_view_spend.get(item.id, 0)
+        remaining = EVIDENCE_VIEW_BUDGET_CHARS - spent
+        if remaining <= 0:
+            return (
+                f"[!] evidence_view budget for {item.id} is exhausted "
+                f"({EVIDENCE_VIEW_BUDGET_CHARS} chars this run). The raw body is "
+                "still searchable: use evidence_search for targeted bytes, or a "
+                "script that extracts only conclusions."
+            )
+        if max_chars > remaining:
+            max_chars = remaining
+
         header = (
             f"{item.id}: tool={item.tool} status={item.status} "
-            f"bytes={len(raw)} range={start}:{end}"
+            f"bytes={len(raw)} range={start}:{start + max_chars} "
+            f"budget_left={remaining - max_chars}"
         )
+        if len(raw) > EVIDENCE_RAW_LARGE_CHARS and start == 0 and spent == 0:
+            # First window into a very large body: the redirect notice rides
+            # along WITH the (bounded) window rather than replacing it -- a
+            # notice-only response would make the redundancy guard record a
+            # range that was never shown and suppress the model's real follow-up.
+            header += (
+                "\n[large body] Prefer evidence_search inside this id, or a script "
+                "that extracts findings; wholesale paging wastes the run budget."
+            )
+        chunk = raw[start : start + max_chars]
+        end = start + len(chunk)
+        self.evidence_view_spend[item.id] = spent + len(chunk)
         if end < len(raw):
             header += f" next_offset={end}"
         return f"{header}\n{chunk}"

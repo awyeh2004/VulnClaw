@@ -316,3 +316,81 @@ class TestPerRunCountersReset:
 
         assert state.writeup_search_count == 1
         assert state.undecided_nudge_count == 1
+
+
+class TestEvidenceViewBudget:
+    """Audit item G (2026-10-24): bounded prompt-side reads of raw evidence.
+
+    The paging parameters always existed; what was missing was a refusal to
+    serve unbounded windows. ``limit<=0`` used to mean "everything" and one
+    call could pull a multi-megabyte attachment into the prompt.
+    """
+
+    def _state_with_body(self, body: str):
+        state = AgentState(origin="http://t", goal="capture flag")
+        record = state.remember_tool_result(
+            tool="python_execute",
+            arguments={"purpose": "fixture"},
+            output=body,
+        )
+        return state, record
+
+    def test_zero_or_negative_limit_is_rejected(self):
+        state, record = self._state_with_body("x" * 500)
+        for bad in (0, -1):
+            result = state.format_evidence_view(record.id, limit=bad)
+            assert result.startswith("[!]"), bad
+            assert "positive limit" in result
+        # nothing was served, so the budget is untouched
+        assert state.evidence_view_spend == {}
+
+    def test_large_explicit_limit_is_clamped(self):
+        state, record = self._state_with_body("y" * 1000)
+        result = state.format_evidence_view(record.id, limit=10**9)
+        assert len(result.splitlines()[1]) <= 32768
+        assert state.evidence_view_spend[record.id] == 1000  # body smaller than cap
+
+    def test_cumulative_budget_exhausts_and_reports(self):
+        from vulnclaw.agent.agent_state import EVIDENCE_VIEW_BUDGET_CHARS
+
+        state, record = self._state_with_body("z" * 400000)
+        served = 0
+        while True:
+            result = state.format_evidence_view(record.id, offset=served, limit=32768)
+            if result.startswith("[!]"):
+                assert "budget" in result
+                break
+            served += len(result.splitlines()[1])
+            assert served <= EVIDENCE_VIEW_BUDGET_CHARS
+        assert state.evidence_view_spend[record.id] == EVIDENCE_VIEW_BUDGET_CHARS
+
+    def test_budget_is_per_evidence(self):
+        state, first = self._state_with_body("a" * 5000)
+        second = state.remember_tool_result(
+            tool="python_execute", arguments={"purpose": "2"}, output="b" * 5000
+        )
+        state.evidence_view_spend[first.id] = 262144
+        assert state.format_evidence_view(first.id).startswith("[!]")
+        # the other body still has its full budget
+        ok = state.format_evidence_view(second.id)
+        assert not ok.startswith("[!]")
+        assert "b" * 10 in ok
+
+    def test_large_body_first_window_carries_redirect_notice(self):
+        from vulnclaw.agent.agent_state import EVIDENCE_RAW_LARGE_CHARS
+
+        body = ("line\n" * ((EVIDENCE_RAW_LARGE_CHARS // 5) + 10)) + "NEEDLE-HERE\n"
+        state, record = self._state_with_body(body)
+        assert len(body) > EVIDENCE_RAW_LARGE_CHARS
+        result = state.format_evidence_view(record.id, limit=1000)
+        assert "[large body]" in result
+        assert "evidence_search" in result
+        # the bounded window is still served (not a notice-only response)
+        assert "range=0:1000" in result
+
+    def test_reset_for_goal_clears_the_spend(self):
+        state, record = self._state_with_body("c" * 100)
+        state.format_evidence_view(record.id, limit=100)
+        assert state.evidence_view_spend[record.id] == 100
+        state.reset_for_goal(origin="http://t2", goal="g2")
+        assert state.evidence_view_spend == {}
