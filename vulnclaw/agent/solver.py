@@ -910,6 +910,29 @@ def _stall_turns(agent: AgentState) -> int:
         return 8
 
 
+def _turn_text_metrics(text: str) -> dict[str, float | int]:
+    """Per-turn output signals, OBSERVATION ONLY (audit item B, 2026-10-24).
+
+    Stall decisions must not read these yet. The hypothesis -- that a
+    printable-ratio / shape signal can separate "converging forensics" from
+    "garbage flood / endless prose" -- is unproven, and `_path_progress_fingerprint`
+    deliberately ignores new evidence for anti-evasion reasons (see
+    tests/agent/test_path_stall_guard.py). This only emits what a replay over
+    run logs would need to decide whether the signal is real; wiring it into
+    any guard decision needs that replay first.
+    """
+    body = str(text or "")
+    if not body:
+        return {"chars": 0, "printable_ratio": 0.0, "nonempty_lines": 0}
+    printable = sum(1 for ch in body if ch.isprintable() or ch in "\n\r\t")
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    return {
+        "chars": len(body),
+        "printable_ratio": round(printable / len(body), 4),
+        "nonempty_lines": len(lines),
+    }
+
+
 def _path_progress_fingerprint(agent: AgentState) -> tuple:
     """A cheap fingerprint of whether the CURRENT PATH has advanced.
 
@@ -2898,6 +2921,18 @@ async def _solve_impl(
         reason_line = _first_reason_line(cleaned)
         tools_used = _new_tool_names(state, before_tools)
         new_evidence_count = len(state.evidence) - before_evidence
+        # Observation-only turn telemetry (audit item B): goes to the event log
+        # so a replay can judge whether a printable-rate signal is real. No
+        # stall guard reads it; keep it that way until such a replay exists.
+        try:
+            emit("turn_metrics", {
+                "step": step,
+                **_turn_text_metrics(cleaned),
+                "tools_used": len(tools_used or []),
+                "new_evidence": new_evidence_count,
+            })
+        except Exception:
+            pass
         evidence_summary = _new_evidence_summary(state, before_evidence)
         state.record_step(
             reason=reason_line,

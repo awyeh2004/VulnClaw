@@ -451,3 +451,35 @@ class TestEveryHandbackPathHonoursTheGrace:
                 FakeAgent(bb), streak=8, hint_sent=True, thin_windows=0, hint_age=age
             )
             assert action == "silent", (age, action)
+
+
+class TestTurnTextMetricsObservationOnly:
+    """Audit item B (2026-10-24): per-turn text metrics exist for REPLAY only.
+
+    These pin the shape of the emitted signal so log consumers can rely on it,
+    and pin that the helper stays pure -- no guard decision may read it until a
+    replay over real runs has validated the printable-rate hypothesis.
+    """
+
+    def test_metrics_shape(self):
+        from vulnclaw.agent.solver import _turn_text_metrics
+
+        text = "line one\n\nline two\x00\x1f\n汉字"
+        m = _turn_text_metrics(text)
+        assert m["chars"] == len(text)
+        assert 0.0 < m["printable_ratio"] < 1.0  # the control chars cost ratio
+        assert m["nonempty_lines"] == 3  # only the blank line is skipped
+
+    def test_empty_text(self):
+        from vulnclaw.agent.solver import _turn_text_metrics
+
+        assert _turn_text_metrics("") == {
+            "chars": 0,
+            "printable_ratio": 0.0,
+            "nonempty_lines": 0,
+        }
+
+    def test_pure_ascii_is_fully_printable(self):
+        from vulnclaw.agent.solver import _turn_text_metrics
+
+        assert _turn_text_metrics("abc def\n")["printable_ratio"] == 1.0
