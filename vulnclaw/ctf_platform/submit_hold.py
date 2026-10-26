@@ -38,10 +38,14 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+
+from vulnclaw.utils.atomic_write import atomic_write_text, file_lock
 
 #: How many seconds ahead of the target to fire. The platform timestamps arrival,
 #: and a request issued exactly at 19:24:00.000 can land at 19:24:00.3 -- inside
@@ -148,6 +152,10 @@ class SubmitWindow:
         )
 
 
+class SubmitHoldPersistenceError(RuntimeError):
+    """The queue could not be durably persisted."""
+
+
 @dataclass
 class HeldSubmit:
     """One submission waiting for its window."""
@@ -160,6 +168,7 @@ class HeldSubmit:
     created_at: str
     window: str = ""
     close_at: str = ""
+    status: str = "pending"
     fired: bool = False
     result: str = ""
     error: str = ""
@@ -175,6 +184,7 @@ class HeldSubmit:
             "created_at": self.created_at,
             "window": self.window,
             "close_at": self.close_at,
+            "status": self.status,
             "fired": self.fired,
             "result": self.result,
             "error": self.error,
@@ -192,6 +202,7 @@ class HeldSubmit:
             created_at=str(data.get("created_at", "")),
             window=str(data.get("window", "")),
             close_at=str(data.get("close_at", "")),
+            status=str(data.get("status", "submitted" if data.get("fired") else "pending")),
             fired=bool(data.get("fired")),
             result=str(data.get("result", "")),
             error=str(data.get("error", "")),
@@ -215,12 +226,16 @@ class SubmitHoldQueue:
         window_end: str = "",
         windows: Optional[list[SubmitWindow]] = None,
         default_window: str = "",
+        hold_challenges: Optional[list[str]] = None,
     ) -> None:
         self.state_path = Path(state_path) if state_path else None
         self._hold_until = hold_until
         self._window_end = window_end
         self._windows = list(windows or [])
         self._default_window = default_window
+        self._hold_challenges = {
+            str(cid).strip() for cid in (hold_challenges or []) if str(cid).strip()
+        }
         self._lock = threading.RLock()
         self._items: dict[str, HeldSubmit] = {}
         self._load()
@@ -260,11 +275,27 @@ class SubmitHoldQueue:
 
     # -- configuration -----------------------------------------------------
 
-    def reconfigure(self, *, hold_until: str, window_end: str = "") -> None:
-        """Update the window without losing what is already queued."""
+    def reconfigure(
+        self,
+        *,
+        hold_until: str,
+        window_end: str = "",
+        windows: Optional[list[SubmitWindow]] = None,
+        default_window: str = "",
+        hold_challenges: Optional[list[str]] = None,
+    ) -> None:
+        """Hot-reload config without replacing the durable queue object."""
         with self._lock:
             self._hold_until = hold_until
             self._window_end = window_end
+            if windows is not None:
+                self._windows = list(windows)
+            self._default_window = default_window
+            if hold_challenges is not None:
+                self._hold_challenges = {
+                    str(cid).strip() for cid in hold_challenges if str(cid).strip()
+                }
+
 
     @property
     def hold_deadline(self) -> Optional[datetime]:
@@ -290,6 +321,18 @@ class SubmitHoldQueue:
         if deadline is None:
             return False
         return moment < deadline
+
+    def covers(self, challenge_id: str) -> bool:
+        """Whether this challenge's submits belong in the queue at all.
+
+        An empty allow-list keeps the sprint-wide behaviour ("hold whatever
+        arrives while a window is ahead"). A non-empty one narrows it to the
+        challenges actually scored AT the window -- typically the 卡点题 -- so
+        every other flag goes out the moment it is found.
+        """
+        if not self._hold_challenges:
+            return True
+        return str(challenge_id or "").strip() in self._hold_challenges
 
     # -- queue operations ---------------------------------------------------
 
@@ -325,7 +368,8 @@ class SubmitHoldQueue:
         if fire_at is None:
             return None
         identity = key or self._identity(server, tool, arguments)
-        with self._lock:
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
             existing = self._items.get(identity)
             if existing is not None and not existing.fired:
                 return existing
@@ -340,7 +384,13 @@ class SubmitHoldQueue:
                 close_at=close_at.isoformat(timespec="seconds") if close_at else "",
             )
             self._items[identity] = item
-            self._save()
+            try:
+                self._save_unlocked()
+            except OSError as exc:
+                self._items.pop(identity, None)
+                raise SubmitHoldPersistenceError(
+                    f"could not persist held submission: {exc}"
+                ) from exc
             return item
 
     @staticmethod
@@ -350,42 +400,114 @@ class SubmitHoldQueue:
 
     def pending(self) -> list[HeldSubmit]:
         with self._lock:
-            return [item for item in self._items.values() if not item.fired]
+            self._refresh_from_disk()
+            return [
+                item
+                for item in self._items.values()
+                if not item.fired and item.status == "pending"
+            ]
 
     def all_items(self) -> list[HeldSubmit]:
         with self._lock:
+            self._refresh_from_disk()
             return list(self._items.values())
 
-    def mark_fired(self, key: str, *, result: str = "", error: str = "") -> None:
+    def active_count(self) -> int:
         with self._lock:
+            self._refresh_from_disk()
+            return sum(1 for item in self._items.values() if not item.fired)
+
+    def claim(self, key: str) -> Optional[HeldSubmit]:
+        """Durably claim an item before any network operation.
+
+        The short sidecar lock protects the read/modify/write across managers and
+        processes. A failed claim is fail-closed: callers must not send.
+        """
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
             item = self._items.get(key)
-            if item is None:
+            if item is None or item.fired or item.status != "pending":
+                return None
+            item.status = "in_flight"
+            try:
+                self._save_unlocked()
+            except OSError as exc:
+                item.status = "pending"
+                raise SubmitHoldPersistenceError(
+                    f"could not persist in-flight claim: {exc}"
+                ) from exc
+            return item
+
+    def release_claim(self, key: str, error: str = "") -> None:
+        """Return a pre-network claim to pending when the owner loop is absent."""
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
+            item = self._items.get(key)
+            if item is None or item.status != "in_flight":
+                return
+            item.status = "pending"
+            item.error = error
+            self._save_unlocked()
+
+    def mark_fired(self, key: str, *, result: str = "", error: str = "") -> None:
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
+            item = self._items.get(key)
+            if item is None or item.status in {"submitted", "expired"}:
                 return
             item.fired = True
+            item.status = "submitted"
             item.result = result
             item.error = error
             item.fired_at = _now().isoformat(timespec="seconds")
-            self._save()
+            self._save_unlocked()
+
+    def record_failure(self, key: str, error: str) -> None:
+        """Record an unknown outcome and make the item ineligible for replay."""
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
+            item = self._items.get(key)
+            if item is None or item.status in {"submitted", "expired", "unknown"}:
+                return
+            item.error = error
+            item.status = "unknown"
+            item.fired = True
+            item.fired_at = _now().isoformat(timespec="seconds")
+            self._save_unlocked()
 
     def drop(self, key: str, reason: str) -> None:
         """Remove an entry that must never be sent (records why)."""
-        with self._lock:
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
             item = self._items.get(key)
-            if item is None:
+            if item is None or item.status in {"submitted", "expired", "unknown"}:
                 return
             item.fired = True
+            item.status = "expired"
             item.error = f"dropped: {reason}"
             item.fired_at = _now().isoformat(timespec="seconds")
-            self._save()
+            self._save_unlocked()
 
     def clear(self) -> None:
-        with self._lock:
+        with self._lock, self._state_file_lock():
             self._items.clear()
-            self._save()
+            self._save_unlocked()
 
     # -- persistence --------------------------------------------------------
 
-    def _load(self) -> None:
+    @property
+    def _lock_path(self) -> Optional[Path]:
+        return self.state_path.with_name(self.state_path.name + ".lock") if self.state_path else None
+
+    @contextmanager
+    def _state_file_lock(self):
+        if self._lock_path is None:
+            yield
+        else:
+            with file_lock(self._lock_path):
+                yield
+
+    def _refresh_from_disk_unlocked(self) -> None:
         if self.state_path is None or not self.state_path.exists():
             return
         try:
@@ -395,30 +517,57 @@ class SubmitHoldQueue:
         items = raw.get("items") if isinstance(raw, dict) else raw
         if not isinstance(items, list):
             return
+        loaded: dict[str, HeldSubmit] = {}
         for entry in items:
             if not isinstance(entry, dict):
                 continue
             item = HeldSubmit.from_dict(entry)
             if item.key:
-                self._items[item.key] = item
+                loaded[item.key] = item
+        # Keep live pending objects (direct callers/tests may adjust their due time),
+        # while importing entries created by another manager. Claims always reload
+        # canonically under the file lock before a send.
+        for key, item in loaded.items():
+            if key not in self._items:
+                self._items[key] = item
+            elif self._items[key].status != "pending":
+                self._items[key] = item
 
-    def _save(self) -> None:
+    def _refresh_from_disk(self) -> None:
+        with self._state_file_lock():
+            self._refresh_from_disk_unlocked()
+
+    def _load(self) -> None:
+        with self._lock, self._state_file_lock():
+            self._refresh_from_disk_unlocked()
+            # A process restart must never replay an ambiguous network call.
+            changed = False
+            for item in self._items.values():
+                if item.status == "in_flight":
+                    item.status = "unknown"
+                    item.fired = True
+                    item.error = item.error or "stale in-flight submission after reload"
+                    item.fired_at = item.fired_at or _now().isoformat(timespec="seconds")
+                    changed = True
+            if changed:
+                self._save_unlocked()
+
+    def _save_unlocked(self) -> None:
         if self.state_path is None:
             return
-        try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "items": [item.to_dict() for item in self._items.values()],
-            }
-            tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            tmp.replace(self.state_path)
-        except OSError:
-            # Losing the audit trail must not abort the run that is trying to
-            # submit; the in-memory queue still fires.
-            pass
+        payload = {"items": [item.to_dict() for item in self._items.values()]}
+        atomic_write_text(
+            self.state_path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+    def _save(self) -> None:
+        with self._lock, self._state_file_lock():
+            self._save_unlocked()
+
+
+class SubmitHoldDispatchUnavailable(RuntimeError):
+    """The scheduler cannot reach the manager's event loop."""
 
 
 class SubmitScheduler:
@@ -436,10 +585,14 @@ class SubmitScheduler:
         dispatch: Callable[[str, str, dict[str, Any]], Awaitable[Any]],
         *,
         on_event: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        loop_provider: Optional[Callable[[], Any]] = None,
+        idle_grace_ticks: int = 40,
     ) -> None:
         self._queue = queue
         self._dispatch = dispatch
         self._on_event = on_event
+        self._loop_provider = loop_provider
+        self._idle_grace_ticks = max(1, int(idle_grace_ticks))
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
@@ -452,8 +605,17 @@ class SubmitScheduler:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, timeout: float = 1.0) -> None:
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout))
+
+    async def astop(self, *, timeout: float = 1.0) -> None:
+        """Stop from the owning event loop without blocking that loop."""
+        import asyncio
+
+        await asyncio.to_thread(self.stop, timeout=timeout)
 
     def _emit(self, kind: str, payload: dict[str, Any]) -> None:
         if self._on_event is None:
@@ -464,11 +626,19 @@ class SubmitScheduler:
             pass
 
     def _run(self) -> None:
+        idle_ticks = 0
         while not self._stop.is_set():
             try:
+                pending_before = len(self._queue.pending())
                 self.tick()
+                if pending_before:
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
             except Exception as exc:  # noqa: BLE001 - a scheduler crash must be visible
                 self._emit("submit_hold_error", {"error": repr(exc)})
+            if idle_ticks >= self._idle_grace_ticks:
+                return
             self._stop.wait(_TICK_SECONDS)
 
     def tick(self, *, now: Optional[datetime] = None) -> int:
@@ -523,21 +693,77 @@ class SubmitScheduler:
         """
         if item.window == "firstblood":
             return _FIRSTBLOOD_LEAD_SECONDS
-        return _FIRE_LEAD_SECONDS
+        # Everything else aims AT the stated second. A 卡点 band opens at a fixed
+        # second and pays full marks only inside it, so an early request is worth
+        # half; the client-side setup of the call already lands it a few hundred
+        # milliseconds late, which the 60s band absorbs happily.
+        return 0.0
 
     def _fire(self, item: HeldSubmit) -> int:
         try:
-            import asyncio
-
-            result = asyncio.run(self._dispatch(item.server, item.tool, item.arguments))
+            claimed = self._queue.claim(item.key)
+        except SubmitHoldPersistenceError as exc:
+            self._emit("submit_hold_persistence_failed", {"key": item.key, "error": repr(exc)})
+            return 0
+        if claimed is None:
+            return 0
+        try:
+            result = self._dispatch_on_loop(claimed)
+        except SubmitHoldDispatchUnavailable as exc:
+            # No network operation was started; bounded retry is safe.
+            try:
+                self._queue.release_claim(claimed.key, repr(exc))
+            except OSError:
+                self._emit("submit_hold_persistence_failed", {"key": item.key, "error": repr(exc)})
+            self._emit("submit_hold_unavailable", {"key": item.key, "error": repr(exc)})
+            return 0
         except Exception as exc:  # noqa: BLE001
-            self._queue.mark_fired(item.key, error=repr(exc))
+            # The coroutine may have reached the platform before raising. Never replay.
+            try:
+                self._queue.record_failure(claimed.key, repr(exc))
+            except OSError:
+                self._emit("submit_hold_persistence_failed", {"key": item.key, "error": repr(exc)})
             self._emit("submit_hold_failed", {"key": item.key, "error": repr(exc)})
             return 0
+        try:
+            self._queue.mark_fired(claimed.key, result=str(result)[:2000])
+        except OSError as exc:
+            # The send happened; a persistence failure makes its durable outcome unknown.
+            try:
+                self._queue.record_failure(claimed.key, f"result persistence failed: {exc!r}")
+            except OSError:
+                pass
+            return 0
         text = str(result)
-        self._queue.mark_fired(item.key, result=text[:2000])
         self._emit(
             "submit_hold_fired",
             {"key": item.key, "tool": item.tool, "result": text[:400]},
         )
         return 1
+
+    def _dispatch_on_loop(self, item: HeldSubmit) -> Any:
+        if self._loop_provider is None:
+            import asyncio
+
+            return asyncio.run(self._dispatch(item.server, item.tool, item.arguments))
+        loop = self._loop_provider()
+        if loop is None or loop.is_closed() or not loop.is_running():
+            raise SubmitHoldDispatchUnavailable(
+                "the owning event loop is not available for this held submission"
+            )
+        import asyncio
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._dispatch(item.server, item.tool, item.arguments), loop
+        )
+        try:
+            # A stuck owner loop must not prevent manager teardown indefinitely.
+            return future.result(timeout=max(1.0, _TICK_SECONDS * 20))
+        except FutureTimeoutError as exc:
+            raise RuntimeError("held submission dispatch timed out; outcome unknown") from exc
+        except Exception as exc:
+            if loop.is_closed():
+                raise SubmitHoldDispatchUnavailable(
+                    "the owning event loop closed before the held submission completed"
+                ) from exc
+            raise

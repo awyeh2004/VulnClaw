@@ -1043,6 +1043,14 @@ class CompetitionConfig(BaseModel):
             "pick the soonest. Empty = pick the soonest still-open window."
         ),
     )
+    submit_window_challenges: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Challenge ids whose flags are held for a window. Empty = hold every "
+            "submission arriving while a window is ahead; non-empty = only these "
+            "challenges wait (the 卡点题), everything else goes out on the spot."
+        ),
+    )
 
 
 class SSHHostConfig(BaseModel):

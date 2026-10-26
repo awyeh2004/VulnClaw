@@ -176,7 +176,7 @@ class TestFiring:
         assert sent == []
         assert "window closed" in q.all_items()[0].error
 
-    def test_a_dispatch_error_is_recorded_not_retried_forever(self, tmp_path):
+    def test_a_dispatch_error_is_recorded_as_unknown_without_replay(self, tmp_path):
         q = _queue(tmp_path, hold_until=_future())
 
         async def boom(server, tool, arguments):
@@ -187,6 +187,44 @@ class TestFiring:
         after = datetime.now() + timedelta(minutes=10)
         assert sched.tick(now=after) == 0
         assert "platform unavailable" in q.all_items()[0].error
+        assert q.pending() == []
+        assert q.all_items()[0].status == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_started_scheduler_dispatches_on_owner_loop(self, tmp_path):
+        q = _queue(tmp_path, hold_until=_future())
+        item = q.enqueue(
+            server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"}
+        )
+        item.fire_at = (datetime.now() - timedelta(seconds=1)).isoformat(timespec="seconds")
+        seen_loop = []
+        delivered = asyncio.Event()
+
+        async def dispatch(server, tool, arguments):
+            seen_loop.append(asyncio.get_running_loop())
+            delivered.set()
+            return "accepted"
+
+        owner_loop = asyncio.get_running_loop()
+        sched = SubmitScheduler(q, dispatch, loop_provider=lambda: owner_loop)
+        sched.start()
+        try:
+            await asyncio.wait_for(delivered.wait(), timeout=2)
+        finally:
+            sched.stop()
+        assert seen_loop == [asyncio.get_running_loop()]
+        assert q.pending() == []
+
+    def test_persistence_failure_does_not_enqueue(self, tmp_path, monkeypatch):
+        from vulnclaw.ctf_platform import submit_hold
+
+        def fail(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(submit_hold, "atomic_write_text", fail)
+        q = _queue(tmp_path, hold_until=_future())
+        with pytest.raises(submit_hold.SubmitHoldPersistenceError, match="disk full"):
+            q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
         assert q.pending() == []
 
 
@@ -274,8 +312,13 @@ class TestNamedWindows:
         )
         assert item.window == "peak"
 
-    def test_a_firstblood_window_aims_earlier_than_a_peak_window(self, tmp_path):
-        """First blood pays for arriving first; 卡点 pays for the band opening."""
+    def test_only_first_blood_aims_early(self, tmp_path):
+        """First blood pays for arriving first; 卡点 pays for landing IN the band.
+
+        A 卡点 submission sent 0.8s early arrives BEFORE the band opens, where the
+        rulebook pays half. It aims at the stated second instead; the client-side
+        setup of the call already lands it a few hundred ms late.
+        """
         from vulnclaw.ctf_platform.submit_hold import SubmitScheduler
 
         fb = HeldSubmit(
@@ -286,7 +329,8 @@ class TestNamedWindows:
             key="b", server="s", tool="t", arguments={}, fire_at="", created_at="",
             window="peak",
         )
-        assert SubmitScheduler._lead_for(fb) < SubmitScheduler._lead_for(peak)
+        assert SubmitScheduler._lead_for(peak) == 0.0
+        assert SubmitScheduler._lead_for(fb) > 0.0
 
     def test_each_item_closes_with_its_own_window(self, tmp_path):
         """The 卡点 band closes; a first-blood item must not be judged by it."""
@@ -408,3 +452,107 @@ class TestThePromptExplainsTheWindows:
         ).lower()
         assert "queued" in text
         assert "do not submit it again" in text
+
+
+class TestOnlyTheChosenChallengesWait:
+    """A window is not always worth holding every flag for.
+
+    Match-day shape (2026-10-24): the 卡点题 is scored by WHEN it lands, so it
+    waits; every other challenge pays on solve, and holding those would delay a
+    correct answer for nothing.
+    """
+
+    def test_an_empty_allow_list_holds_every_challenge(self, tmp_path):
+        q = _queue(tmp_path, hold_until=_future())
+        assert q.covers("any-challenge-id") is True
+
+    def test_a_non_empty_list_holds_only_its_members(self, tmp_path):
+        q = SubmitHoldQueue(
+            tmp_path / "queue.json",
+            hold_until=_future(),
+            hold_challenges=["c47066a1-4e5e-4f2e-bae0-194faedb1532"],
+        )
+        assert q.covers("c47066a1-4e5e-4f2e-bae0-194faedb1532") is True
+        assert q.covers("e599c7be-630c-4a0e-af6d-0fae597c6dd6") is False
+
+    def test_whitespace_in_the_setting_does_not_create_a_ghost_id(self, tmp_path):
+        q = SubmitHoldQueue(
+            tmp_path / "queue.json",
+            hold_until=_future(),
+            hold_challenges=[" c47066a1 ", "", "  "],
+        )
+        assert q.covers("c47066a1") is True
+        assert q.covers("") is False
+
+    def test_reconfigure_swaps_the_list(self, tmp_path):
+        q = SubmitHoldQueue(tmp_path / "queue.json", hold_until=_future())
+        assert q.covers("x") is True
+        q.reconfigure(hold_until=_future(), hold_challenges=["x"])
+        assert q.covers("x") is True
+        assert q.covers("y") is False
+
+
+class TestTheQueueActuallyGetsFired:
+    """Regression, 2026-10-24 sprint.
+
+    In HEAD, ``_start_submit_scheduler`` built a ``SubmitScheduler`` and returned
+    without calling ``start()``, so no thread ever ticked. The queue LOOKED armed
+    -- an item with a fire_at in the future -- while both the 19:10:24 and the
+    19:24:00 deadlines passed in silence; the 卡点题 had to be submitted by hand
+    inside its band. Constructing is not starting.
+    """
+
+    def test_the_factory_spawns_a_ticking_thread(self, tmp_path, monkeypatch):
+        from vulnclaw.mcp import lifecycle
+
+        q = _queue(tmp_path, hold_until=_future())
+        q.enqueue(
+            server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"}
+        )
+        monkeypatch.setattr(lifecycle, "_get_submit_hold", lambda: q)
+
+        class Manager:
+            _submit_scheduler = None
+            _submit_hold = None
+
+            async def _fire_held_submission(self, server, tool, arguments):
+                return "ok"
+
+        manager = Manager()
+        lifecycle._start_submit_scheduler(manager)
+        scheduler = manager._submit_scheduler
+        try:
+            assert scheduler is not None
+            assert scheduler._thread is not None, "start() was never called"
+            assert scheduler._thread.is_alive()
+        finally:
+            scheduler.stop(timeout=1.0)
+
+    def test_a_dead_runs_queue_is_revived_by_any_tool_call(self, tmp_path, monkeypatch):
+        """The run that found the flag usually exits long before its window."""
+        from vulnclaw.mcp import lifecycle
+
+        q = _queue(tmp_path, hold_until=_future())
+        q.enqueue(
+            server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"}
+        )
+        monkeypatch.setattr(lifecycle, "_get_submit_hold", lambda: q)
+        started: list = []
+        monkeypatch.setattr(lifecycle, "_start_submit_scheduler", started.append)
+
+        manager = object.__new__(lifecycle.MCPLifecycleManager)
+        manager._ensure_held_scheduler()
+        manager._ensure_held_scheduler()
+        assert len(started) == 1, "reviving must not race itself into two threads"
+
+    def test_an_empty_queue_does_not_start_a_firer(self, tmp_path, monkeypatch):
+        from vulnclaw.mcp import lifecycle
+
+        q = _queue(tmp_path, hold_until=_future())
+        monkeypatch.setattr(lifecycle, "_get_submit_hold", lambda: q)
+        started: list = []
+        monkeypatch.setattr(lifecycle, "_start_submit_scheduler", started.append)
+
+        manager = object.__new__(lifecycle.MCPLifecycleManager)
+        manager._ensure_held_scheduler()
+        assert started == []

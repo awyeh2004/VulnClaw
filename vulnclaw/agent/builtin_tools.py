@@ -1270,6 +1270,12 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
                     )
                 if summary_parts:
                     return "\n".join(summary_parts)
+                # A held submission answers with queued/fire_at/message and no
+                # content; dropping those keys left the model reading a bare
+                # "completed" and re-submitting to confirm it had worked.
+                message = str(result.get("message") or "")
+                if message:
+                    return message
                 return f"[tool:{tool_name}] completed"
 
             message = str(result.get("message") or "")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
@@ -656,6 +657,19 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
                 config.competition.submit_windows = parsed
             break
 
+    # Which challenges the window applies to. Unset = every submit is held while
+    # a window is ahead; set = only these ids wait, which is the match-day shape
+    # (the 卡点题 waits, everything else goes out the moment it is found).
+    for env_name in (
+        "VULNCLAW_COMPETITION__SUBMIT_WINDOW_CHALLENGES",
+        "VULNCLAW_COMPETITION_SUBMIT_WINDOW_CHALLENGES",
+    ):
+        if v := os.environ.get(env_name):
+            config.competition.submit_window_challenges = [
+                part.strip() for part in v.replace(";", ",").split(",") if part.strip()
+            ]
+            break
+
     for env_name in (
         "VULNCLAW_COMPETITION__SUBMIT_HOLD_UNTIL",
         "VULNCLAW_COMPETITION_SUBMIT_HOLD_UNTIL",
@@ -823,37 +837,49 @@ def fetch_provider_models_async(
 
 
 def _parse_submit_windows_env(raw: str) -> list[dict]:
-    """Parse ``name@HH:MM:SS[+SEC][,name@HH:MM:SS[+SEC]]`` into window dicts.
+    """Parse and validate compact named submission windows.
 
-    Returns [] for anything unparseable so a typo degrades to "no windows" (the
-    legacy single-deadline behaviour) instead of silently queueing submissions
-    against a nonsense time.
+    The environment value is all-or-nothing: silently dropping one malformed
+    window can make a valid-looking competition configuration score at the wrong
+    time. Invalid input returns no override and emits one actionable warning.
     """
     from datetime import datetime, timedelta
 
-    out: list[dict] = []
+    text = str(raw or "").strip()
+    if not text:
+        return []
     today = datetime.now().date()
-    for chunk in str(raw or "").split(","):
+    out: list[dict] = []
+    seen: set[str] = set()
+    for chunk in text.split(","):
         piece = chunk.strip()
-        if not piece or "@" not in piece:
-            continue
-        name, _, spec = piece.partition("@")
-        name = name.strip()
-        spec = spec.strip()
-        span = ""
-        if "+" in spec:
-            spec, _, span = spec.partition("+")
+        if not piece or piece.count("@") != 1:
+            logger.warning("Ignoring invalid submit window configuration: %r", raw)
+            return []
+        name, spec = (part.strip() for part in piece.split("@", 1))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name) or name in seen:
+            logger.warning("Ignoring invalid or duplicate submit window: %r", piece)
+            return []
+        seen.add(name)
+        parts = spec.split("+")
+        if len(parts) > 2 or not re.fullmatch(r"\d{2}:\d{2}:\d{2}", parts[0]):
+            logger.warning("Ignoring invalid submit window time: %r", piece)
+            return []
         try:
-            hour, minute, second = (int(part) for part in spec.split(":"))
-            at = datetime(
-                today.year, today.month, today.day, hour, minute, second
-            )
-        except (ValueError, TypeError):
-            continue
-        entry: dict = {"name": name, "at": at.isoformat(timespec="seconds")}
-        if span.strip().isdigit():
-            entry["until"] = (
-                at + timedelta(seconds=int(span.strip()))
-            ).isoformat(timespec="seconds")
+            hour, minute, second = (int(part) for part in parts[0].split(":"))
+            at = datetime(today.year, today.month, today.day, hour, minute, second)
+        except ValueError:
+            logger.warning("Ignoring invalid submit window time: %r", piece)
+            return []
+        entry: dict[str, Any] = {"name": name, "at": at.isoformat(timespec="seconds")}
+        if len(parts) == 2:
+            if not re.fullmatch(r"\d{1,6}", parts[1]):
+                logger.warning("Ignoring invalid submit window span: %r", piece)
+                return []
+            close = at + timedelta(seconds=int(parts[1]))
+            if close < at:
+                logger.warning("Ignoring reversed submit window: %r", piece)
+                return []
+            entry["until"] = close.isoformat(timespec="seconds")
         out.append(entry)
     return out
