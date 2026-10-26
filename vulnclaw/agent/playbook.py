@@ -354,6 +354,42 @@ def _cjk_tokens(text: str) -> set[str]:
     return out
 
 
+#: CJK bigrams with store-wide template-boilerplate frequency (audit item D).
+#:
+#: Measured 2026-10-24 over the real store (599 notes, 445 containing CJK,
+#: 12,813 distinct bigrams): these 17 bigrams appear in >=10% of all notes and
+#: carry zero discriminative power — 提交 22.2%, 得到 18.0%, 题目 16.4%,
+#: 证据 15.0%, 答案 13.7%, 注意 13.5%, 到的/包上/请包 ~13% (cross-word
+#: fragments of the "请在提交包上包含…" template), 记录 12.4%, 文件 12.2%,
+#: 用 12.0%, 字节/返回 11.2%, 数据 10.9%, 确认 10.4%, 与 10.0%. They are
+#: the Chinese equivalents of English stop words ("submit/file/data/return"),
+#: plus the template's cross-word splices. By contrast 69% of bigrams (8,837)
+#: occur in exactly ONE note — the discriminative signal lives elsewhere, so
+#: dropping these 17 costs nothing and removes the measured failure where an
+#: IR checklist scored 0.231 against an unrelated router-config challenge.
+#:
+#: Deliberately NOT IDF weighting: IDF multiplication was tried and withdrawn
+#: (2026-10-18; the 88.3%→96.9% recall gain came from the unique-identifier
+#: exemption + rarest-word ordering, not IDF). A fixed stop list is the same
+#: shape as the ASCII ``_STOP`` set.
+_CJK_STOP: frozenset[str] = frozenset({
+    "提交", "得到", "题目", "证据", "答案", "注意",
+    "到的", "包上", "请包", "记录", "文件", "用",
+    "字节", "返回", "数据", "确认", "与",
+})
+
+
+def _cjk_signal_tokens(text: str) -> set[str]:
+    """CJK bigrams minus the template-boilerplate stop list.
+
+    The rescue path in ``_tokenize`` keeps using the UNFILTERED
+    :func:`_cjk_tokens` on purpose: a note whose only tokens are stopped
+    bigrams is still better findable by its raw text than permanently
+    unreachable (same principle as the ASCII unfiltered fallback).
+    """
+    return {token for token in _cjk_tokens(text) if token not in _CJK_STOP}
+
+
 def _tokenize(fingerprint: str) -> set[str]:
     """Normalize a fingerprint into a comparable token set.
 
@@ -394,7 +430,7 @@ def _tokenize(fingerprint: str) -> set[str]:
         if _is_id_fragment(tok):
             continue
         tokens.add(tok)
-    tokens |= _cjk_tokens(text)
+    tokens |= _cjk_signal_tokens(text)
     # A ctf2 ref is the one shape whose two halves differ in kind: the GROUND id is
     # shared by every challenge in that ground (must stay filtered, or all siblings
     # collide -- that is why ``_is_id_fragment`` exists), while the CHALLENGE id names
