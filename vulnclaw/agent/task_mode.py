@@ -118,6 +118,9 @@ _MODE_DISCIPLINE: dict[str, str] = {
         "submit verb.\n"
         "- Easiest first; fail-fast: if ~8 turns pass with no progress, drop the "
         "challenge and move on.\n"
+        "- Exception: a security-hardening/defense challenge (安全加固/加固) is "
+        "NOT an 8-turn fail-fast target; follow the hardening workflow, timebox "
+        "30-40 minutes, and keep the service alive.\n"
         "Load skill reference `competition-strategy` for the full playbook.\n"
     ),
     "pentest": "",  # default deep-dive behaviour; the stall guard already sets its pace

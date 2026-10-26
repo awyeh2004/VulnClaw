@@ -80,6 +80,14 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],
     "quiz|multiple choice|trivia|true or false": ["knowledge-quiz"],
+    # ── security-hardening: 防守/基线加固题 ─────────────────────────
+    # Split into short groups: the legacy scorer divides by the number of
+    # alternatives in the group, so one long alternation would dilute the hit.
+    # Deliberately no bare "加固": "应急响应：排查后门并加固" belongs to
+    # incident-response, not here.
+    "安全加固|系统加固|中间件加固|主机加固|权限配置": ["security-hardening"],
+    "安全基线": ["security-hardening"],
+    "harden|hardening|security baseline|基线加固": ["security-hardening"],
     # ── incident-response: 主机应急响应与入侵痕迹排查 ────────────────
     "应急响应|应急排查|入侵排查|被入侵|失陷主机|被植入|恶意程序|恶意行为痕迹": ["incident-response"],
     # NOTE on "webshell查杀": it used to be ONE keyword, which can never match a

@@ -46,7 +46,7 @@ from vulnclaw.agent.network_scan import (
     without_privileged_nmap_args,
 )
 from vulnclaw.agent.roles import role_tool_violation, tool_allowed_for_role
-from vulnclaw.agent.solver import _looks_like_quiz
+from vulnclaw.agent.solver import _looks_like_hardening, _looks_like_quiz
 from vulnclaw.agent.tool_result_overrides import set_raw_tool_output_override
 from vulnclaw.agent.tool_schemas import append_builtin_tool_schemas
 from vulnclaw.utils.http_client import (
@@ -1533,6 +1533,15 @@ _ALWAYS_KEEP_TOOLS = frozenset({
 # Task-specific tool bundles keyed by inferred task type. Names not listed here
 # (recon/web/network/traffic/reporting heavy tools) are pruned unless required.
 _TASK_TOOL_BUNDLES: dict[str, set[str]] = {
+    "harden": {
+        "remediation_advice",
+        "http_probe_batch",
+        "fetch",
+        "nmap_scan",
+        "dir_enum",
+        "source_extract",
+        "runtime_diff_probe",
+    },
     "crypto": {"crypto_decode", "python_execute", "load_skill_reference"},
     "misc": {"crypto_decode", "python_execute", "load_skill_reference"},
     "reverse": {"python_execute", "shell_command", "load_skill_reference", "source_extract"},
@@ -1617,6 +1626,15 @@ def _infer_allowed_tools(user_input: str, *, latest_goal: str = "") -> set[str] 
         bundle = set(_ALWAYS_KEEP_TOOLS)
         bundle |= _TASK_TOOL_BUNDLES["web"]
         bundle |= {"crypto_decode"}
+        return bundle
+
+    # Defensive-hardening goals (see solver._looks_like_hardening) need the
+    # remediation engine plus remote execution. Without this branch a goal
+    # mentioning "Web" would match the web bundle below and prune
+    # `remediation_advice`; `remote_exec` is already in _ALWAYS_KEEP_TOOLS.
+    if _looks_like_hardening(user_input):
+        bundle = set(_ALWAYS_KEEP_TOOLS)
+        bundle |= _TASK_TOOL_BUNDLES["harden"]
         return bundle
 
     # An explicit bare flag/encoded string is a crypto/misc task even without

@@ -318,6 +318,99 @@ _QUIZ_INSTRUCTION = (
     "`load_skill_reference` when questions touch those topics."
 )
 
+# Defensive-hardening goals are a different task shape from both pentest and
+# quiz. The model must stop looking for an entry point and instead satisfy the
+# challenge's checker while keeping the service alive. Deliberately narrow:
+# bare "漏洞修复" is NOT a trigger (a pentest goal can say "find and fix"), but
+# "加固/hardening/安全基线" are unambiguous.
+_HARDENING_KEYWORDS = (
+    "安全加固",
+    "加固",
+    "harden",
+    "hardening",
+    "security baseline",
+    "baseline hardening",
+    "系统加固",
+    "中间件加固",
+    "主机加固",
+    "基线加固",
+    "权限配置",
+)
+
+# An incident-response goal can mention "加固" as one sub-question ("排查后门
+# 并加固"); that is an IR answer round, not a hardening challenge. Keep the
+# hardening directive out unless the goal names "安全加固" explicitly.
+_HARDENING_IR_MARKERS = (
+    "应急响应",
+    "入侵排查",
+    "失陷主机",
+    "溯源",
+    "webshell",
+    "勒索",
+    "挖矿",
+    "后门",
+    "持久化",
+)
+
+# Same idea for a pentest goal that merely asks for a remediation section:
+# "渗透测试并给出加固建议" is an attack run, not a checker-driven hardening
+# challenge. Explicit "安全加固" still wins.
+_HARDENING_PENTEST_MARKERS = (
+    "渗透测试",
+    "渗透",
+    "pentest",
+    "exploit",
+    "漏洞挖掘",
+)
+
+_HARDENING_INSTRUCTION = (
+    "\n\n# Security Hardening Mode\n"
+    "The goal is a DEFENSIVE hardening task: points come from making the target match "
+    "the task's requirements and passing its checker, not from finding a new exploit. "
+    "Do NOT treat the checker or the scoring platform as an attack surface.\n"
+    "1. Read the task text and locate the checker FIRST: /root/check/*, /root/flags, "
+    "/tmp/secret, `crontab -l`, `systemctl list-timers --all`, "
+    "`ps aux | grep -Ei 'check|verify'`, and any platform 'verify' button. Turn every "
+    "requirement into a checklist. Read-only inspection of task files is allowed; never "
+    "modify or tamper with the checker or the platform.\n"
+    "2. Snapshot before editing: `cp -a` the configs you will touch to a backup dir, "
+    "tar the webroot, dump the database if relevant, and keep a SECOND shell session "
+    "open. Never make SSH/firewall changes from your only session.\n"
+    "3. Audit the baseline before changing it: accounts and empty passwords, UID 0, "
+    "SSH effective config (`sshd -T`), sudoers, SUID/world-writable files, listening "
+    "services, middleware config, webroot backup files, cron.\n"
+    "4. Fix in this order: permissions/accounts -> exposed services -> middleware "
+    "config -> web code. Change ONE thing at a time, syntax-check and reload, then "
+    "re-run the checker. If a check fails, revert that one change before trying "
+    "another interpretation.\n"
+    "5. Keep the service alive: `sshd -t`, `nginx -t`, `apachectl configtest`, "
+    "`systemctl reload` (not restart when reload is enough), `curl` a normal page, "
+    "`mysqladmin ping`. Do not disable SSH password auth or stop a service the checker "
+    "needs; do not `chmod 777` a flag/webroot; do not blindly delete SUID bits.\n"
+    "6. For a remote SSH target use `remote_exec`/`remote_collect` with a configured "
+    "`remote.hosts` alias. `shell_command` and `python_execute` run on THIS host, not "
+    "the target. Verify which host a command actually ran on before claiming a fix. If "
+    "the target is only reachable through a web terminal and you have no shell tool, "
+    "ask the user for the access method or paste the command output; do not pretend you "
+    "changed the target.\n"
+    "7. Create one ANGLE for the hardening path with `blackboard_create_angle` first. "
+    "After each verified fix call `blackboard_add_fact` (what changed + the "
+    "command/output that proves it) and `blackboard_hit_angle` for that angle. "
+    "When the checker passes, call `blackboard_set_lock` with the verified result. This "
+    "is also what shows the run is making progress; a hardening run that only edits "
+    "files can look stalled.\n"
+    "8. When the checker prints a flag, capture its exact output as evidence and put the "
+    "exact flag in FINAL. If it only returns pass/fail, report the verified items and "
+    "the checker output; do not invent a flag. If the goal explicitly asks for a flag, "
+    "a flagless FINAL is premature.\n"
+    "9. Timebox 30-40 minutes. The generic CTF 8-turn fail-fast does NOT apply here; "
+    "use the checker's partial feedback to prioritize. If no progress, report what is "
+    "verified and what remains instead of guessing.\n"
+    "The `security-hardening` skill's references carry the exact baseline; load "
+    "`00-quick-checklist.md` first, then the relevant Linux/middleware/web/permission/"
+    "Windows reference via `load_skill_reference`."
+)
+
 
 def _competition_windows_instruction(agent: Any) -> str:
     """Guidance for a match whose scoring depends on submission TIMING.
@@ -380,6 +473,26 @@ def _looks_like_quiz(goal: str) -> bool:
         return True
     # Three or more distinct A./B./C./D. option markers is a choice-question task.
     return len(set(_QUIZ_OPTIONS_RE.findall(goal or ""))) >= 3
+
+
+def _looks_like_hardening(goal: str) -> bool:
+    """Return True when ``goal`` reads as a defensive hardening task.
+
+    Kept separate from the quiz detector: a hardening run still needs a flag
+    when the platform awards one, so it must NOT inherit the quiz gate
+    exemption. The prompt directive and tool bundle are the only things that
+    change.
+    """
+    lowered = (goal or "").lower()
+    # An IR goal that mentions "加固" as one question is not a hardening
+    # challenge. Explicit "安全加固" still wins, so "安全加固：清除后门"
+    # remains a hardening task.
+    if "安全加固" not in lowered and any(
+        marker in lowered
+        for marker in (*_HARDENING_IR_MARKERS, *_HARDENING_PENTEST_MARKERS)
+    ):
+        return False
+    return any(keyword in lowered for keyword in _HARDENING_KEYWORDS)
 
 
 def _quiz_questions_inline(goal: str) -> bool:
@@ -1748,6 +1861,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     )
     fanout_guidance = prompt_guidance(agent)
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
+    hardening_instruction = _HARDENING_INSTRUCTION if _looks_like_hardening(state.goal) else ""
     competition_instruction = _competition_windows_instruction(agent)
     runtime = getattr(agent, "runtime", None)
     prior_playbook_brief = getattr(runtime, "prior_playbook_brief", "") or ""
@@ -1851,6 +1965,7 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         "When user input is required, write `ASK_USER:` with the exact question. "
         "When no viable path remains, write `NO_PATH:` with the evidence-backed reason.\n"
         f"{quiz_instruction}"
+        f"{hardening_instruction}"
         f"{competition_instruction}"
         f"Origin: {state.origin}\n"
         f"Goal: {state.goal}"
