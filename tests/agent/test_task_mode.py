@@ -70,6 +70,11 @@ class TestModeInstruction:
         text = mode_instruction("ctf")
         assert "flag" in text and "fail-fast" in text
 
+    def test_ctf_discipline_exempts_hardening_from_fail_fast(self):
+        text = mode_instruction("ctf")
+        assert "安全加固" in text
+        assert "30-40" in text
+
     def test_pentest_has_no_extra_discipline(self):
         assert mode_instruction("pentest") == ""
 

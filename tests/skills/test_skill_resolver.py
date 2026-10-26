@@ -130,6 +130,10 @@ POSITIVE_CASES = [
     # Alias-driven: 知识竞赛/quiz text routes to the knowledge-quiz skill.
     ("知识竞赛理论题", dict(), "knowledge-quiz"),
     ("security quiz", dict(), "knowledge-quiz"),
+    # Alias/typed-driven: defensive hardening routes to security-hardening.
+    ("安全加固", dict(), "security-hardening"),
+    ("security hardening baseline", dict(), "security-hardening"),
+    ("host hardening", dict(target_type="host", task_types=["audit"]), "security-hardening"),
 ]
 
 
@@ -397,3 +401,19 @@ class TestRuntimeWiring:
         # Re-resolve to the same bundle (fresh provenance without refs).
         state.set_active_skill_selection({"primary": "ctf-web", "supporting": []})
         assert state.active_skill_selection["references_loaded"] == ["ctf-web/a.md"]
+
+
+class TestHardeningRouting:
+    def test_safety_hardening_routes_to_hardening(self, resolver):
+        s = resolver.resolve(SkillQuery(text="安全加固：系统/中间件加固、漏洞修复、权限配置"))
+        assert s.primary == "security-hardening"
+
+    def test_ir_goal_mentioning_hardening_stays_ir(self, resolver):
+        """An IR answer round that includes a hardening sub-question must not
+        be stolen by the new hardening skill."""
+        s = resolver.resolve(SkillQuery(text="应急响应：排查后门并加固"))
+        assert s.primary == "incident-response"
+
+    def test_explicit_hardening_still_wins_over_ir_vocabulary(self, resolver):
+        s = resolver.resolve(SkillQuery(text="安全加固：清除后门并修权限"))
+        assert s.primary == "security-hardening"
