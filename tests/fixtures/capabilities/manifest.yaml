@@ -1,0 +1,55 @@
+# Capability coverage manifest (audit item E, 2026-10-24).
+#
+# One row per shipped capability that has NOT yet been exercised by a real
+# competition challenge. "未触发 ≠ 坏了" -- these entries exist so coverage is
+# tracked in one machine-readable place instead of prose. The meta test
+# (tests/meta/test_capability_manifest.py) validates that every referenced
+# test path exists, so this file cannot rot silently.
+#
+# Fields:
+#   name          capability id
+#   unit_test     pytest node id that pins the tool's mechanics today
+#   fixture       deterministic local input (repo-relative) or "" when missing
+#   external_deps runtime deps the CI host may not have (skip-gated tests)
+#   closed_loop   where the end-to-end roundtrip is recorded
+#   real_hit      real competition challenge that exercised it ("" = none yet)
+
+version: 1
+capabilities:
+  - name: f5_stego
+    unit_test: tests/agent/test_tool_registry.py::test_f5_cmd_uses_the_detected_bundle_dir
+    fixture: ""
+    external_deps: ["java (JDK 17+)", "F5.jar bundle (.ir-tools)"]
+    closed_loop: "TECH-DEBT E: embed->extract byte-identical, JDK 24 --add-exports, 2026-10"
+    real_hit: ""
+    note: "fixture missing: needs a small JPEG produced by F5.jar itself (generate when java is on PATH)"
+
+  - name: qr_decode
+    unit_test: "tests/meta/test_capability_manifest.py (roundtrip below)"
+    fixture: tests/fixtures/capabilities/qr_sample.png
+    fixture_payload: "VULNCLAW-CAPABILITY-FIXTURE-QR-2026"
+    external_deps: ["pyzbar", "pillow"]
+    closed_loop: "generated+decoded 2026-10-24; roundtrip asserted by the meta test (skip-gated)"
+    real_hit: ""
+
+  - name: ocr_vision
+    unit_test: "tests/agent/test_ocr_vision.py::test_ocr_auto_prefers_local_when_it_works"
+    fixture: ""
+    external_deps: ["easyocr (torch)", "E:/vulnclaw/test/test_ocr.png (external path pinned by the test)"]
+    closed_loop: "known substitution errors documented (flag{easyocr_ok} -> flagleasyccr_ok)"
+    real_hit: ""
+    note: "fixture missing: commit a small PNG beside the test instead of the external E: path"
+
+  - name: cve_alias_fallback
+    unit_test: "tests/intel/test_cve.py"
+    fixture: "tests/intel/test_cve.py (inline alias table: log4shell/springshell)"
+    external_deps: []
+    closed_loop: "alias -> CVE id mapping asserted inline"
+    real_hit: ""
+
+  - name: exploit_intel
+    unit_test: tests/intel/test_exploit_intel.py
+    fixture: ""
+    external_deps: ["network (KEV feed / GitHub tree); tests use MockTransport"]
+    closed_loop: "KEV/nuclei signals + cross-loop concurrency pinned by tests"
+    real_hit: ""
