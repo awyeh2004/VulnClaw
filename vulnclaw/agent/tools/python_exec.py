@@ -136,6 +136,260 @@ def _extract_request_urls(code: str) -> list[tuple[str, str]]:
     return out
 
 
+def _task_constraints_active(agent: AgentContext) -> bool:
+    """Whether this run carries host/path/port scope that a request must satisfy."""
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    return constraints is not None and not constraints.is_empty()
+
+
+def _blocked_host_entries(agent: AgentContext) -> list[str]:
+    """Blocked hosts from BOTH sources: task constraints and safety.denied_hosts.
+
+    The hard denylist (``safety.denied_hosts``) is merged into constraints on the
+    paths that install a run's scope -- but a run that never installs scope would
+    otherwise carry an invisible denylist, so it is read directly here too.
+    CIDR-shaped entries are address rules, not text markers; they are skipped.
+    """
+    entries: list[str] = []
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is not None:
+        entries.extend(str(h) for h in (constraints.blocked_hosts or []))
+    safety = getattr(getattr(agent, "config", None), "safety", None)
+    if safety is not None:
+        entries.extend(str(h) for h in (getattr(safety, "denied_hosts", None) or []))
+    return [h.strip().lower() for h in entries if h.strip() and "/" not in h]
+
+
+def _blocked_host_text_reason(agent: AgentContext, code: str) -> str | None:
+    """The cheap first pass (audit item C, 2026-10-24): refuse code that NAMES
+    a blocked host anywhere.
+
+    The literal-URL check only sees request URLs; the host string can also reach
+    the network through a variable, a file read or a socket call. While a host is
+    explicitly off-limits, naming it in the code at all is refused -- a warning
+    here would only teach the model to route around the gate.
+    """
+    blocked = _blocked_host_entries(agent)
+    if not blocked:
+        return None
+    lowered = str(code or "").lower()
+    for host in blocked:
+        if host in lowered:
+            return (
+                f"[constraint_violation] Code references blocked host '{host}'. "
+                "Any request toward it is out of scope for this run; build the "
+                "solution against the allowed target instead."
+            )
+    return None
+
+
+def _url_argument(node: ast.Call) -> ast.AST | None:
+    """The expression a known HTTP-client call sends its request to."""
+    name = _call_full_name(node.func)
+    positional = 1 if name.endswith(".request") else 0  # request(method, url, ...)
+    if len(node.args) > positional:
+        return node.args[positional]
+    for kw in node.keywords:
+        if kw.arg in {"url", "uri", "path"}:
+            return kw.value
+    return None
+
+
+def _static_text(node: ast.AST, bindings: dict[str, str]) -> str | None:
+    """The string value of an expression when it is built from constants only."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_text(node.left, bindings)
+        right = _static_text(node.right, bindings)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _module_string_bindings(tree: ast.Module) -> dict[str, str]:
+    """Module-level ``name = <constant-built string>`` assignments, in order.
+
+    A name bound to a ``*Request("http://...")`` constructor resolves statically
+    too, so the common ``req = urllib.request.Request(literal); urlopen(req)``
+    shape (used by this repo itself) is not misread as dynamic.
+    """
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        names: list[str] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+            value = node.value
+        if value is None or not names:
+            continue
+        if isinstance(value, ast.Call):
+            if not _call_full_name(value.func).endswith("Request"):
+                continue
+            value = _url_argument(value)
+            if value is None:
+                continue
+        resolved = _static_text(value, bindings)
+        if resolved is not None:
+            for name in names:
+                bindings[name] = resolved
+    return bindings
+
+
+def _dynamic_network_target_reason(code: str) -> str | None:
+    """Fail-closed check (audit item C): HTTP calls whose target is not static.
+
+    The scope gate could only check string-literal URLs;
+    ``requests.get("http://" + host)``, ``urlopen(os.environ["URL"])`` and URLs
+    read from files executed unchecked. When the run carries task scope, an HTTP
+    call whose target cannot be resolved statically is refused: a request whose
+    host cannot be named cannot be proved in scope. Runs with no scope keep the
+    previous behaviour, and static constant-built targets still pass.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None  # the staged run reports the syntax error; nothing executes
+    bindings = _module_string_bindings(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_full_name(node.func) not in _HTTP_CALL_NAMES:
+            continue
+        arg = _url_argument(node)
+        if arg is None:
+            continue
+        if _static_text(arg, bindings) is None:
+            call = _call_full_name(node.func)
+            return (
+                f"[constraint_violation] {call}(...) builds its request target "
+                "dynamically, so it cannot be checked against the task's host/path "
+                "scope. Inline a literal http(s):// URL inside the allowed scope, or "
+                "use fetch / http_probe_batch, which scope-check every request."
+            )
+    return None
+
+
+
+def _egress_scope_preamble(agent: AgentContext) -> str:
+    """In-process egress guard (audit item C2, python side).
+
+    The staged payload installs a ``sys.addaudithook`` that refuses
+    ``socket.getaddrinfo`` / ``socket.connect`` outside the task's host/port
+    scope — network-level enforcement for the exact path string/AST scanning
+    cannot see (aliases, config files, library internals). Audit hooks cannot
+    be uninstalled, so the payload cannot shed the guard mid-run.
+
+    Two deliberate scope limits, both documented residuals:
+    * raw-IP connects enforce the BLOCKED lists and ports, but not the
+      allowed-name list (a name's IP cannot be verified inside the payload
+      without re-resolving); name egress is enforced at getaddrinfo.
+    * direct ctypes/winsock calls bypass CPython audit events entirely; that
+      residual needs an OS-level boundary (egress proxy/WFP), not more code.
+    Empty when the run carries no task constraints (local runs unchanged).
+    """
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is None or constraints.is_empty():
+        return ""
+    try:
+        scope = json.dumps(
+            {
+                "allowed_hosts": [str(h) for h in (constraints.allowed_hosts or [])],
+                "blocked_hosts": [str(h) for h in (constraints.blocked_hosts or [])],
+                "allowed_ports": [int(p) for p in (constraints.allowed_ports or [])],
+                "blocked_ports": [int(p) for p in (constraints.blocked_ports or [])],
+            },
+            ensure_ascii=False,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return (
+        "# ── in-process egress scope guard (framework-injected; see audit C2) ──\n"
+        "import sys as _vc_sys, json as _vc_json, ipaddress as _vc_ip\n"
+        f"_VC_SCOPE = _vc_json.loads({scope!r})\n"
+        "def _vc_match(entry, host):\n"
+        "    try:\n"
+        "        e = str(entry).strip().lower().rstrip('.')\n"
+        "    except Exception:\n"
+        "        return False\n"
+        "    if not e:\n"
+        "        return False\n"
+        "    if '/' in e:\n"
+        "        try:\n"
+        "            return _vc_ip.ip_address(host) in _vc_ip.ip_network(e, strict=False)\n"
+        "        except Exception:\n"
+        "            return False\n"
+        "    return host == e or host.endswith('.' + e)\n"
+        "def _vc_blocked(host):\n"
+        "    return any(_vc_match(e, host) for e in _VC_SCOPE['blocked_hosts'])\n"
+        "def _vc_allowed(host):\n"
+        "    allowed = _VC_SCOPE['allowed_hosts']\n"
+        "    if not allowed:\n"
+        "        return True\n"
+        "    return any(_vc_match(e, host) for e in allowed)\n"
+        "def _vc_is_ip(host):\n"
+        "    try:\n"
+        "        _vc_ip.ip_address(host)\n"
+        "        return True\n"
+        "    except Exception:\n"
+        "        return False\n"
+        "def _vc_host_ok(host, at_dns):\n"
+        "    try:\n"
+        "        h = str(host).strip().rstrip('.').lower()\n"
+        "    except Exception:\n"
+        "        return True\n"
+        "    if not h:\n"
+        "        return True\n"
+        "    if _vc_blocked(h):\n"
+        "        return False\n"
+        "    if at_dns or not _vc_is_ip(h):\n"
+        "        return _vc_allowed(h)\n"
+        "    return True\n"
+        "def _vc_port_ok(port):\n"
+        "    try:\n"
+        "        p = int(port)\n"
+        "    except Exception:\n"
+        "        return True\n"
+        "    if p in _VC_SCOPE['blocked_ports']:\n"
+        "        return False\n"
+        "    allowed = _VC_SCOPE['allowed_ports']\n"
+        "    if allowed and p not in allowed:\n"
+        "        return False\n"
+        "    return True\n"
+        "def _vc_audit(event, args):\n"
+        "    try:\n"
+        "        if event == 'socket.getaddrinfo':\n"
+        "            if args and not _vc_host_ok(args[0], at_dns=True):\n"
+        "                raise PermissionError(\n"
+        "                    '[constraint_violation] DNS resolution of ' + repr(args[0])\n"
+        "                    + ' is outside the task host scope')\n"
+        "        elif event == 'socket.connect':\n"
+        "            addr = args[1] if len(args) > 1 else None\n"
+        "            if isinstance(addr, tuple) and addr:\n"
+        "                if not _vc_host_ok(addr[0], at_dns=False):\n"
+        "                    raise PermissionError(\n"
+        "                        '[constraint_violation] connect to ' + repr(addr[0])\n"
+        "                        + ' is outside the task host scope')\n"
+        "                if len(addr) > 1 and not _vc_port_ok(addr[1]):\n"
+        "                    raise PermissionError(\n"
+        "                        '[constraint_violation] port ' + repr(addr[1])\n"
+        "                        + ' is outside the task port scope')\n"
+        "    except PermissionError:\n"
+        "        raise\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "_vc_sys.addaudithook(_vc_audit)\n"
+    )
+
+
 async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
     # Gating/policy helpers, the audit writer, the spawn runner and the
     # workdir/staging helpers stay in the facade (some are patched there by
@@ -167,6 +421,33 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
         )
         if host_violation:
             return host_violation
+
+    # Fail-closed scope guard (audit item C, 2026-10-24). The literal check above
+    # predates it and stays first; both of these bite only when the run carries
+    # scope or names a hard-denied host, so unconstrained local runs are unchanged.
+    blocked_text = _blocked_host_text_reason(agent, code)
+    if blocked_text:
+        _write_python_audit(
+            agent,
+            purpose=purpose,
+            code=code,
+            mode=_resolve_python_execute_mode(agent),
+            outcome="blocked",
+            blocked_reason="blocked_host_text",
+        )
+        return blocked_text
+    if _task_constraints_active(agent):
+        dynamic_reason = _dynamic_network_target_reason(code)
+        if dynamic_reason:
+            _write_python_audit(
+                agent,
+                purpose=purpose,
+                code=code,
+                mode=_resolve_python_execute_mode(agent),
+                outcome="blocked",
+                blocked_reason="dynamic_network_target",
+            )
+            return dynamic_reason
 
     safety = getattr(agent.config, "safety", None)
     if safety is None or not safety.enable_python_execute:
@@ -300,6 +581,7 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
                 "try:\n    import itertools, functools, collections, math\nexcept ImportError:\n    pass\n\n"
             )
             f.write(preamble)
+            f.write(_egress_scope_preamble(agent))
             f.write(code)
             tmp_path = f.name
 

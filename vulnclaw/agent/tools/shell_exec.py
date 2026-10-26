@@ -101,7 +101,146 @@ def _validate_command_url_scope(agent: AgentContext, command: str) -> str | None
         )
         if violation:
             return violation
+
+    # Fail-closed additions (audit item C, 2026-10-24). The literal-URL loop
+    # above only sees complete static URLs; `curl $URL`, `curl http://$h/x` and
+    # `"http://"$(cat host)` executed unchecked. Blocked-host naming applies
+    # whenever a denylist exists; the dynamic-target rules only bite when the
+    # run actually carries scope, so unconstrained local runs are unchanged.
+    blocked_text = _blocked_host_text_reason(agent, command)
+    if blocked_text:
+        return blocked_text
+    if not _shell_constraints_active(agent):
+        return None
+    if _SHELL_FETCHER_RE.search(command):
+        dynamic_reason = _dynamic_fetcher_target_reason(command)
+        if dynamic_reason:
+            return dynamic_reason
+        if not re.findall(r"https?://[^\s'\"<>]+", command, re.IGNORECASE):
+            host = _fetcher_target_host(command)
+            if host and not _DYNAMIC_HOST_CHARS_RE.search(host):
+                # Schemeless literal target (`curl allowed.test/x`): the literal
+                # loop above never saw it because there is no scheme to match.
+                violation = _bt.enforce_host_path_constraints(
+                    agent, host=host, path="", target=host
+                )
+                if violation:
+                    return violation
     return None
+
+
+#: Commands that fetch over HTTP(S); their target must be scope-checkable.
+_SHELL_FETCHER_RE = re.compile(r"(?i)\b(curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm)\b")
+#: Shell constructs that can build a target at run time ($VAR, ${VAR}, $(...),
+#: backticks, cmd's %VAR%). Deliberately narrow: `$1`/`$@` (awk/positional) and
+#: percent-encoded URL text (`%2F`) do not match.
+_SHELL_DYNAMIC_RE = re.compile(r"\$\{?[A-Za-z_]\w*|\$\(|`|%[A-Za-z_]\w+%")
+#: Characters a literal hostname never contains; their presence means the
+#: "host" is actually an unresolved expression.
+_DYNAMIC_HOST_CHARS_RE = re.compile(r"[$`%(){}]")
+#: curl/wget flags that CONSUME the next token; the first bare positional after
+#: them (and after non-value flags) is the fetcher's target.
+_FETCHER_VALUE_FLAGS = {
+    "-o", "--output", "-H", "--header", "-d", "--data", "--data-raw",
+    "--data-binary", "--data-urlencode", "-X", "--request", "-A", "--user-agent",
+    "-e", "--referer", "-b", "--cookie", "-u", "--user", "-x", "--proxy",
+    "--proxy-user", "--connect-timeout", "--max-time", "-m", "--retry", "-w",
+    "--write-out", "--url", "-T", "--upload-file", "-F", "--form", "-E",
+    "--cert", "--cacert", "--key", "-K", "--config",
+}
+
+
+def _shell_constraints_active(agent: AgentContext) -> bool:
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    return constraints is not None and not constraints.is_empty()
+
+
+def _blocked_host_text_reason(agent: AgentContext, command: str) -> str | None:
+    """Refuse a command that NAMES a blocked host anywhere (cheap first pass).
+
+    Mirrors the python_execute side: the URL loop only sees complete literals,
+    while the host can reach the network via a variable, ``$(cat f)`` or a
+    socket tool. Sources are task constraints plus the hard ``safety.denied_hosts``
+    denylist (read directly: a run that never installed scope would otherwise
+    carry an invisible denylist). CIDR entries are address rules, not text.
+    """
+    entries: list[str] = []
+    session = getattr(agent, "session_state", None)
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is not None:
+        entries.extend(str(h) for h in (constraints.blocked_hosts or []))
+    safety = getattr(getattr(agent, "config", None), "safety", None)
+    if safety is not None:
+        entries.extend(str(h) for h in (getattr(safety, "denied_hosts", None) or []))
+    hosts = [h.strip().lower() for h in entries if h.strip() and "/" not in h]
+    if not hosts:
+        return None
+    lowered = str(command or "").lower()
+    for host in hosts:
+        if host in lowered:
+            return (
+                f"[constraint_violation] Command references blocked host '{host}'. "
+                "Any request toward it is out of scope for this run."
+            )
+    return None
+
+
+def _dynamic_fetcher_target_reason(command: str) -> str | None:
+    """Refuse a fetcher whose target host cannot be named statically.
+
+    When at least one clean literal URL fragment exists, the fetcher's named
+    target is provably checkable (the literal loop above already checked it) and
+    dynamic markers elsewhere -- e.g. ``-H "$AUTH"`` -- are headers, not the
+    target, so no refusal fires. curl CAN take several URL operands, so a
+    ``$URL`` next to a clean literal still escapes this pass; closing that needs
+    egress-level enforcement (audit item C2), not more string scanning.
+    """
+    fragments = re.findall(r"https?://[^\s'\"<>]+", command, re.IGNORECASE)
+    for fragment in fragments:
+        host = urlparse(fragment).hostname or ""
+        if not host or _DYNAMIC_HOST_CHARS_RE.search(host):
+            return (
+                f"[constraint_violation] network target '{fragment}' has no literal "
+                "host to check against the task's scope. Write the full URL literal "
+                "inside the allowed scope, or use the fetch / http_probe_batch tool."
+            )
+    if fragments:
+        return None
+    if _SHELL_DYNAMIC_RE.search(command):
+        return (
+            "[constraint_violation] a curl/wget/Invoke-WebRequest target is built "
+            "from a variable or subcommand and cannot be scope-checked. Inline a "
+            "literal URL inside the allowed scope, or use fetch / http_probe_batch."
+        )
+    return None
+
+
+def _fetcher_target_host(command: str) -> str:
+    """Host of the fetcher's first bare positional operand, when it is literal.
+
+    Only called when no scheme'd URL exists in the command: ``curl allowed.test/x``
+    has no ``http://`` for the literal loop to match. Token-level parsing is a
+    heuristic; anything that does not look like a host returns "" (no check, no
+    false block) and the dynamic-marker rule owns the variable case.
+    """
+    expect_value = False
+    for token in command.split():
+        if expect_value:
+            expect_value = False
+            continue
+        if token.startswith("-"):
+            if token in _FETCHER_VALUE_FLAGS:
+                expect_value = True
+            continue
+        candidate = token.strip("\"'")
+        if _SHELL_FETCHER_RE.fullmatch(candidate):
+            continue
+        host = candidate.split("/", 1)[0]
+        if host and ("." in host or host.lower() == "localhost"):
+            return host.lower()
+        return ""
+    return ""
 
 
 # Prepended to every PowerShell -Command so the pipe and file cmdlets speak
