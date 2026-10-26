@@ -13,6 +13,7 @@ class HealthStatus(str, Enum):
 
     HEALTHY = "healthy"
     DEGRADED = "degraded"
+    BLOCKED = "blocked"
     UNAVAILABLE = "unavailable"
     STARTING = "starting"
     STOPPING = "stopping"

@@ -23,7 +23,12 @@ from vulnclaw.config.source_render import render_highlighted_source_block
 # 修改时间: 2026-07-08
 # 修改原因: 消除 V1 违规 — mcp/ 基础设施层不应反向依赖 agent/ 领域层，
 #          改为从 config/url_utils.py 导入纯 URL 工具函数。
-from vulnclaw.config.url_utils import host_in_scope, infer_port_from_url, is_research_host
+from vulnclaw.config.url_utils import (
+    host_in_scope,
+    infer_port_from_url,
+    is_research_host,
+    normalized_origin,
+)
 from vulnclaw.mcp._probe_mixin import ProbeMixin
 from vulnclaw.mcp.registry import HealthStatus, MCPRegistry
 from vulnclaw.mcp.session_owner import OwnedMcpSession, _describe_exception
@@ -534,6 +539,14 @@ class MCPLifecycleManager(ProbeMixin):
         - stdio/sse others: attempt attach, then degrade to placeholder if unavailable
         """
         transport = config.transport
+        endpoint_violation = self._check_transport_endpoint_constraints(config)
+        if endpoint_violation is not None:
+            self.registry.set_server_health(name, HealthStatus.BLOCKED.value)
+            self.registry.set_server_error(name, endpoint_violation, error_type="constraint_violation")
+            self.registry.set_server_attach_result(name, attempted=False, succeeded=False)
+            self.registry.set_server_running(name, running=False)
+            self.registry.set_server_execution_mode(name, "blocked")
+            return False
 
         if name in {"fetch", "memory"}:
             self.registry.set_server_running(name, running=False)
@@ -1679,6 +1692,76 @@ class MCPLifecycleManager(ProbeMixin):
             mode = server_state.execution_mode if server_state else "unknown"
             return await self._dispatch_call_tool(server_name, tool_name, arguments, mode)
 
+    def _check_mcp_argument_constraints(self, arguments: dict[str, Any]) -> str | None:
+        """Check explicit network targets in generic MCP arguments.
+
+        Generic MCP servers are operator-provided, but their tool arguments may
+        still name a task target. Only absolute HTTP(S) URLs and explicitly
+        network-shaped fields are inspected; ordinary strings such as filenames,
+        usernames, and challenge ids are not guessed as hosts.
+        """
+        constraints = self._task_constraints
+        if constraints is None or constraints.is_empty():
+            return None
+        network_keys = {"url", "uri", "endpoint", "target", "host", "hostname"}
+
+        def check(value: Any, key: str = "") -> str | None:
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    violation = check(child_value, str(child_key).lower())
+                    if violation:
+                        return violation
+                return None
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    violation = check(child, key)
+                    if violation:
+                        return violation
+                return None
+            if not isinstance(value, str):
+                return None
+            candidate = value.strip()
+            if not candidate:
+                return None
+            parsed = urlparse(candidate)
+            is_url = parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
+            if not is_url and key not in network_keys:
+                return None
+            if is_url:
+                url = candidate
+            elif key in {"host", "hostname", "target"}:
+                if any(char in candidate for char in " \\t\\r\\n/\\\\"):
+                    return None
+                url = f"http://{candidate}"
+            else:
+                return None
+            violation = self._check_fetch_constraints({"url": url}, allow_research=False)
+            if violation is not None:
+                return str(violation.get("message") or violation)
+            return None
+
+        return check(arguments)
+
+    def _check_transport_endpoint_constraints(self, config: Any) -> str | None:
+        """Reject configured MCP control-plane endpoints only when explicitly blocked."""
+        constraints = self._task_constraints
+        if constraints is None or constraints.is_empty():
+            return None
+        transport = getattr(config, "transport", None)
+        endpoint = str(getattr(transport, "url", "") or "").strip()
+        if not endpoint:
+            return None
+        parsed = urlparse(endpoint)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        host = parsed.hostname.lower()
+        if host_in_scope(host, constraints.blocked_hosts):
+            return f"Host {host} is blocked by task constraints for MCP control-plane endpoint {endpoint}"
+        port = infer_port_from_url(endpoint)
+        if port is not None and port in constraints.blocked_ports:
+            return f"Port {port} is blocked by task constraints for MCP control-plane endpoint {endpoint}"
+        return None
+
     def _server_call_gate(self, server_name: str) -> asyncio.Semaphore:
         """Return the shared per-server gate for the current event loop."""
 
@@ -1798,6 +1881,23 @@ class MCPLifecycleManager(ProbeMixin):
             # 通用路径：任何经 SDK attach 成功的 stdio/streamable-http 服务（如自定义
             # streamable-mcp-server）都走真实会话调用，而不是回落到 unsupported。
             if self._is_sdk_attachable(server_name):
+                argument_violation = self._check_mcp_argument_constraints(arguments)
+                if argument_violation is not None:
+                    self.registry.record_tool_call(server_name, success=False)
+                    self.registry.set_server_error(
+                        server_name,
+                        argument_violation,
+                        error_type="constraint_violation",
+                    )
+                    return self._tool_result(
+                        ok=False,
+                        server=server_name,
+                        tool=tool_name,
+                        execution_mode=mode,
+                        error_type="constraint_violation",
+                        message=argument_violation,
+                        suggestion="Use a target inside the task scope or a scoped built-in network tool.",
+                    )
                 try:
                     content, structured = await self._call_attached_server(
                         server_name, tool_name, arguments
@@ -2231,6 +2331,9 @@ class MCPLifecycleManager(ProbeMixin):
         The call is bounded by the server's tool_timeout so a silent/streaming
         server can never deadlock the agent loop.
         """
+        violation = self._check_mcp_argument_constraints(args)
+        if violation is not None:
+            raise _FetchScopeViolation("", violation)
         session = await self._get_or_create_session(server_name)
         config = self.config.mcp.servers.get(server_name)
         timeout_s = self._tool_timeout_seconds(config) if config else 300.0
