@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 from collections.abc import Iterable
+from typing import Any
 from urllib.parse import urlparse
 
 
@@ -88,6 +89,24 @@ def _address_in_network(candidate: str, pattern: str) -> bool:
     except ValueError:
         return False
     return address in network
+
+
+def normalized_origin(url: str) -> tuple[str, str, int | None]:
+    """Return a URL origin with implicit HTTP(S) ports made explicit."""
+    try:
+        parsed = urlparse(url)
+        scheme = str(parsed.scheme or "").lower()
+        host = str(parsed.hostname or "").lower()
+        explicit_port = parsed.port
+    except (TypeError, ValueError):
+        return "", "", None
+    if explicit_port is not None:
+        return scheme, host, explicit_port
+    if scheme == "http":
+        return scheme, host, 80
+    if scheme == "https":
+        return scheme, host, 443
+    return scheme, host, None
 
 
 def infer_port_from_url(url: str) -> int | None:

@@ -2037,6 +2037,8 @@ class MCPLifecycleManager(ProbeMixin):
         reason to trust the host it redirects to.
         """
         current = dict(request)
+        current_jar = jar
+        current_origin = normalized_origin(current["url"])
         max_redirects = 20
         deadline = time.monotonic() + _FETCH_CHAIN_BUDGET
         if time.monotonic() >= deadline:
@@ -2047,12 +2049,16 @@ class MCPLifecycleManager(ProbeMixin):
             target = first_target if current["url"] == request["url"] else current["url"]
             response = await self._fetch_one_request(
                 current,
-                jar=jar,
+                jar=current_jar,
                 httpx=httpx,
                 async_http_client=async_http_client,
                 fetch_proxy=fetch_proxy,
                 target=target,
             )
+            if current_jar is not jar:
+                # Preserve response cookies for later top-level fetches, but do
+                # not use the shared jar to authorize another redirect hop.
+                jar.extract_cookies(response)
             # ``_fetch_one_request`` mutates the hop metadata for its own retry
             # path; keep the outer request in sync for response formatting and
             # downstream redirect hops.
@@ -2070,6 +2076,15 @@ class MCPLifecycleManager(ProbeMixin):
                 )
                 if violation is not None:
                     raise _FetchScopeViolation(next_url, violation["message"])
+                next_origin = normalized_origin(next_url)
+                if next_origin != current_origin:
+                    # Never carry the previous origin's cookie jar into a new
+                    # origin. In particular, a broad Domain cookie (or a cookie
+                    # set by a redirected host) must not become a credential on
+                    # the next hop. The shared jar remains available to later
+                    # top-level fetch calls.
+                    current_jar = httpx.Cookies()
+                    current_origin = next_origin
                 next_request = self._redirect_request(current, next_url, response.status_code)
                 current = {**current, "url": next_url, "kwargs": next_request}
                 continue
@@ -2122,13 +2137,9 @@ class MCPLifecycleManager(ProbeMixin):
     ) -> dict[str, Any]:
         """Build the next-hop request with safe method/header handling."""
         original_url = request["url"]
-        old = urlparse(original_url)
-        new = urlparse(next_url)
-        cross_origin = (old.scheme, old.hostname, old.port) != (
-            new.scheme,
-            new.hostname,
-            new.port,
-        )
+        old = normalized_origin(original_url)
+        new = normalized_origin(next_url)
+        cross_origin = old != new
         method = request["method"]
         kwargs = dict(request["kwargs"])
         if status_code in {301, 302, 303} and method not in {"GET", "HEAD"}:
@@ -2144,6 +2155,11 @@ class MCPLifecycleManager(ProbeMixin):
                 if name.lower() in {"authorization", "proxy-authorization", "cookie"}:
                     headers.pop(name, None)
             kwargs["headers"] = headers
+            kwargs.pop("cookies", None)
+        # Query parameters belong to the request that supplied them. Reusing
+        # them on a redirect can duplicate the original query after httpx also
+        # applies the Location URL's query string.
+        kwargs.pop("params", None)
         return kwargs
 
     def _prepare_fetch_request(self, args: dict) -> dict[str, Any]:

@@ -15,7 +15,7 @@ import httpx
 from vulnclaw.agent.agent_state import clip_text, one_line
 from vulnclaw.agent.tools._shared import _runtime_config
 from vulnclaw.config.source_render import render_highlighted_source_block
-from vulnclaw.config.url_utils import infer_port_from_url
+from vulnclaw.config.url_utils import infer_port_from_url, normalized_origin
 from vulnclaw.utils.http_client import bypass_proxy_for, is_local_target, resolve_egress_proxy
 
 if TYPE_CHECKING:
@@ -142,7 +142,7 @@ async def execute_http_probe_batch(agent: AgentContext, args: dict[str, Any]) ->
             with _bt.make_http_client(
                 targets=[str(item.get("url") or "") for item in group],
                 proxy=group_proxy,
-                follow_redirects=follow_redirects,
+                follow_redirects=False,
                 timeout=timeout,
                 verify=verify_tls,
                 headers={"User-Agent": "VulnClaw-http_probe_batch/1.0"},
@@ -390,6 +390,13 @@ def _request_with_scoped_redirects(
     current = dict(item)
     method = str(current["method"])
     current_url = str(current["url"])
+    original_client_cookies = getattr(client, "cookies", None)
+
+    def _finish(response: httpx.Response, error: str | None) -> tuple[httpx.Response, str | None]:
+        if original_client_cookies is not None:
+            client.cookies = original_client_cookies
+        return response, error
+
     for _ in range(21):
         response = client.request(
             method,
@@ -399,18 +406,19 @@ def _request_with_scoped_redirects(
             cookies=current.get("cookies") or None,
             data=current.get("data"),
             json=current.get("json"),
+            follow_redirects=False,
         )
         if not follow_redirects or response.status_code not in _HTTP_PROBE_REDIRECT_STATUSES:
-            return response, None
+            return _finish(response, None)
         location = response.headers.get("location")
         if not location:
-            return response, None
+            return _finish(response, None)
         next_url = urljoin(current_url, location)
         parsed = urlparse(next_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return response, (
+            return _finish(response, (
                 f"[constraint_violation] redirect target is not an http(s) URL: {next_url}"
-            )
+            ))
         from vulnclaw.agent import builtin_tools as _bt
         violation = _bt.enforce_host_path_constraints(
             agent,
@@ -419,19 +427,16 @@ def _request_with_scoped_redirects(
             target=parsed.hostname,
         )
         if violation:
-            return response, f"{violation} (redirect target: {next_url})"
+            return _finish(response, f"{violation} (redirect target: {next_url})")
         port = infer_port_from_url(next_url)
         if port is not None:
             port_violation = _bt.enforce_port_constraints(agent, [port], target=parsed.hostname)
             if port_violation:
-                return response, f"{port_violation} (redirect target: {next_url})"
+                return _finish(response, f"{port_violation} (redirect target: {next_url})")
 
-        old = urlparse(current_url)
-        cross_origin = (old.scheme, old.hostname, old.port or infer_port_from_url(current_url)) != (
-            parsed.scheme,
-            parsed.hostname,
-            port or infer_port_from_url(next_url),
-        )
+        old = normalized_origin(current_url)
+        new = normalized_origin(next_url)
+        cross_origin = old != new
         if cross_origin:
             headers = dict(current.get("headers") or {})
             for name in list(headers):
@@ -439,13 +444,16 @@ def _request_with_scoped_redirects(
                     headers.pop(name, None)
             current["headers"] = headers or None
             current["cookies"] = None
+            if original_client_cookies is not None:
+                client.cookies = httpx.Cookies()
 
         current_url = next_url
+        current["params"] = None
         if response.status_code in {301, 302, 303} and method not in {"GET", "HEAD"}:
             method = "GET"
             current["data"] = None
             current["json"] = None
-    return (
+    return _finish(
         httpx.Response(508, request=httpx.Request("GET", current_url)),
         "[constraint_violation] redirect limit exceeded",
     )
