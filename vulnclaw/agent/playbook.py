@@ -474,6 +474,16 @@ class Playbook:
     scripts: str = ""
     updated_at: str = ""
     source: str = SOURCE_CURATED  # "auto" for auto-captured run notes
+    #: Structured instance identity (audit item A, 2026-10-24). ``target_ref`` is
+    #: the stable platform reference (a full ``ctf2:practice:<ground>:<challenge>``
+    #: ref) when one is derivable; ``target_hash`` is its sha256[:16]. The token
+    #: fingerprint above stays the recall surface -- these fields are the TIE-BREAK
+    #: layer for notes whose goals share the same template sentence, which no
+    #: token scoring can separate. ``identity_version`` records the schema so a
+    #: future format change can migrate old notes instead of guessing.
+    identity_version: int = 0
+    target_ref: str = ""
+    target_hash: str = ""
     _tokens: set[str] = field(default_factory=set, repr=False)
 
     @property
@@ -523,13 +533,21 @@ class Playbook:
         return PLAYBOOKS_DIR / f"{self.slug}.md"
 
     def to_frontmatter(self) -> dict[str, Any]:
-        return {
+        meta = {
             "name": self.name,
             "fingerprint": self.fingerprint,
             "status": self.status,
             "source": self.source,
             "updated_at": self.updated_at,
         }
+        # Identity fields only when set, so legacy notes round-trip byte-identically.
+        if self.identity_version:
+            meta["identity_version"] = str(self.identity_version)
+        if self.target_ref:
+            meta["target_ref"] = self.target_ref
+        if self.target_hash:
+            meta["target_hash"] = self.target_hash
+        return meta
 
     @classmethod
     def from_frontmatter(cls, slug: str, meta: dict[str, Any], body: str) -> "Playbook":
@@ -549,6 +567,13 @@ class Playbook:
             steps=_fingerprint_flags(body or ""),
             scripts="",
             updated_at=str(meta.get("updated_at", "") or ""),
+            # Structured identity (audit item A). Legacy notes have none of these
+            # keys and load with version 0 / empty fields -- recall for them is
+            # unchanged, which IS the migration story until a future version
+            # bumps the schema.
+            identity_version=int(meta.get("identity_version", 0) or 0),
+            target_ref=str(meta.get("target_ref", "") or ""),
+            target_hash=str(meta.get("target_hash", "") or ""),
             # Notes written before `source` existed are recognised by the name
             # capture_run_notes always used, so a legacy store is not silently
             # reclassified as curated (that would defeat the reserve below).
@@ -623,9 +648,18 @@ def lookup_playbook(fingerprint: str, *, limit: int = 3, min_score: float = 0.15
     if not (fingerprint or "").strip():
         return []
     query_tokens = _tokenize(fingerprint)
+    # Structured-identity tie-break (audit item A): when BOTH the query and a
+    # note carry the same stable platform ref (``ctf2:practice:<ground>:<chal>``),
+    # that is an identity statement no token overlap can express -- the exact
+    # case template-shaped goals cannot win on tokens. The floor (0.6) is above
+    # min_score so an exact-ref note always clears the gate, and applies BEFORE
+    # the filter. Legacy notes (no target_ref) and ref-less queries are unchanged.
+    query_ref = derive_target_ref(fingerprint)
     scored: list[tuple[float, int, Playbook]] = []
     for pb in list_playbooks():
         s = pb.score(fingerprint)
+        if query_ref and pb.target_ref and pb.target_ref == query_ref:
+            s = max(s, 0.6)
         if s >= min_score:
             scored.append((s, len(query_tokens & pb.identity_tokens()), pb))
     # Stable ranking: higher score first; more overlap, then validated-before-draft
@@ -1342,6 +1376,7 @@ def save_playbook(
     status: str = "draft",
     slug: Optional[str] = None,
     source: str = SOURCE_CURATED,
+    target_ref: str = "",
 ) -> dict[str, Any]:
     """Persist (or cover-update) a playbook. Returns a small ack dict.
 
@@ -1355,6 +1390,11 @@ def save_playbook(
     ``source`` records whether the note was chosen by the model (curated) or dumped
     by capture_run_notes (auto). It is persisted in the frontmatter so the
     curated-reserve rule does not have to infer it from the name forever.
+
+    ``target_ref`` (audit item A): the stable platform reference, persisted as a
+    STRUCTURED identity field (plus its hash and identity_version=1) so template-
+    shaped goals get an identity tie-break instead of relying on token overlap
+    alone. Empty = legacy shape, nothing extra is written.
     """
     ensure_dirs()
 
@@ -1426,6 +1466,12 @@ def save_playbook(
         f"status: {status}",
         f"source: {source}",
         f"updated_at: {updated_at}",
+    ]
+    if target_ref:
+        lines.append(f"identity_version: 1")
+        lines.append(f"target_ref: {target_ref}")
+        lines.append(f"target_hash: {_target_ref_hash(target_ref)}")
+    lines += [
         "---",
         "",
         steps.strip(),
@@ -1460,6 +1506,32 @@ def target_fingerprint(origin: str, goal: str = "") -> str:
         except OSError:
             pass
     return f"{o} {goal}".strip()
+
+
+#: Full platform reference -- the ONE identity that is stable across instances
+#: of the same challenge and unique to it (the challenge uuid). Deliberately
+#: the full ref, not the challenge uuid alone: the ground uuid in the middle is
+#: what keeps two same-named challenges on different grounds from colliding.
+_CTF2_REF_FULL = re.compile(r"ctf2:practice:[0-9a-f-]{36}:[0-9a-f-]{36}")
+
+
+def derive_target_ref(*texts: str) -> str:
+    """The stable platform ref buried in any of ``texts``, or ``""``.
+
+    Used at BOTH ends of recall (capture stores it; lookup derives it from the
+    query), so an exact match is an identity statement, not a token overlap.
+    """
+    for text in texts:
+        m = _CTF2_REF_FULL.search(str(text or ""))
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _target_ref_hash(ref: str) -> str:
+    if not ref:
+        return ""
+    return sha256(ref.encode("utf-8")).hexdigest()[:16]
 
 
 def _auto_notes_name(target: str) -> str:
@@ -1676,6 +1748,7 @@ def capture_run_notes(
         steps=steps,
         status=status,
         source=SOURCE_AUTO,
+        target_ref=derive_target_ref(target, goal),
     )
 
 
