@@ -1627,3 +1627,55 @@ class TestHttpProbeBatchGrouping:
 
         assert all(isinstance(proxy, str) for _, proxy in groups)
         assert sorted(len(group) for group, _ in groups) == [1, 1, 1]
+
+
+class TestSkillReferenceMissExplainsWhy:
+    """Measured 2026-10-27: a flat custom skill has no ``references/`` dir, so
+    ``load_skill_reference`` returned the bare "未找到" line. The model read that
+    as "the skill file is unreadable in this run", concluded its own scope was
+    unknown, and narrowed a whole round to a single host -- six business hosts
+    were never touched. The three miss reasons must be distinguishable.
+    """
+
+    @staticmethod
+    def _call(skill_name: str, ref_name: str = "SKILL.md") -> str:
+        import asyncio
+
+        return asyncio.run(
+            builtin_tools.execute_mcp_tool(
+                SimpleNamespace(),
+                "load_skill_reference",
+                {"skill_name": skill_name, "reference_name": ref_name},
+            )
+        )
+
+    def test_flat_custom_skill_says_the_body_is_already_injected(self, tmp_path, monkeypatch):
+        import vulnclaw.skills.loader as loader
+
+        skill = tmp_path / "flat-demo.md"
+        skill.write_text(
+            "---\nname: flat-demo\ndescription: demo\nrouting:\n  task_types: [pentest]\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(loader, "SKILLS_DIR", tmp_path)
+        monkeypatch.setattr(loader, "_shared_references_root", lambda: tmp_path, raising=False)
+
+        out = self._call("flat-demo")
+
+        assert "参考文档未找到" in out
+        assert "扁平自定义 skill" in out
+        assert "无需再加载参考文档" in out
+
+    def test_missing_skill_says_the_skill_does_not_exist(self):
+        out = self._call("no-such-skill-xyz")
+
+        assert "参考文档未找到" in out
+        assert "不存在" in out
+
+    def test_skill_with_references_reports_only_the_missing_file(self):
+        # "code" (or any packaged skill) has a references dir; a bogus file name
+        # must not be blamed on the skill being unreadable.
+        out = self._call("cve-triage", "definitely-not-a-real-file.md")
+
+        assert "参考文档未找到" in out
+        assert "references/ 内没有这个文件" in out

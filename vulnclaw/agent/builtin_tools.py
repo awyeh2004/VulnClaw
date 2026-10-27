@@ -1196,7 +1196,7 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
 
     if tool_name == "load_skill_reference":
         try:
-            from vulnclaw.skills.loader import load_skill_reference
+            from vulnclaw.skills.loader import load_skill_by_name, load_skill_reference
 
             skill_name = args.get("skill_name", "")
             ref_name = args.get("reference_name", "")
@@ -1208,7 +1208,28 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
                 if state is not None and hasattr(state, "record_loaded_reference"):
                     state.record_loaded_reference(skill_name, ref_name)
                 return content
-            return f"[!] 参考文档未找到: {skill_name}/{ref_name}"
+            # Distinguish three "not found" cases. Measured 2026-10-27: a flat
+            # custom skill (~/.vulnclaw/skills/<name>.md) has no references/ dir,
+            # so this tool returned the bare "未找到" line; the model read that as
+            # "the skill file is unreadable in this run" and narrowed its own
+            # task scope -- one whole round was spent on a single host.
+            skill = load_skill_by_name(skill_name)
+            if not skill:
+                return (
+                    f"[!] 参考文档未找到: {skill_name}/{ref_name}"
+                    f" —— 技能 {skill_name} 不存在。扁平自定义 skill 用 /{skill_name} 调用，"
+                    f"正文会自动注入。"
+                )
+            if not skill.get("references_dir"):
+                return (
+                    f"[!] 参考文档未找到: {skill_name}/{ref_name}"
+                    f" —— {skill_name} 是扁平自定义 skill，没有 references/ 目录；"
+                    f"它的正文已由 /{skill_name} 注入，无需再加载参考文档，请直接继续。"
+                )
+            return (
+                f"[!] 参考文档未找到: {skill_name}/{ref_name}"
+                f" —— 技能存在，但 references/ 内没有这个文件。"
+            )
         except Exception as e:
             return f"[!] 加载参考文档错误: {e}"
 
