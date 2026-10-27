@@ -351,6 +351,9 @@ def _execute_one_http_probe(
             "response_headers": dict(response.headers),
             "title": _extract_html_title(body),
             "signals": _http_body_signals(body, 800),
+            "waf_block": _detect_waf_block(
+                response.status_code, dict(response.headers), body
+            ),
             "decoded_source": render_highlighted_source_block(body, max_chars=max_body_chars),
             "body_chars": len(body),
             "body": body_output,
@@ -466,6 +469,48 @@ def _extract_html_title(body: str) -> str:
     return one_line(re.sub(r"<[^>]+>", "", match.group(1)), 120)
 
 
+#: Interception-page signatures, measured on live SRC/edu targets 2026-10-27.
+#: When one matches, a "difference" between two payloads is the WAF echoing the
+#: payload back, not the application behaving differently -- measured on
+#: ``dg.lszyxy.edu.cn``: real/false boolean probes both returned the same 4646-byte
+#: NWAF page, yet differing payload text made the bytes differ.
+_WAF_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("wengine", ("wengine-auth-failed", "没有权限访问相应的资源")),
+    ("aliyun", ("errors.aliyun.com", "访问被阻断", "acw_sc__v2", "aliyun_waf")),
+    ("huawei", ("hwwafsesid", "hwafsestime")),
+    ("saaswaf", ("saaswaf", "websaas")),
+    ("nwaf", ("nwaf",)),
+    ("safedog", ("安全狗", "safedog")),
+    ("yunsuo", ("云锁", "yunsuo")),
+    (
+        "generic",
+        (
+            "当前访问疑似攻击行为",
+            "因权限问题或行为非法",
+            "已被网站管理员设置为拦截",
+            "request blocked",
+            "access denied by security policy",
+        ),
+    ),
+)
+
+
+def _detect_waf_block(status: int, headers: dict, body: str) -> str:
+    """Return the WAF vendor tag when this response is an interception page.
+
+    Only interception signatures count -- a normal 200 page is never flagged, so
+    the marker can be trusted to mean "the app never saw this request".
+    """
+    blob = (body or "") + " " + " ".join(
+        f"{k}: {v}" for k, v in (headers or {}).items()
+    )
+    lowered = blob.lower()
+    for vendor, markers in _WAF_SIGNATURES:
+        if any(marker.lower() in lowered for marker in markers):
+            return vendor
+    return ""
+
+
 def _http_body_signals(body: str, limit: int) -> str:
     text = str(body or "")
     lines: list[str] = []
@@ -573,6 +618,14 @@ def _format_http_probe_batch(
                         for line in str(item.get("decoded_source") or "").splitlines()
                     ],
                     f"    signals={item['signals'] or '(empty body)'}",
+                    *(
+                        [
+                            f"    waf_block={item['waf_block']} "
+                            "(拦截页：布尔/时间差判据不可信，先判是否被拦)"
+                        ]
+                        if item.get("waf_block")
+                        else []
+                    ),
                     f"    body_length={item.get('body_chars', 0)}{body_note}",
                 ]
             )

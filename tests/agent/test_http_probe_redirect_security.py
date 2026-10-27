@@ -192,3 +192,39 @@ async def test_fetch_redirect_constraint_is_checked_before_second_real_request(m
     assert "任务范围拦截" in result
     assert len(seen) == 1
     assert "blocked.test" in result
+
+
+class TestWafInterceptionIsMarked:
+    """Measured 2026-10-27 (dg.lszyxy.edu.cn): real-vs-false boolean probes both
+    came back as the same 4646-byte NWAF page, but the two payloads were echoed
+    into the page, so the bytes differed and the run reported "bool_diff=True".
+    A response that never reached the app must be labelled as such.
+    """
+
+    def test_field_samples_are_recognized(self):
+        from vulnclaw.agent.tools.http_probe import _detect_waf_block
+
+        assert _detect_waf_block(403, {}, "<h1>NWAF页面</h1>") == "nwaf"
+        assert (
+            _detect_waf_block(403, {}, "<img src='/wengine-auth-failed.png'>") == "wengine"
+        )
+        assert (
+            _detect_waf_block(405, {}, "https://errors.aliyun.com/images/x.png") == "aliyun"
+        )
+        assert (
+            _detect_waf_block(403, {}, "当前访问疑似攻击行为，已被网站管理员设置为拦截")
+            == "generic"
+        )
+
+    def test_cookie_only_waf_is_recognized(self):
+        from vulnclaw.agent.tools.http_probe import _detect_waf_block
+
+        headers = {"set-cookie": "HWWAFSESID=abc; HWWAFSESTIME=1"}
+        assert _detect_waf_block(200, headers, "ok") == "huawei"
+
+    def test_normal_pages_are_not_flagged(self):
+        from vulnclaw.agent.tools.http_probe import _detect_waf_block
+
+        assert _detect_waf_block(200, {}, "<html>廊坊师范学院 首页 安全培训</html>") == ""
+        assert _detect_waf_block(200, {"server": "Tengine"}, "正常页面") == ""
+        assert _detect_waf_block(401, {}, '{"code":"401","msg":"登录"') == ""
