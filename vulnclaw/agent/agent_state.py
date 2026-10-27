@@ -100,6 +100,9 @@ def parse_status_code(output: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+_CODE_BODY_CHARS = ("(", ")", "[", "]", "|", "&", "=", "#", ":")
+
+
 def _is_code_shaped_body(body: str) -> bool:
     """Whether a ``word{...}`` body reads as code rather than a flag.
 
@@ -109,10 +112,21 @@ def _is_code_shaped_body(body: str) -> bool:
     check. Real flags hug their braces (no leading/trailing whitespace) and never
     carry statement separators; a letterless comma list is the one initializer
     shape that must not pass (pure-digit bodies stay: ``flag{123456}`` is a flag).
+
+    Measured 2026-10-27 against SRC targets: four CSS/JS snippets were harvested
+    as "flags" and written into the solve report's ``Flag / proof`` line --
+    ``header{padding:110px 0}``, ``let{title:e,favicon:t}``,
+    ``hover{background:#1c8570}``, ``try{c||null==n.return||n.return()}``. What
+    they share is punctuation real flags do not carry: CSS declarations use
+    ``:`` and ``#``, JS uses ``( ) | & =``. Rejecting those characters trades a
+    rare ``flag{user:pass}`` false negative for a whole class of false positives
+    that pollute every SRC solve report.
     """
     if body != body.strip():
         return True
     if ";" in body:
+        return True
+    if any(ch in body for ch in _CODE_BODY_CHARS):
         return True
     return "," in body and not any(ch.isalpha() for ch in body)
 

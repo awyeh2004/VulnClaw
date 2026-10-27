@@ -278,6 +278,46 @@ class TestCodeBlocksAreNotFlags:
         assert extract_flags("a" * 30 + "Flag{x}") == []
 
 
+class TestCssAndJsBodiesAreNotFlags:
+    """Measured 2026-10-27 on SRC targets (blacklake / cqnu / lszyxy runs).
+
+    Every SRC solve report wrote a CSS or JS snippet into its ``Flag / proof``
+    line, because ``word{...}`` matches CSS rules and JS blocks whose bodies
+    carry no semicolon: ``header{padding:110px 0}``,
+    ``let{title:e,favicon:t}``, ``hover{background:#1c8570}``,
+    ``try{c||null==n.return||n.return()}``. The shared tell is punctuation a real
+    flag does not carry -- ``:`` and ``#`` for CSS, ``( ) | & =`` for JS.
+    """
+
+    CSS_AND_JS = (
+        "header{padding:110px 0}",
+        "let{title:e,favicon:t}",
+        "hover{background:#1c8570}",
+        "try{c||null==n.return||n.return()}",
+    )
+
+    def test_measured_snippets_are_rejected(self):
+        for snippet in self.CSS_AND_JS:
+            assert extract_flags(snippet) == [], snippet
+
+    def test_ordinary_flags_still_survive(self):
+        for value in (
+            "flag{no_space_here}",
+            "flag{123456}",
+            "flag{you are the best!}",
+            "CTF2{5aa56f4a-cf5d-4406-bd79-71ef975f2775}",
+            "sun{lesssgooo_solved_the_poop_challenge!}",
+        ):
+            assert extract_flags(value) == [value], value
+
+    def test_operator_chars_alone_are_enough(self):
+        """Each punctuation class is its own signal, so a snippet missing the
+        others (no colon, no semicolon) still gets rejected."""
+        assert extract_flags("obj{a[0]}") == []
+        assert extract_flags("cond{a&&b}") == []
+        assert extract_flags("pair{k=v}") == []
+
+
 class TestPerRunCountersReset:
     """A new goal must not inherit the previous goal's spent guard budget.
 
