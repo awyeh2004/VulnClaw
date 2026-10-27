@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import pytest
 
-from vulnclaw.config.url_utils import host_in_scope, is_ip_address
+from vulnclaw.config.url_utils import (
+    host_in_scope,
+    is_ip_address,
+    scope_hosts_for_target,
+)
 
 
 class TestDomainScope:
@@ -127,3 +131,45 @@ class TestCidrScope:
     def test_host_bits_are_accepted(self):
         """A pasted network with host bits set still means its segment."""
         assert host_in_scope("10.20.1.5", ["10.20.1.7/24"]) is True
+
+
+class TestScopeHostsForTarget:
+    """Measured 2026-10-27: naming ``www.blacklake.cn`` as the target put that
+    exact string in ``allowed_hosts``; ``host_in_scope`` then refused every
+    sibling, so one round tested a single host while six were believed covered.
+    A named host must also contribute its registrable apex.
+    """
+
+    def test_named_host_brings_its_apex(self):
+        assert scope_hosts_for_target("www.blacklake.cn") == [
+            "www.blacklake.cn",
+            "blacklake.cn",
+        ]
+
+    def test_multi_label_suffix_uses_the_full_apex(self):
+        # henu.edu.cn, not edu.cn -- widening to edu.cn would cover every school.
+        assert scope_hosts_for_target("gxxt.henu.edu.cn") == [
+            "gxxt.henu.edu.cn",
+            "henu.edu.cn",
+        ]
+
+    def test_bare_apex_is_left_alone(self):
+        assert scope_hosts_for_target("blacklake.cn") == ["blacklake.cn"]
+        assert scope_hosts_for_target("x.edu.cn") == ["x.edu.cn"]
+
+    def test_ip_stays_exact(self):
+        assert scope_hosts_for_target("202.197.71.105") == ["202.197.71.105"]
+
+    def test_localhost_stays_exact(self):
+        assert scope_hosts_for_target("localhost") == ["localhost"]
+
+    def test_deep_host_widens_to_the_apex_only(self):
+        assert scope_hosts_for_target("a.b.c.example.com") == [
+            "a.b.c.example.com",
+            "example.com",
+        ]
+
+    def test_apex_covers_siblings_through_host_in_scope(self):
+        allowed = scope_hosts_for_target("www.blacklake.cn")
+        assert host_in_scope("liteweb.blacklake.cn", allowed) is True
+        assert host_in_scope("evil-blacklake.cn", allowed) is False

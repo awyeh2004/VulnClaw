@@ -79,3 +79,63 @@ class TestRealTargetsStillMine:
             _extract_target_from_input("1. IP 地址 192.168.1.1 属于哪类地址？")
             == "192.168.1.1"
         )
+
+
+class TestTargetHostScopeCoversSubdomains:
+    """Measured 2026-10-27: a session target of ``www.blacklake.cn`` left
+    ``liteweb.blacklake.cn`` outside ``allowed_hosts``, so the fetch tool refused
+    six sibling hosts and one round tested a single host. Adopting a target must
+    also allow its registrable apex.
+    """
+
+    @staticmethod
+    def _agent():
+        from types import SimpleNamespace
+
+        from vulnclaw.agent.context import TaskConstraints
+
+        return SimpleNamespace(
+            context=SimpleNamespace(
+                state=SimpleNamespace(task_constraints=TaskConstraints())
+            )
+        )
+
+    def test_adopting_a_host_adds_its_apex(self):
+        from vulnclaw.cli.repl import _apply_target_host_scope
+
+        agent = self._agent()
+        _apply_target_host_scope(agent, "www.blacklake.cn")
+
+        allowed = agent.context.state.task_constraints.allowed_hosts
+        assert allowed == ["www.blacklake.cn", "blacklake.cn"]
+
+    def test_a_url_target_uses_its_host(self):
+        from vulnclaw.cli.repl import _apply_target_host_scope
+
+        agent = self._agent()
+        _apply_target_host_scope(agent, "https://gxxt.henu.edu.cn/Portal/Home/Index")
+
+        allowed = agent.context.state.task_constraints.allowed_hosts
+        assert "henu.edu.cn" in allowed
+        assert "gxxt.henu.edu.cn" in allowed
+
+    def test_ip_and_local_targets_are_untouched(self):
+        from vulnclaw.cli.repl import _apply_target_host_scope
+
+        agent = self._agent()
+        _apply_target_host_scope(agent, "202.197.71.105")
+        _apply_target_host_scope(agent, "E:/vulnclaw/work/manual/App.php")
+
+        allowed = agent.context.state.task_constraints.allowed_hosts
+        assert allowed == ["202.197.71.105"]
+
+    def test_siblings_become_reachable(self):
+        from vulnclaw.cli.repl import _apply_target_host_scope
+        from vulnclaw.config.url_utils import host_in_scope
+
+        agent = self._agent()
+        _apply_target_host_scope(agent, "www.blacklake.cn")
+        allowed = agent.context.state.task_constraints.allowed_hosts
+
+        assert host_in_scope("liteweb.blacklake.cn", allowed) is True
+        assert host_in_scope("evil-blacklake.cn", allowed) is False

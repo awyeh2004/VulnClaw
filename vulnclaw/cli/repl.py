@@ -1078,6 +1078,7 @@ def _run_repl() -> None:
                 current_target = new_target
                 current_phase = "Recon"
                 agent.reset_context()
+                _apply_target_host_scope(agent, current_target)
                 # Reset auto mode on target switch
                 auto_mode_active = False
                 last_auto_input = ""
@@ -1097,6 +1098,7 @@ def _run_repl() -> None:
                 # not adopt its documentation URL as the session target either.
                 current_target = new_target
                 current_phase = "Ready"
+                _apply_target_host_scope(agent, current_target)
 
             # Local file/path targets get a hard scope guard so the run cannot
             # traverse the whole disk or scan the operator's own network.
@@ -1736,6 +1738,36 @@ def _is_local_path_target(target: str) -> bool:
     if re.search(r"\.(?:zip|tar|gz|7z|rar|png|jpg|jpeg|gif|bmp|txt|log|pcap|py|php|bin|iso|docx?|xlsx?|pdf)$", target, flags=re.IGNORECASE):
         return True
     return False
+
+
+def _apply_target_host_scope(agent: Any, target: str) -> None:
+    """Let a named target cover its own subdomains.
+
+    Measured 2026-10-27: ``target www.blacklake.cn`` put exactly that host in
+    ``allowed_hosts``; ``host_in_scope`` treats a *bare domain* as a domain
+    scope, so ``liteweb.blacklake.cn`` was refused as out of scope and a whole
+    round tested one host out of six. Adopting a target therefore adds its
+    registrable apex. This only ever widens within one site's own apex -- prose
+    mining stays exact (see ``input_analysis``), because a pasted citation URL
+    must not drag its sibling hosts into scope.
+    """
+    if not target or _is_local_path_target(target):
+        return
+    try:
+        from urllib.parse import urlparse
+
+        from vulnclaw.config.url_utils import scope_hosts_for_target
+
+        host = (urlparse(target).hostname or "") if "://" in target else target
+        host = str(host or "").strip().lower().rstrip(".")
+        if not host or " " in host:
+            return
+        tc = agent.context.state.task_constraints
+        for entry in scope_hosts_for_target(host):
+            if entry and entry not in tc.allowed_hosts:
+                tc.allowed_hosts.append(entry)
+    except Exception:
+        return
 
 
 def _apply_local_path_constraints(agent: Any, target: str) -> None:

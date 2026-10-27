@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from vulnclaw.config.domain_models import TaskConstraints, validate_action_constraints
 from vulnclaw.config.schema import resolve_engine
+from vulnclaw.config.url_utils import scope_hosts_for_target
 from vulnclaw.orchestrator import OrchestratorRunResult, run_agent_task
 
 TaskCommand = Literal["run", "recon", "scan", "exploit", "persistent", "codescan"]
@@ -210,7 +211,14 @@ def build_scope_constraints(target: str, scope: dict[str, Any]) -> TaskConstrain
     host = _target_host(target)
     constraints = TaskConstraints(
         allowed_ports=[scope["only_port"]] if scope.get("only_port") else [],
-        allowed_hosts=[scope["only_host"]] if scope.get("only_host") else ([host] if host else []),
+        # An explicit --only-host stays exact; a host derived from the target
+        # also brings its registrable apex, so naming www.x.cn keeps api.x.cn
+        # in scope (measured 2026-10-27: it did not).
+        allowed_hosts=(
+            [scope["only_host"]]
+            if scope.get("only_host")
+            else scope_hosts_for_target(host)
+        ),
         blocked_hosts=_parse_blocked_hosts(scope.get("blocked_host")),
         allowed_paths=_values(scope.get("only_path")),
         blocked_paths=_values(scope.get("blocked_path")),

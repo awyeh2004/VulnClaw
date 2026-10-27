@@ -28,6 +28,43 @@ def is_ip_address(text: str) -> bool:
     return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
 
 
+#: Two-label public suffixes we meet on Chinese targets. Everything else is
+#: treated as a single-label suffix (``blacklake.cn`` → ``blacklake.cn``).
+_MULTI_LABEL_SUFFIXES = frozenset(
+    {
+        "edu.cn", "gov.cn", "com.cn", "net.cn", "org.cn", "ac.cn", "mil.cn",
+        "co.uk", "org.uk", "ac.uk", "gov.uk",
+        "edu.hk", "com.hk", "org.hk", "edu.tw", "com.tw", "org.tw",
+    }
+)
+
+
+def scope_hosts_for_target(host: str) -> list[str]:
+    """Hosts to allow when the operator names *this* host as the target.
+
+    Measured 2026-10-27: setting the REPL target to ``www.blacklake.cn`` put
+    exactly that string into ``allowed_hosts``, and ``host_in_scope`` — where a
+    bare domain is documented as a *domain* scope — then had nothing to match a
+    sibling against, so ``liteweb.blacklake.cn`` was refused as out of scope. A
+    whole round tested one host while six were believed covered.
+
+    A named host therefore contributes its registrable apex as well. IPs and
+    single-label names stay exact: nothing is "inside" an address, and widening
+    them would be the round-21 ``allowed_hosts=['github.com']`` hazard again.
+    """
+    candidate = str(host or "").strip().lower().rstrip(".")
+    if not candidate or is_ip_address(candidate):
+        return [candidate] if candidate else []
+    labels = candidate.split(".")
+    if len(labels) < 3:
+        return [candidate]
+    suffix = ".".join(labels[-2:])
+    apex_labels = 3 if suffix in _MULTI_LABEL_SUFFIXES else 2
+    if len(labels) <= apex_labels:
+        return [candidate]
+    return [candidate, ".".join(labels[-apex_labels:])]
+
+
 def host_in_scope(host: str, patterns: Iterable[str]) -> bool:
     """Whether ``host`` falls inside any scope pattern.
 
