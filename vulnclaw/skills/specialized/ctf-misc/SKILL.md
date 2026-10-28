@@ -11,6 +11,7 @@ description: CTF杂项知识库 — Python Jail逃逸、Bash Jail逃逸、编码
 
 | 场景 | 参考文档 | 核心内容 |
 |------|---------|---------|
+| 先判这是哪一族 | `misc-family-quick-map.md` | 按可观测特征分流 + 对应 playbook 指针 |
 | Python 沙箱逃逸 | `python-jail-escape.md` | `__import__`/func\_globals/eval链 |
 | Bash 沙箱逃逸 | `bash-jail-escape.md` | HISTFILE/ctypes.sh/vi编辑器逃逸 |
 | 编码链识别与解码 | `encoding-chain-reference.md` | Base64→Hex→ROT13 多层嵌套 |

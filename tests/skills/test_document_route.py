@@ -23,6 +23,9 @@ from vulnclaw.skills.dispatcher import SkillDispatcher
         "[7.5.1 Word文档隐写]解压2",
         "[8.2.1 伪加密破解]zip伪加密",
         "[10.1.2 磁盘取证方法]磁盘取证",
+        "[7.2.4 盲水印]盲水印",
+        "[9.4.1 鼠标流量分析]鼠标流量分析",
+        "[8.2.6 CRC32碰撞]CRC爆破",
     ],
 )
 def test_document_goals_route_to_ctf_misc(goal: str):
