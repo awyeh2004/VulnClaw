@@ -42,16 +42,20 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
 
     Args:
         agent: Agent 上下文
-        args: {"image_path": str, "method": str, "lang": str, "use_llm": bool}
+        args: {"image_path": str, "method": str, "lang": str, "use_llm": bool, "prompt": str}
             - image_path: 图片路径（必需）
-            - method: "auto"（默认）/"easyocr"/"pytesseract"/"windows"
+            - method: "auto"（默认）/"easyocr"/"pytesseract"/"windows"/"llm"
             - lang: 语言代码，默认 "en"（easyocr 支持 "ch_sim" 中文）
             - use_llm: 本地 OCR 全部失败时是否降级到 vision LLM（默认 true）
+            - prompt: 覆盖 vision LLM 的默认“提取文字”指令。图形类题目（波形/频谱/
+              二维码画出来的字）要传一句“描述这张图里画了什么、有没有字形”，否则
+              模型只会找印刷体字符并回空。
     """
     image_path = str(args.get("image_path", "")).strip()
     method = str(args.get("method", "auto")).strip().lower()
     lang = str(args.get("lang", "en")).strip()
     use_llm = bool(args.get("use_llm", True))
+    prompt = str(args.get("prompt", "") or "").strip() or None
     
     if not image_path:
         return "[!] ocr requires 'image_path'"
@@ -62,7 +66,7 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
     
     # 显式指定只用 vision LLM
     if method == "llm":
-        vision = _ocr_via_vision_llm(image_path)
+        vision = _ocr_via_vision_llm(image_path, prompt)
         return f"[+] vision-llm: {vision}" if vision else "[!] vision LLM OCR failed or no credentials"
     
     results = []
@@ -136,7 +140,7 @@ $a.Text
     
     # 本地 OCR 全部无结果时, 降级到 vision LLM 理解图片内容
     if use_llm and not any(r.startswith("[+]") for r in results):
-        vision = _ocr_via_vision_llm(image_path)
+        vision = _ocr_via_vision_llm(image_path, prompt)
         if vision:
             results.append(f"[+] vision-llm: {vision}")
             if method in {"auto", "easyocr", "pytesseract", "windows"}:
@@ -148,13 +152,83 @@ $a.Text
     return "\n".join(results)
 
 
+# Vision budget. Reasoning models spend ``max_tokens`` on ``reasoning_content``
+# first, so a small budget returns HTTP 200 with an EMPTY ``content``. Measured
+# 2026-10-28 against api.deepseek.com/v1 with deepseek-v4-flash-vision-exp on a
+# waveform PNG: max_tokens=500 -> content "", reasoning_content 500 tokens
+# (truncated mid-sentence); max_tokens=2000 -> content "NO_TEXT", 458 reasoning
+# tokens. The old 500 silently turned every "read this image" step into a
+# failure the caller could not distinguish from "no text in the image".
+#
+# An empty ``content`` is therefore always a truncated attempt, never an answer:
+# a model that found nothing says so ("NO_TEXT") and that arrives as content.
+# Budgets measured on a synthetic "flag{...}" image: 1500 -> "", 4000 -> text.
+_VISION_MAX_TOKENS = 2000
+_VISION_RETRY_MAX_TOKENS = 6000
+
+
+def _vision_chat(
+    base_url: str,
+    api_key: str,
+    model: str,
+    text_prompt: str,
+    image_url: str,
+    max_tokens: int,
+) -> tuple[str, dict]:
+    """One vision request. Returns (content, diagnostics).
+
+    An empty ``content`` means the completion budget ran out before the model
+    emitted an answer (reasoning models spend it on ``reasoning_content`` first);
+    the caller retries with a larger budget instead of reporting "no text".
+    """
+    import httpx
+
+    r = httpx.post(
+        f"{base_url}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text_prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            "max_tokens": max_tokens,
+        },
+        timeout=120,
+    )
+    if r.status_code != 200:
+        return "", {"status": r.status_code}
+    data = r.json()
+    message = ((data.get("choices") or [{}])[0] or {}).get("message") or {}
+    content = (message.get("content") or "").strip()
+    diag = {
+        "status": r.status_code,
+        "finish_reason": ((data.get("choices") or [{}])[0] or {}).get("finish_reason"),
+        "reasoning_chars": len((message.get("reasoning_content") or "").strip()),
+    }
+    return content, diag
+
+
 def _ocr_via_vision_llm(image_path: str, prompt: str | None = None) -> str:
     """Fallback OCR: ask a vision-capable LLM to read the image.
 
-    Uses the configured DeepSeek vision model (deepseek-v4-flash-vision-exp) via
-    the OpenAI-compatible endpoint, independent of the agent's main model so an
+    Uses the configured vision model (``llm.vision_model``) via the
+    OpenAI-compatible endpoint, independent of the agent's main model so an
     image-agnostic main model never breaks OCR. Returns the model's text answer,
     or an empty string on any failure (OCR must never crash the tool).
+
+    ``prompt`` overrides the default "extract text" instruction, which is what
+    drawing-type images need: a waveform/spectrogram render often has no glyphs
+    to OCR, and the useful answer is a description ("NO_TEXT, this is a solid
+    loud block") rather than a transcription.
     """
     import base64
     import mimetypes
@@ -178,44 +252,25 @@ def _ocr_via_vision_llm(image_path: str, prompt: str | None = None) -> str:
         return ""
 
     mime = mimetypes.guess_type(image_path)[0] or "image/png"
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
+    try:
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+    except OSError:
+        return ""
 
     text_prompt = prompt or (
         "Extract all readable text from this image verbatim. "
         "If it contains a flag or secret, output it exactly. "
         "Otherwise describe the visible content concisely."
     )
+    image_url = f"data:{mime};base64,{b64}"
     try:
-        import httpx
-
-        r = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": text_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{mime};base64,{b64}"},
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 500,
-            },
-            timeout=60,
-        )
-        if r.status_code != 200:
-            return ""
-        data = r.json()
-        return (data["choices"][0]["message"].get("content") or "").strip()
+        for budget in (_VISION_MAX_TOKENS, _VISION_RETRY_MAX_TOKENS):
+            content, _diag = _vision_chat(
+                base_url, api_key, model, text_prompt, image_url, budget
+            )
+            if content:
+                return content
+        return ""
     except Exception:
         return ""

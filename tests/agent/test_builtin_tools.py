@@ -1289,6 +1289,37 @@ class TestMcpToolsSurviveGoalPruning:
                     "visible on every task face"
                 )
 
+    def test_local_media_analysers_survive_pruning_on_their_home_turf(self):
+        """ocr / pyc_analyze / pdf_analyze must not be pruned by goal keywords.
+
+        Measured 2026-10-28 (DASBOOK 7.3.3 波形图, four consecutive CTF2 runs):
+        the model's own tool list contained no ``ocr``, so it "looked at"
+        rendered spectrograms by dumping numpy pixel statistics and ASCII art.
+        The only path from an image to words was absent from the schema, and
+        nothing said so. Same silent-failure class as the platform verbs and the
+        reporting surface pinned above: the goal text that selects a bundle
+        (隐写/逆向/取证) is exactly the text that needed the analyser, and none
+        of the bundles carry these three names.
+        """
+        from vulnclaw.agent.builtin_tools import _infer_allowed_tools
+
+        goals = [
+            "解一道 jpg 隐写题，找 flag",
+            "MP3隐写 音频 波形 频谱",
+            "reverse elf 逆向 分析 pyc",
+            "取证 pcap PDF 报告分析",
+            "解密这段 base64 密文",
+        ]
+        for goal in goals:
+            allowed = _infer_allowed_tools(goal)
+            if allowed is None:
+                continue  # full toolset: visible by definition
+            for name in ("ocr", "pyc_analyze", "pdf_analyze"):
+                assert name in allowed, (
+                    f"{name} was pruned for goal {goal!r}; a local analyser must "
+                    "stay visible on every task face"
+                )
+
     def test_pentest_escape_is_judged_on_the_latest_goal(self):
         """A poisoned history must not kill the general-pentest escape.
 

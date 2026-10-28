@@ -1540,6 +1540,20 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     # spent, so they belong on every face.
     "cve_lookup",
     "exploit_intel",
+    # Local media/code analysers. Measured 2026-10-28 (DASBOOK 7.3.3 波形图):
+    # the run's own tool list contained no `ocr`, so it spent four attempts
+    # "looking at" rendered spectrograms with numpy pixel dumps and never had a
+    # path from an image to words -- the same prune-the-tool-that-matters shape
+    # as the platform verbs below. These three are the only analysers for
+    # images, .pyc and PDFs, they are local and cheap, and the goal text that
+    # needs them ("隐写"/"steg"/"逆向"/"取证") is exactly what selects a bundle
+    # they are absent from: the misc bundle is {crypto_decode, python_execute,
+    # load_skill_reference}, the reverse bundle is {python_execute,
+    # shell_command, load_skill_reference, source_extract}. Neither carries
+    # `ocr`/`pyc_analyze`/`pdf_analyze`, so each was pruned on its own home turf.
+    "ocr",
+    "pyc_analyze",
+    "pdf_analyze",
     # NOTE: the GCS tools used to be pinned here by hand. That list had drifted
     # from reality -- it named 6 of the 9 gcs_* tools, so three were prunable
     # while six were force-kept. The GCS tool face is now controlled by one
@@ -2344,7 +2358,7 @@ def build_openai_tools(
             "type": "function",
             "function": {
                 "name": "ocr",
-                "description": "提取图片中的文字：优先本地 easyocr(GPU)/pytesseract/Windows OCR，全部失败时自动降级到 vision LLM(deepseek-v4-flash-vision-exp)理解图片。适用于验证码、截图、PDF渲染图、图片藏flag等场景。",                "parameters": {
+                "description": "提取/理解图片里的文字：优先本地 easyocr(GPU)/pytesseract/Windows OCR，全部失败时自动降级到 vision LLM(deepseek-v4-flash-vision-exp)理解图片。适用于验证码、截图、PDF渲染图、图片藏flag等场景。**图形类题目（频谱图/波形图/二维码画出来的字）用 method=llm 并传 prompt 让模型描述画面**：纯 OCR 只找印刷体，对画出来的字形会回空。",                "parameters": {
                     "type": "object",
                     "properties": {
                         "image_path": {
@@ -2353,7 +2367,7 @@ def build_openai_tools(
                         },
                         "method": {
                             "type": "string",
-                            "description": "OCR 方法：auto（自动选择）/easyocr（GPU 加速，推荐）/pytesseract（需 tesseract）/windows（Windows 10/11 原生）/llm（仅用 vision LLM）",
+                            "description": "OCR 方法：auto（自动选择）/easyocr（GPU 加速，推荐）/pytesseract（需 tesseract）/windows（Windows 10/11 原生）/llm（仅用 vision LLM，图形类题目用这个）",
                             "enum": ["auto", "easyocr", "pytesseract", "windows", "llm"],
                         },
                         "use_llm": {
@@ -2363,6 +2377,10 @@ def build_openai_tools(
                         "lang": {
                             "type": "string",
                             "description": "语言代码，默认 en（easyocr 支持 ch_sim 中文）",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "覆盖 vision LLM 的默认“提取文字”指令。图形类题目传一句“描述这张图里画了什么、有没有字形，有就逐字符转录”",
                         },
                     },
                     "required": ["image_path"],

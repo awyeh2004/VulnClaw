@@ -75,6 +75,12 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "pyjail|python沙箱|jail逃逸|sandbox_escape|python jail": ["ctf-misc"],
     "bashjail|bash沙箱|restricted shell|rbash逃逸": ["ctf-misc"],
     "编码链|多层编码|杂项|misc|隐写|stego": ["ctf-misc"],
+    # Audio stego route (2026-10-27): the DASBOOK 7.3.x goals say only
+    # 频谱图 / 波形图 / MP3音频, which matched NONE of the existing keywords --
+    # the audio reference was never advertised for exactly the challenges it
+    # was written for. Keep this list to audio-shaped words; "隐写" above stays
+    # the generic entry.
+    "音频|频谱|频谱图|波形图|波形|spectrogram|waveform|mp3|wav|flac|sstv|dtmf": ["ctf-misc"],
     "ctfd|夺旗平台|flag提交|题目下载": ["ctf-misc"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],

@@ -412,6 +412,117 @@ _HARDENING_INSTRUCTION = (
 )
 
 
+_AUDIO_STEGO_KEYWORDS = (
+    "音频", "audio", "mp3", "wav", "flac", "m4a", "aac", "ogg",
+    "频谱", "spectrogram", "波形", "waveform", "摩斯", "morse",
+    "dtmf", "sstv", "声音", "声道", "stereo", "采样率",
+)
+
+
+def _audio_stego_instruction(goal: str) -> str:
+    """Deterministic first-moves block for audio-steganography goals.
+
+    Measured 2026-10-27 (DASBOOK 7.3.1–7.3.4): three audio challenges all hit
+    the 11-minute cap, and the runs never loaded the audio reference — for the
+    ``hear_with_your_eyes`` goal the skill router selected NO skill at all
+    (goal text carries only 频谱图/频谱, which the skill description did not
+    match). The cost was structural, not intellectual:
+
+    * the bundled ffmpeg lives under ``.ir-tools/bin`` and is not on PATH, so
+      the window went into hunting for audio tooling;
+    * ``showspectrumpic`` renders text vertically mirrored — the run needed a
+      ``flip`` before any glyph was readable;
+    * MP3隐写 carries its password in the ID3 COMM frame ("password is 123456")
+      and needs MP3Stego, which is NOT installed here; the run instead hand-wrote
+      a parity/DES decoder for 11 minutes and produced a wrong candidate;
+    * three auto-submits are allowed, then the platform demands human
+      confirmation — the run burned all three on OCR variants of one body
+      (``...36b7...`` vs the correct ``...3bb7...``).
+
+    Injected only for audio-shaped goals, so every other run is unchanged.
+    """
+    lowered = str(goal or "").lower()
+    if not any(key in lowered for key in _AUDIO_STEGO_KEYWORDS):
+        return ""
+    return (
+        "\n\n# Audio steganography: first moves (measured checklist)\n"
+        "This goal is an audio challenge. Do these in order before inventing a decoder:\n"
+        "1. **Use the bundled ffmpeg named in the tool card** (`.ir-tools/bin/ffmpeg.exe`, "
+        "NOT on PATH). Metadata: `ffmpeg -i file`. Spectrogram: "
+        "`-lavfi \"showspectrumpic=s=1920x1080:legend=0:scale=log\" spec.png`. "
+        "Waveform: `-lavfi \"showwavespic=s=1920x800:colors=white\" wave.png`.\n"
+        "2. **Then LOOK at the PNG through `ocr`**: you have no direct vision, so call "
+        "`ocr` with `method=\"llm\"` and a `prompt` such as \"is any letter or word shaped "
+        "in this waveform/spectrogram? transcribe it exactly, else answer NO_TEXT\". "
+        "`showspectrumpic` text is often vertically mirrored: apply `PIL.ImageOps.flip(img)` "
+        "and 3x upscale, then ask again. Reading pixels with numpy and rendering ASCII art "
+        "is NOT looking — four measured runs burned their whole budget that way.\n"
+        "3. **MP3: read ID3v2 COMM/TXXX first** ('password is ...' is a common hint), "
+        "then run the bundled MP3Stego: `decode.exe -X -P <password> in.mp3` "
+        "(absolute path is in the tool card; outputs in.mp3.txt next to the input). "
+        "If it returns only a few bytes or garbage, the payload is NOT standard MP3Stego "
+        "(or the password is wrong) — go back to spectrogram/appended-data/LSB instead of "
+        "guessing passwords or hand-writing a parity decoder.\n"
+        "4. **Check cheap layers before expensive ones**: appended data after the last "
+        "frame / extra RIFF chunks, then LSB on 16-bit PCM (both bit orders), "
+        "L/R channel difference, silence gaps (Morse), reverse, speed change, DTMF.\n"
+        "5. **Submissions are capped at 3 automatic attempts per challenge**; the 4th "
+        "needs human confirmation and the run stalls. Verify the candidate "
+        "character-by-character (6/3, b/8, d/8, 0/O, 1/l are the usual OCR errors) "
+        "before the first submit — never submit as a way to test an OCR read.\n"
+        "The full recipe is `load_skill_reference('ctf-misc', 'audio-stego-reference.md')`."
+    )
+
+
+_VISION_ROUTE_KEYWORDS = (
+    "图片", "截图", "二维码", "qr", "ocr", "频谱", "波形", "spectrogram",
+    "waveform", "image", "png", "jpg", "jpeg", "bmp", "gif", "验证码", "captcha",
+)
+
+
+def _vision_route_instruction(goal: str) -> str:
+    """Tell the model how to LOOK at an image, because it cannot see one itself.
+
+    Measured 2026-10-28 on the DASBOOK 7.3.3 波形图 challenge: four consecutive
+    runs rendered the waveform and spectrogram, then reasoned about "reading the
+    image visually" in text -- ASCII art, pixel statistics, histogram thresholds --
+    and never produced a single visual observation. The `ocr` tool's vision-LLM
+    branch was the only path that could have answered, and no run called it.
+
+    Two independent defects made that path look dead even when tried:
+
+    * ``_ocr_via_vision_llm`` sent ``max_tokens: 500``; the configured vision
+      model is a reasoning model, so the whole budget went to ``reasoning_content``
+      and ``content`` came back empty -- indistinguishable from "no text here";
+    * the tool exposed no ``prompt``, so a caller could only ask "extract text",
+      which returns nothing for letters *drawn* in a waveform.
+
+    Both are fixed in ``agent/tools/ocr.py``. This block exists so the model knows
+    the route exists at all: an unfound tool is as good as a broken one.
+    """
+    lowered = str(goal or "").lower()
+    if not any(key in lowered for key in _VISION_ROUTE_KEYWORDS):
+        return ""
+    return (
+        "\n\n# Looking at images (you have no direct vision)\n"
+        "You cannot see a PNG you just rendered. To actually look at it, call "
+        "`ocr` with `method=llm` and a `prompt` that states the question, e.g. "
+        "{\"image_path\": \"wave.png\", \"method\": \"llm\", \"prompt\": \"Is any letter or "
+        "word shaped in this waveform? Transcribe it character by character, else answer NO_TEXT.\"}. "
+        "That routes the image to a vision model and returns its words.\n"
+        "- `method=auto`/`easyocr` reads PRINTED glyphs only; on shapes drawn in a "
+        "waveform/spectrogram it returns nothing, which does not mean the image is empty.\n"
+        "- Reading the pixels yourself with numpy, dumping histograms or printing ASCII "
+        "art is NOT looking at the image and has never once produced the glyphs.\n"
+        "- Ask a specific yes/no question plus 'transcribe it'; open-ended 'describe' "
+        "answers come back vague.\n"
+        "- When a render is a wall of stripes, crop or re-render a narrower window and "
+        "ask again -- a whole-file spectrogram hides letters drawn in a 3-second span.\n"
+        "- A transcription from a vision model can substitute lookalikes (0/O, 1/l, "
+        "6/5, }/]), so confirm the exact characters before submitting."
+    )
+
+
 def _competition_windows_instruction(agent: Any) -> str:
     """Guidance for a match whose scoring depends on submission TIMING.
 
@@ -1884,6 +1995,8 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
     )
     fanout_guidance = prompt_guidance(agent)
     quiz_instruction = _QUIZ_INSTRUCTION if _looks_like_quiz(state.goal) else ""
+    audio_stego_instruction = _audio_stego_instruction(state.goal or "")
+    vision_route_instruction = _vision_route_instruction(state.goal or "")
     hardening_instruction = _HARDENING_INSTRUCTION if _looks_like_hardening(state.goal) else ""
     competition_instruction = _competition_windows_instruction(agent)
     runtime = getattr(agent, "runtime", None)
@@ -1990,6 +2103,8 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         f"{quiz_instruction}"
         f"{hardening_instruction}"
         f"{competition_instruction}"
+        f"{audio_stego_instruction}"
+        f"{vision_route_instruction}"
         f"Origin: {state.origin}\n"
         f"Goal: {state.goal}"
         f"{constraints}"

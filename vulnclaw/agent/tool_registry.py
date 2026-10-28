@@ -236,6 +236,57 @@ _REGISTRY: list[dict] = [
         "when": "图片/截图里的文字识别。**本机没有 tesseract**，用 easyocr（已装，纯 Python，首次加载模型约 20s）",
     },
     {
+        "name": "ffmpeg (音频隐写：频谱/波形/PCM)",
+        "rel": ("bin", "ffmpeg.exe"),
+        "which": "ffmpeg",
+        "cmd": '"{path}"',
+        # Why this entry exists (2026-10-27): three DASBOOK audio-stego
+        # challenges (MP3隐写 / 波形图04 / 频谱图) all hit the 11-minute cap.
+        # The bundled ffmpeg under .ir-tools/bin is not on PATH, so the runs
+        # spent their window hunting for audio tooling and hand-rolling FFT
+        # plots. The card must name the absolute path and the one-shot
+        # commands: the first five minutes decide these challenges.
+        "keywords": [
+            "音频", "audio", "mp3", "wav", "flac", "m4a", "aac", "ogg",
+            "隐写", "stego", "频谱", "spectrogram", "波形", "waveform",
+            "morse", "摩斯", "dtmf", "sstv", "声音", "视频", "video",
+        ],
+        "usage": (
+            '频谱: -i in.mp3 -lavfi "showspectrumpic=s=1920x1080:legend=0:scale=log" spec.png; '
+            '波形: -i in.wav -lavfi "showwavespic=s=1920x800:colors=white" wave.png; '
+            'PCM: -i in.mp3 -ac 1 -ar 44100 -sample_fmt s16 out.wav'
+        ),
+        "when": "音频隐写第一工具：先出频谱/波形图看视觉，再转 16-bit PCM WAV 做 LSB/声道差分。"
+                "**本机无 ffprobe**（元信息用 ffmpeg -i）；"
+                "MP3 题先查 ID3 COMM 口令，再用下面的 MP3Stego",
+    },
+    {
+        "name": "MP3Stego (MP3 隐写提取/嵌入)",
+        "rel": ("mp3stego", "bin", "decode.exe"),
+        "cmd": '"{path}"',
+        # Installed 2026-10-27 by building the classic 1.1.17 source with a
+        # bundled i686 toolchain. Measured facts behind this entry:
+        #  * the official 1.1.19 binary download is unusable from here (~240 B/s),
+        #    and a 64-bit build of the source produces garbage (roundtrip failed),
+        #    while the 32-bit static build roundtrips exactly;
+        #  * ``OpenTableFile`` now also looks next to the executable (patched),
+        #    so the bare exe works from any working directory -- the earlier
+        #    wrapper was needed only because decode loaded ./tables relative to
+        #    the CURRENT directory.
+        "keywords": [
+            "mp3", "mp3stego", "音频", "隐写", "stego", "password", "口令",
+            "audio", "wav", "频谱", "波形",
+        ],
+        "usage": (
+            '提取: -X -P <password> in.mp3  (输出 in.mp3.txt + in.mp3.pcm); '
+            '嵌入: encode.exe -E <hidden.txt> -P <password> in.wav out.mp3'
+        ),
+        "when": "标准 MP3Stego 格式的 MP3 隐写；口令通常写在 ID3 COMM/TXXX（如 "
+                "'password is 123456'）。**提取结果若只有几个字节或乱码**，说明不是标准 "
+                "MP3Stego 载荷（该题可能只是把位当原始文本）或口令不对——不要连续猜口令，"
+                "回到频谱图/追加数据/LSB 路线。官方 1.1.19 生成的样本与本机 1.1.17 不兼容（实测）",
+    },
+    {
         "name": "binwalk",
         "module": "binwalk",
         "cmd": "python -m binwalk",
