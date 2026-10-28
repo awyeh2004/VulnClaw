@@ -106,6 +106,61 @@ async def test_call_fetch_follows_a_redirect_to_an_in_scope_host(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_call_fetch_follows_a_redirect_between_research_hosts(monkeypatch):
+    """Research -> research hops must survive the scope guard.
+
+    Measured 2026-10-28 (DASBOOK 7.5.2 pdf隐写): the run fetched
+    ``https://www.bing.com/search?q=...`` (allowed as a research host), bing
+    answered 302 to ``cn.bing.com``, and the hop guard -- which disabled the
+    research exemption unconditionally -- rejected it with
+    ``Host cn.bing.com is outside allowed scope [...]``. Every search engine
+    redirects like this (google -> www.google.com, duckduckgo ->
+    html.duckduckgo.com), so a scoped CTF run could not search the web at all,
+    which is exactly what the writeup policy says it may do read-only.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://www.bing.com/search":
+            return httpx.Response(302, headers={"location": "https://cn.bing.com/search"})
+        assert str(request.url) == "https://cn.bing.com/search"
+        return httpx.Response(200, text="results")
+
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    manager.set_task_constraints(
+        TaskConstraints(allowed_hosts=["example.com"], strict_mode=True)
+    )
+    result = await manager._call_fetch({"url": "https://www.bing.com/search"})
+
+    assert "任务范围拦截" not in result, result
+    assert "results" in result
+
+
+@pytest.mark.asyncio
+async def test_a_research_redirect_still_cannot_reach_a_blocked_host(monkeypatch):
+    """The per-hop exemption must not launder a blocked destination."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://www.bing.com/search":
+            return httpx.Response(302, headers={"location": "https://evil.example/x"})
+        raise AssertionError(f"unexpected request {request.url}")
+
+    _patch_fetch_transport(monkeypatch, handler)
+
+    manager = _manager()
+    manager.set_task_constraints(
+        TaskConstraints(
+            allowed_hosts=["example.com"],
+            blocked_hosts=["evil.example"],
+            strict_mode=True,
+        )
+    )
+    result = await manager._call_fetch({"url": "https://www.bing.com/search"})
+
+    assert "任务范围拦截" in result, result
+    assert "evil.example" in result, result
+
+
+@pytest.mark.asyncio
 async def test_call_fetch_stops_after_a_bounded_number_of_redirects(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": "https://example.com/loop"})

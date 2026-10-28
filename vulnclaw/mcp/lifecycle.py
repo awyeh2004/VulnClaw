@@ -2074,9 +2074,26 @@ class MCPLifecycleManager(ProbeMixin):
                 if not location:
                     return response
                 next_url = urljoin(current["url"], location)
+                # The research exemption is re-evaluated on the hop itself, not
+                # disabled outright. Measured 2026-10-28 (DASBOOK 7.5.2 pdf隐写):
+                # the run asked for https://www.bing.com/search?q=... (a research
+                # host, allowed), bing answered 302 to cn.bing.com, and the hop
+                # guard -- which used to pass allow_research=False
+                # unconditionally -- rejected it as "outside allowed scope
+                # [shimo.im, ctf2-files.dasctf.com]". Every search engine does
+                # this (google -> www.google.com, duckduckgo -> html.duckduckgo),
+                # so web search was unusable in a scoped CTF run, which is the one
+                # place the writeup policy explicitly permits reading public docs.
+                #
+                # Letting the exemption apply per hop does NOT widen the boundary:
+                # it only skips ``allowed_hosts``, and only for hosts that
+                # ``is_research_host`` accepts. A hop to an internal target, an IP,
+                # or any non-research host is still outside scope, and
+                # blocked_hosts/paths/ports are checked before the exemption is
+                # consulted, so an open redirect to a blocked host stays blocked.
                 violation = self._check_fetch_constraints(
                     {"url": next_url},
-                    allow_research=False,
+                    allow_research=True,
                 )
                 if violation is not None:
                     raise _FetchScopeViolation(next_url, violation["message"])

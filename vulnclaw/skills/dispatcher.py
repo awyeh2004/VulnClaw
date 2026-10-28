@@ -81,6 +81,11 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     # was written for. Keep this list to audio-shaped words; "隐写" above stays
     # the generic entry.
     "音频|频谱|频谱图|波形图|波形|spectrogram|waveform|mp3|wav|flac|sstv|dtmf": ["ctf-misc"],
+    # Document/container route (2026-10-28): DASBOOK 7.5.x goals say only
+    # "PDF文档隐写" / "Word文档隐写", and 第08章 says "伪加密破解"/"字典破解" --
+    # the generic "隐写" keyword missed the PDF/Word ones because the goal text
+    # carries the format name, not the word 隐写.
+    "pdf|docx|xlsx|pptx|word文档|excel|压缩包|伪加密|zip伪加密|磁盘取证|磁盘镜像": ["ctf-misc"],
     "ctfd|夺旗平台|flag提交|题目下载": ["ctf-misc"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
