@@ -91,7 +91,34 @@ for _ in range(steps):
 - **ONNX 输入名**：`sess.get_inputs()[0].name` 才是正确键，别写死 `input`；
 - **扰动度量**：见第 3 节判据，最容易在这一步被判超限。
 
+## 本机已装的 AI 安全工具（直接可用，2026-10-30 已验证）
+
+拿到可疑模型文件时，**先扫再分析**，这两个扫描器已经装好并在 PATH 上：
+
+```
+modelscan --path model.pth      # 序列化攻击扫描（.pkl/.pt/.joblib/.h5）
+picklescan --path model.pkl     # pickle 危险 opcode（eval/os.system/__reduce__）
+```
+
+实测：含 `eval` 的恶意 pickle 会被判 `dangerous import 'builtins eval' FOUND`；
+干净文件报 `No issues found!`。扫描无命中≠安全（只认已知危险模式），但命中即实锤。
+
+**对抗样本用 `adversarial-robustness-toolbox`（ART 1.20，已装）**，别手写攻击循环：
+
+```python
+from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
+from art.estimators.classification import PyTorchClassifier
+clf = PyTorchClassifier(model=model, loss=nn.CrossEntropyLoss(),
+                        input_shape=(3,224,224), nb_classes=N, clip_values=(0.0,1.0))
+adv = ProjectedGradientDescent(estimator=clf, eps=8/255, eps_step=2/255,
+                               max_iter=40).generate(x_numpy)
+```
+
+ART 同一个库还带模型窃取（`CopyCatCNN`/`FunctionallyEquivalentExtraction`）与
+成员推断（`MembershipInferenceBlackBox`）攻击实现——那两类题先查它，不必从论文复现。
+
 ## 参考
 
 - `references/ai-challenge-recipes.md` — 可复制的代码片段（模型结构打印、权重转字节、PGD 模板、ONNX 元数据）
 - 相关笔记：`lookup_playbook` 搜「prompt 注入」「模型文件 pickle」
+- GitHub 项目档案：`E:\vulnclaw\work\GH-SCAN-20261029.md`（两轮 345 个仓库，按分支分桶）
