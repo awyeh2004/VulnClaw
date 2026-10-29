@@ -120,6 +120,12 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "pwn|溢出|栈溢出|缓冲区溢出|格式化字符串|rop|shellcode": ["ctf-pwn"],
     "堆溢出|堆利用|uaf|tcache|unsorted bin|double free": ["ctf-pwn"],
     "canary|checksec|got覆写|one_gadget|seccomp": ["ctf-pwn"],
+    # ctf-ai: 人工智能安全 (2026-10-29)
+    #
+    # 强网杯线上赛把"人工智能"单列为一个方向，而入库前库里几乎没有对抗样本 /
+    # 模型逆向的内容（关键词命中里绝大多数是误中）。短组保持单次命中分值够高。
+    "对抗样本|adversarial|fgsm|pgd攻击|模型逆向|模型窃取|成员推断|触发词": ["ctf-ai"],
+    "onnx|pytorch|pth模型|权重文件|机器学习模型|神经网络模型|模型文件|模型后门": ["ctf-ai"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],

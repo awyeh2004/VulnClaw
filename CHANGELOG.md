@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — 强网杯赛制确认：补「人工智能」方向的技能（此前基本为空）</summary>
+
+- **赛制（官方）**：2026-10-31 09:00 → 11-01 12:00，在线解题；方向含**二进制逆向 / 密码分析 / 智能终端安全 / 信息隐藏 / 人工智能**；**动态积分 + 早鸟奖励**（按解题顺序加分）；top32 进线下；结束后 8 小时内（11-01 20:00 前）前 50 名交 WriteUp；**每队 flag 不同**（动态 flag 反作弊）。
+- **新增 `ctf-ai` 技能 + `references/ai-challenge-recipes.md`**：此前"人工智能"这类目在库里几乎没有可用内容（关键词命中多为误中）。技能给判题型表（给了模型文件 / 推理接口 / 训练数据 / prompt 各走哪条）与可复制代码：模型结构体检、`weights_only` 失败即 pickle 入口、权重里扫 ASCII 串、ONNX 元数据与输入名、PGD 模板、成员推断阈值、输入归一化对齐；顺带记了 APK/dex 的静态路线（`androguard` 已装，不需要 jadx）。
+- **路由**：新增两条短关键词组（对抗样本/FGSM/PGD/模型逆向/模型窃取/成员推断/触发词，onnx/pytorch/权重文件/模型后门），且 "模型被植入后门，找出触发词" 命中 `ctf-ai` 而 "服务器被入侵，排查后门" 仍归 `incident-response`（实测两条都在原位）。
+- **环境事实**：AI 类依赖齐（torch/numpy/scipy/sklearn/onnxruntime/PIL/cv2）；`java` 在（`D:\JDK`）但 jadx/apktool/frida/adb 未装——静态 APK 用 `androguard` 足够，动态分析缺口已知。
+- **pip 的正确姿势**：代理不稳定时用国内镜像直连即可（`-i https://pypi.tuna.tsinghua.edu.cn/simple`，实测下载成功），不必依赖梯子。
+- **测试** — `tests/skills/` 707 passed。
+
+</details>
+
+---
+<details open>
 <summary><strong>Unreleased</strong> — 盲水印解出来了：经典 bwm DFT 差分，7.2.4 取得 flag</summary>
 
 - **结果（实测）**：DASBOOK 7.2.4「盲水印_01」解出，答案是 `flag{aa3379655baa69c7fb7a7e469c8be88e}`。两图肉眼相同，其中一张 RGBA 一张 RGB —— 这是经典 `chishaxie/BlindWaterMark`（把 `alpha×水印图` 加到载体图**未移位**的 2D DFT 上）的指纹。
