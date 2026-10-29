@@ -322,7 +322,10 @@ def report_audio(path: Path, dump: Path | None) -> None:
         print("  ffmpeg not found (PATH or .ir-tools/bin) — cannot render spectrogram")
         return
     print(f"  ffmpeg: {ffmpeg}")
-    out = (dump or Path.cwd()) / f"{path.stem}.spec.png"
+    # Output goes NEXT TO THE INPUT, never to the current directory: the first
+    # version defaulted to cwd, and a batch run left four .spec.png files in the
+    # repo root (this project keeps artifacts out of the tree).
+    out = (dump or path.parent) / f"{path.stem}.spec.png"
     cmd = [
         ffmpeg, "-y", "-loglevel", "error", "-i", str(path),
         "-lavfi", "showspectrumpic=s=1024x512:legend=disabled",
