@@ -62,7 +62,15 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "摩尔电码|凯撒密码|维吉尼亚|培根密码|base58": ["crypto-toolkit"],
     # ── CTF specialized skills ──────────────────────────────────────
     # ctf-web: CTF Web 攻击知识库
-    "ctf|夺旗|flag|弱比较|空格绕过|正则绕过|rce|代码审计|eval绕过|highlight_file": ["ctf-web"],
+    #
+    # 裸 `ctf` / `夺旗` / `flag` 已从本组移除 (2026-10-29)。它们让**任何**提到 flag
+    # 的题都以 0.15 命中 ctf-web：实测一道固件镜像题 (`fw_image.cfg` + `fw_tool.py`)
+    # 被 ctf-web 以 confidence 0.09 选成 primary，一道 PNG 隐写题同理——题型明明不是
+    # web，拿到的却是 PHP 绕过/burp 参考清单。技能索引只是"可选参考"，但错家族的建议
+    # 本身就会把人往固定套路上带。
+    # 保留的是 web 特有的判据词；泛 CTF 题现在不命中任何 skill（索引为空，比错家族干净）。
+    "弱比较|空格绕过|正则绕过|eval绕过|highlight_file": ["ctf-web"],
+    "rce|代码审计|preg_match绕过|ssti注入|无回显": ["ctf-web"],
     "0e|md5绕过|preg_match绕过|类型绕过|type juggling|弱类型": ["ctf-web"],
     "回显|无回显|blind rce|命令执行绕过|php代码审计|ssti注入": ["ctf-web"],
     # ctf-crypto: CTF 密码学攻击知识库
@@ -80,7 +88,8 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     # the audio reference was never advertised for exactly the challenges it
     # was written for. Keep this list to audio-shaped words; "隐写" above stays
     # the generic entry.
-    "音频|频谱|频谱图|波形图|波形|spectrogram|waveform|mp3|wav|flac|sstv|dtmf": ["ctf-misc"],
+    "音频|频谱|频谱图|波形图|波形|spectrogram": ["ctf-misc"],
+    "waveform|mp3|wav|flac|sstv|dtmf": ["ctf-misc"],
     # Document/container route (2026-10-28): DASBOOK 7.5.x goals say only
     # "PDF文档隐写" / "Word文档隐写", and 第08章 says "伪加密破解"/"字典破解" --
     # the generic "隐写" keyword missed the PDF/Word ones because the goal text
@@ -91,7 +100,26 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     # existing keywords matched, so the family quick-map and its playbook
     # pointers were never advertised for exactly those challenges.
     "盲水印|水印|watermark|鼠标流量|usb流量|hid流量|crc32|crc碰撞|crc爆破": ["ctf-misc"],
+    # 杂项做题面词 (2026-10-29)：DASBOOK 与强网杯的 misc 题面只写载体/手法名（
+    # 最低有效位LSB / 图种 / 附加字符串），而这些词一个都不在上面的组里，实测
+    # "这张 PNG 里藏着 flag" 与 "最低有效位LSB" 都匹配不到任何 skill。
+    # 短组：1 次命中 = 1/5*1.5 = 0.30，稳定压过其它泛组。
+    "lsb|最低有效位|图种|附加字符串|steganography": ["ctf-misc"],
     "ctfd|夺旗平台|flag提交|题目下载": ["ctf-misc"],
+    # ctf-pwn: CTF 二进制利用知识库 (2026-10-29)
+    #
+    # 强网杯线上赛有 pwn 分类，而入库前整个 skill 库里没有任何一个 pwn 技能 —— 实测
+    # "溢出这个 ELF，拿到 shell" 匹配到 0 个 skill（`_fallback` 返回空），一个 pwn
+    # 题连一份参考索引都拿不到。同时 `ctf-web` 的关键词组里有裸 `flag`/`ctf`，导致
+    # 任何提到 flag 的题都以 score 0.15 选中 ctf-web（实测一道固件镜像题被
+    # ctf-web 以 confidence 0.09 选为 primary）。
+    #
+    # 分组要 SHORT：legacy 打分是 (命中数 / 备选数) * DIRECTORY_BOOST，组越长单次命中
+    # 分值越低。6 个备选时 1 次命中 = 1/6*1.5 = 0.25 > ctf-web 的 0.15，pwn 题才能
+    # 稳定压过那条裸 `flag` 规则。
+    "pwn|溢出|栈溢出|缓冲区溢出|格式化字符串|rop|shellcode": ["ctf-pwn"],
+    "堆溢出|堆利用|uaf|tcache|unsorted bin|double free": ["ctf-pwn"],
+    "canary|checksec|got覆写|one_gadget|seccomp": ["ctf-pwn"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],

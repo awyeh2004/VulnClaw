@@ -1,4 +1,19 @@
 <details open>
+<summary><strong>Unreleased</strong> — skill 路由：pwn 此前命中不了任何技能 · 泛 CTF 题一律被塞 ctf-web</summary>
+
+- **修（中·实测坐实）：`ctf-web` 的关键词组里有裸 `ctf`/`夺旗`/`flag`，任何提到 flag 的题都以 0.15 命中它** — 实测一道**固件镜像**题（`fw_image.cfg` + `fw_tool.py`）被 `ctf-web` 以 **confidence 0.09** 选为 primary，一道 PNG 隐写题同理：题型不是 web，拿到的却是 PHP 绕过/burp 参考清单。技能索引只是"可选参考"，但错家族的建议本身就在把人往固定套路上带。移出裸词、保留 web 特有判据；泛 CTF 题现在不命中任何技能（索引为空比错家族干净）。
+- **修（中·实测坐实）：pwn 分类此前没有任何技能** — "溢出这个 ELF，拿到 shell" 匹配 0 个 skill（脚本库里有 60+ 篇栈/ROP 配方，但模型看不到索引）。强网杯线上赛有 pwn 分类，这是赛前必须补的洞。新增 `ctf-pwn` 技能（判题型 → 保护面 → libc 版本 → 分型处置 → 本地先跑通）+ 一页 `references/pwn-triage-and-offsets.md`（偏移求解、格式化字符串、堆、seccomp/ORW、本地通远程不通的六个坑）。
+- **修（低）：库内既有的关键词分组被拆分以提高判据强度** — legacy 打分是 `(命中数 / 备选数) * DIRECTORY_BOOST`，组越长单次命中越弱。音频组 12 个备选拆成两个 6 个，web 组拆成两个 5 个；否则 "PHP 弱比较绕过" 会被 `rapid-checklist`（裸 `绕过`）以 0.25 压过 `ctf-web` 的 0.21。
+- **效果（12 条路由矩阵，改前 → 改后）**：pwn 三类题 `(none)` → `ctf-pwn`；"最低有效位LSB" `(none)` → `ctf-misc`(0.29)；"图种" `(none)` → `ctf-misc`(0.17)；"PHP 弱比较绕过" → `ctf-web`(0.17)；固件镜像题 `(none)`（原本是被 ctf-web 抢走）；web/crypto/re/应急 维持正确。**一个反例**：`misc 隐写` 这类只说"PNG 里藏着 flag"的题现在不命中技能——这是刻意取舍，见下条。
+- **未采纳（有数据支撑的否决）**：给技能索引加"置信度下限"是我的初始方案，实测**不成立**——合法匹配的置信度全在 0.08–0.21，误匹配也是 0.08（`ctf-misc` 抢到一道 docx 题）。阈值分不开对错，0.15 的门会砍掉 5 个正确匹配只换来 1 个错误匹配。所以没加。
+- **修（中·工具面）：pwn/逆向题看不到 `fetch` 与后台爆破工具** — 实测 pwn goal 因含 "elf" 落进 `reverse` bundle，而该 bundle 只有 4 个工具；`bg_launch`/`bg_result` 缺席意味着猜 canary / 爆破 ASLR 低位这类标准手法连工具都看不到（与 2026-10-28 那三个分析器被自家 bundle 剪掉同一形状）。`reverse` 与新增的 `pwn` bundle 现在都带 `bg_launch`/`bg_result`/`fetch`，且**两者集合同一**，所以哪个先命中都不改变能力。crypto/misc 的 `fetch` 仍然剪掉——既有测试 `test_non_quiz_crypto_goal_still_prunes_fetch` 钉着"解码任务无需外网"，这是刻意的外发收敛，未动。
+- **测试** — 新增 `tests/agent/test_tool_surface_for_offensive_categories.py`（6 例：四类 goal 的面必须带齐自己的工具、pwn 与 reverse 同集合、web/misc 不裁剪、crypto 仍剪 fetch）。`tests/skills` 692 passed、全量 `-n 4` **5566 passed / 0 failed**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 手工提交场景的收工开关：简单题 19.6 s → 1.2 s</summary>
 
 - **背景（实测）**：`finish_on_accept` 靠平台返回 accepted 触发，而强网杯这类**人工提交**的比赛里运行内没有这个事件，所以每题解完仍要付一轮补黑板。实测同一道本地 LSB 题两次运行：`1 次 python_execute 出 flag`，之后 9 次调用 / 17.8 秒全是记账 —— **占 19.6 秒总墙钟的 91%**。

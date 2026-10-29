@@ -1595,9 +1595,38 @@ _TASK_TOOL_BUNDLES: dict[str, set[str]] = {
         "source_extract",
         "runtime_diff_probe",
     },
+    # `fetch` stays OUT of crypto/misc: `test_non_quiz_crypto_goal_still_prunes_fetch`
+    # pins that a decoding/stego task has no network need, and the quiz branch above
+    # exists precisely because that default must not leak to every crypto goal.
     "crypto": {"crypto_decode", "python_execute", "load_skill_reference"},
     "misc": {"crypto_decode", "python_execute", "load_skill_reference"},
-    "reverse": {"python_execute", "shell_command", "load_skill_reference", "source_extract"},
+    # `fetch` and the background-cracker pair are here for the same measured
+    # reason as the three analysers above: a challenge can need the tool its own
+    # bundle lacks. A reverse/forensics task often has to pull a reference (the
+    # packed binary's known unpacker, an author's writeup of the same crackme);
+    # a pwn task routinely brute-forces a canary or the low bits of ASLR, which
+    # is exactly `bg_launch` (measured 2026-10-29: a pwn goal routes to this
+    # bundle because "elf" is its keyword, and bg_* was absent).
+    "reverse": {
+        "python_execute",
+        "shell_command",
+        "load_skill_reference",
+        "source_extract",
+        "fetch",
+        "bg_launch",
+        "bg_result",
+    },
+    # pwn gets its own bundle so the keyword table can name it directly instead
+    # of relying on "elf" (a pwn goal may say 溢出/ROP and never say ELF).
+    "pwn": {
+        "python_execute",
+        "shell_command",
+        "source_extract",
+        "load_skill_reference",
+        "bg_launch",
+        "bg_result",
+        "fetch",
+    },
     "code": {"python_execute", "shell_command", "load_skill_reference", "source_extract", "evidence_view", "evidence_search"},
     "web": {
         "fetch",
@@ -1642,6 +1671,16 @@ _TASK_KEYWORDS: dict[str, list[str]] = {
     ],
     "misc": ["zip", "压缩包", "隐写", "steg", "流量包", "pcap", "取证", "forensic", "misc"],
     "reverse": ["逆向", "reverse", "elf", "pe", "ida", "ghidra", "apk", "so文件", "脱壳"],
+    # pwn gets its own entry so the keyword table can name it directly instead of
+    # relying on "elf" (a pwn goal may say 溢出/ROP and never say ELF). Its bundle
+    # is deliberately the same SET as "reverse" today -- the point is that both
+    # carry fetch + the background pair, so which of the two matches first cannot
+    # change what the run can do.
+    "pwn": [
+        "pwn", "溢出", "栈溢出", "缓冲区溢出", "格式化字符串", "rop", "ret2",
+        "shellcode", "堆溢出", "堆利用", "tcache", "uaf", "canary", "seccomp",
+        "one_gadget", "栈迁移",
+    ],
     "code": ["源码", "代码审计", "代码", "php", "审计", "分析源码", "source"],
     "web": [
         "web", "sql注入", "xss", "csrf", "ssrf", "上传", "rce", "命令执行",
