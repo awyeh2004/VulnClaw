@@ -7,6 +7,7 @@
   - **经典 chishaxie/BlindWaterMark 的 DFT 差分不是载体**：新增 `scripts/blind_watermark_dft.py` 枚举 axes∈{(0,1),(1,2),(-2,-1)} × alpha∈{1,3,4} × sign∈{±1} × 象限共 24 种约定，每一种产出的都是频谱梳状结构，无字形。
 - **新增 `scripts/blind_watermark_dft.py`**：不是"猜一种约定"，而是枚举 + 按「二值度 + 墨迹占比」打分，把 top-N 写成 PNG 交给 `ocr` 读。第一版评分把**全黑图**判成满分 1.000（`near_zero=1.0` 没有墨迹也是"二值"），已加墨迹占比下限——否则工具会为每个约定都报"找到了"。
 - **写进笔记（draft，不冒充 validated）**：`blind-watermark-frequency-domain` 追加了上面三条实测负面结论与下一步方向（试 pip `blind-watermark` 0.2/0.3 的 `extract_with_original`，或单图块方案配 wm_shape 网格扫描）。GitHub 在本机不可达（`185.199.x.x:443` 全部 timeout），取源码要靠镜像或 pip 旧版本。
+- **第二轮负面结果（本人手试，仍未解）**：把 `guofei9987/blind_watermark` 的参数空间也算了一遍——2 张图 × shuffle 策略 1/2 × fast/slow × password_img 1–20 × 约 100 种 wm_size = **16,000 组，没有一组把 `wm_avg` 压到二值**（正确参数下每 bit 贴 0/1，错误参数平均向 0.5）。加上前面排除的像素差与 FFT 差分，这对图目前**没有已知方案能解**。缺的关键输入是 DASBOOK 7.2.4 的配套说明（题面只说"盲水印+两张图"，没说用哪个工具/版本），而 GitHub raw 在本机不可达。两条都写进了 draft 笔记。
 - **诚实结论**：这类题目前**没有**确定性工具覆盖，笔记仍是 draft、不会自动注入；这次没有把任何未验证的东西标成 validated。
 
 </details>
