@@ -1,4 +1,21 @@
 <details open>
+<summary><strong>Unreleased</strong> — 盲水印解出来了：经典 bwm DFT 差分，7.2.4 取得 flag</summary>
+
+- **结果（实测）**：DASBOOK 7.2.4「盲水印_01」解出，答案是 `flag{aa3379655baa69c7fb7a7e469c8be88e}`。两图肉眼相同，其中一张 RGBA 一张 RGB —— 这是经典 `chishaxie/BlindWaterMark`（把 `alpha×水印图` 加到载体图**未移位**的 2D DFT 上）的指纹。
+- **新增 `scripts/blind_watermark_classic.py`**：encode/decode 自包含实现，`--seed`（默认 20160930）/`--alpha`（默认 3.0）/`--oldseed`（py2 兼容）。本机自实现与参考脚本输出**逐像素相同**（`(a==b).all() == True`）。
+- **两个决定成败的实现细节**（复刻时各踩一次，都写进了脚本注释）：
+  1. **seed 只设一次**，之后连续 `shuffle(rows)`、`shuffle(cols)`；两次之间重新 seed 会得到不同的列置换，输出噪声且不报错。
+  2. **赋值时就 `np.uint8()` 截断**（负数回绕，-5→251）；保留浮点会让每个像素偏移、字消失。
+- **判别谁是原图**：`decode blind2 blind1` 出字、反过来出噪声 —— 这是最快的方法，写进了笔记。
+- **本次绕过的一个坑**：小字号 + 竖向条纹下 easyocr 会把 `flag` 读成 `ifladlaa37?`，**关键字符必须人工放大核对**（本次用镜像副本交叉验证，确认第 2 行末位是 `c` 而非 `d`）。
+- **之前 16,000 组参数为什么全落空**：那些是 `guofei9987/blind_watermark`（DWT+4×4 DCT+SVD）的参数空间，和本题的方案族不同；而自己枚举的 24 种 DFT 约定又漏了置换与镜像两步。
+- **笔记**：新增 `blind-watermark-two-image-dft-decode`（**validated**，注入路径下 score 0.67），把正确流程、两个坑、以及五条已排除的路径都记下；旧的 `blind-watermark-frequency-domain` 保持 draft 作反面记录；`scripts/blind_watermark_dft.py` 标注 DEPRECATED（它漏了置换/镜像，留着只会误导）。
+- **顺带**：GitHub 在本机直连不通（`185.199.x.x:443` timeout），走系统代理 `127.0.0.1:12334` 后 200 —— 需要外部源码时用 `curl --proxy`。
+
+</details>
+
+---
+<details open>
 <summary><strong>Unreleased</strong> — 盲水印实测：agent 104 次调用未解 · 经典 DFT 差分被证伪 · 留下负面结果</summary>
 
 - **实测（未修，记录用）：让 agent 解 DASBOOK 7.2.4「盲水印_01」** — `blind1.png` + `blind2.png` 两张 600×600 RGBA 同尺寸图，40 步上限内 **104 次工具调用后未解出**，无 flag。有价值的部分是它排除了什么，以及它本身证明通路是好的：

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Blind watermark, two-image DFT difference: enumerate the conventions.
+"""DEPRECATED: use scripts/blind_watermark_classic.py instead.
+
+The enumeration below varies axes / alpha / sign / quadrant but omits the two
+steps that actually make the scheme work -- the SEEDED PERMUTATION and the
+MIRROR fill. It found nothing on the 7.2.4 pair while the classic script solved
+it immediately; kept only as a record of what was tried.
+
+Blind watermark, two-image DFT difference: enumerate the conventions.
 
 The classic "盲水印" family hands you two images (original + watermarked) and the
 watermark is recovered from the difference of their 2-D DFTs. The published
