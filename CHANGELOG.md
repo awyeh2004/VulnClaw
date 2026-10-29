@@ -1,4 +1,19 @@
 <details open>
+<summary><strong>Unreleased</strong> — 盲水印实测：agent 104 次调用未解 · 经典 DFT 差分被证伪 · 留下负面结果</summary>
+
+- **实测（未修，记录用）：让 agent 解 DASBOOK 7.2.4「盲水印_01」** — `blind1.png` + `blind2.png` 两张 600×600 RGBA 同尺寸图，40 步上限内 **104 次工具调用后未解出**，无 flag。有价值的部分是它排除了什么，以及它本身证明通路是好的：
+  - **视觉通路确认可用**：`ocr(method='llm')` 对 4 面板拼图返回了具体的逐面板描述（44 s），不是 10-28 修之前的空串/NO_TEXT——那条修复在真实运行里成立。
+  - **像素差不是载体**：R 通道 diff>10 仅 4206 px（0.74%），二值化后是云层纹理。
+  - **经典 chishaxie/BlindWaterMark 的 DFT 差分不是载体**：新增 `scripts/blind_watermark_dft.py` 枚举 axes∈{(0,1),(1,2),(-2,-1)} × alpha∈{1,3,4} × sign∈{±1} × 象限共 24 种约定，每一种产出的都是频谱梳状结构，无字形。
+- **新增 `scripts/blind_watermark_dft.py`**：不是"猜一种约定"，而是枚举 + 按「二值度 + 墨迹占比」打分，把 top-N 写成 PNG 交给 `ocr` 读。第一版评分把**全黑图**判成满分 1.000（`near_zero=1.0` 没有墨迹也是"二值"），已加墨迹占比下限——否则工具会为每个约定都报"找到了"。
+- **写进笔记（draft，不冒充 validated）**：`blind-watermark-frequency-domain` 追加了上面三条实测负面结论与下一步方向（试 pip `blind-watermark` 0.2/0.3 的 `extract_with_original`，或单图块方案配 wm_shape 网格扫描）。GitHub 在本机不可达（`185.199.x.x:443` 全部 timeout），取源码要靠镜像或 pip 旧版本。
+- **诚实结论**：这类题目前**没有**确定性工具覆盖，笔记仍是 draft、不会自动注入；这次没有把任何未验证的东西标成 validated。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — misc/隐写：一条命令查完六件事 · 修掉一行会复现不了的笔记</summary>
 
 - **修（中·实测坐实）：已 validated 的 LSB 笔记记的方法是错的** — `lsb-image-column-major-pixel-order-flag-extracti` 原文写「column-major **plane 0**」。2026-10-29 复测同一张图：RGB/RGBA × 行/列 × 8 个位 × 两种位序**全部无命中**；真正能复现的是**交错通道流**（`arr[:,:,:3].reshape(-1) % 2`，即 R,G,B,R,G,B… 逐字节取 LSB）。两种载体完全不同，只试一种就会得出"图里没东西"。笔记已按实测重写，并把原错误作为 `[miss]` 角度保留。
