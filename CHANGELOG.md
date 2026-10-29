@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — misc/隐写：一条命令查完六件事 · 修掉一行会复现不了的笔记</summary>
+
+- **修（中·实测坐实）：已 validated 的 LSB 笔记记的方法是错的** — `lsb-image-column-major-pixel-order-flag-extracti` 原文写「column-major **plane 0**」。2026-10-29 复测同一张图：RGB/RGBA × 行/列 × 8 个位 × 两种位序**全部无命中**；真正能复现的是**交错通道流**（`arr[:,:,:3].reshape(-1) % 2`，即 R,G,B,R,G,B… 逐字节取 LSB）。两种载体完全不同，只试一种就会得出"图里没东西"。笔记已按实测重写，并把原错误作为 `[miss]` 角度保留。
+- **新增 `scripts/stego_sweep.py`**：一次调用给出六项判据 —— 容器尾部附加数据（IEND/EOI 之后 + 魔数识别）、PNG 块清单（CRC 有效性 / 重复块=诱饵特征）、EXIF 与文本块、LSB（交错流 + 逐平面 × 行/列 两向）、可解压的 deflate/zlib 段、音频自动渲染频谱图。实测 37 份 DASBOOK 附件：**3 份直接给出 flag 候选**（附加字符串 `flag{3c3c…}`、LSB `flag{7d39…}`、zip 伪加密 `flag{57c9…}`），**2 份给出结构性线索**（IEND 后挂着 `PK\x03\x04` → 图种），**3 份音频自动出频谱图**（交给 `ocr(method='llm')` 读）。
+- **两处精度/性能问题在写的过程中被实测打回并修掉**：① raw-deflate 在随机偏移解压必然"成功"，6 MB 的 mp3 解出 6 段乱码假流 → 加"流正常结束 + 输出像文本（可打印≥0.9、字母数字≥0.5、无单字节占主导）"过滤，噪声归零；② 首版逐字节试探 + 每探 8 MB 切片，6 MB 文件 **2.5 分钟**跑不完 → 改成头 4 KB 窗口 + `max_length` 上限，**2.0 秒**。
+- **新增笔记 `misc-stego-one-shot-triage-sweep`（validated）**：把"先查完六件事再猜手法"写进可召回的配方，附实测数字与工具调用方式；同时给 `lsb-image-…` 笔记补了"图片/像素/找 flag"这类题面词，使图片类 goal 能命中它。
+- **测试** — `-k playbook -n 4` 316 passed；全量 `-n 4` **5566 passed / 0 failed**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — skill 路由：pwn 此前命中不了任何技能 · 泛 CTF 题一律被塞 ctf-web</summary>
 
 - **修（中·实测坐实）：`ctf-web` 的关键词组里有裸 `ctf`/`夺旗`/`flag`，任何提到 flag 的题都以 0.15 命中它** — 实测一道**固件镜像**题（`fw_image.cfg` + `fw_tool.py`）被 `ctf-web` 以 **confidence 0.09** 选为 primary，一道 PNG 隐写题同理：题型不是 web，拿到的却是 PHP 绕过/burp 参考清单。技能索引只是"可选参考"，但错家族的建议本身就在把人往固定套路上带。移出裸词、保留 web 特有判据；泛 CTF 题现在不命中任何技能（索引为空比错家族干净）。
