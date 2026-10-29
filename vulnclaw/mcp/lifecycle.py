@@ -358,14 +358,20 @@ class MCPLifecycleManager(ProbeMixin):
         # the writeup policy in solver.py) — what the scope gate exists to bound
         # is traffic sent AT a target, not reading public documentation.
         #
-        # The research exemption only skips ``allowed_hosts`` for the first hop.
-        # The ordinary allowed-host check runs before blocked-host/path/port checks;
-        # a blocked host is still rejected whenever it reaches that check.
+        # The research exemption only skips the ``allowed_hosts`` check, and only
+        # for hosts ``is_research_host`` accepts. The ordinary allowed-host check
+        # runs before blocked-host/path/port checks; a blocked host is still
+        # rejected whenever it reaches that check.
         #
-        # NOTE: the research exemption is only consulted for the FIRST hop here.
-        # Every redirect hop is re-checked by ``_fetch_redirect_guard`` with the
-        # exemption disabled, so a 302 from a research host to an internal or
-        # blocked host is stopped rather than followed (measured 2026-10-21).
+        # Redirect hops re-evaluate the exemption per hop (c00c9bd, 2026-10-28):
+        # the redirect guard passes ``allow_research=True``, so a hop to another
+        # research host is judged by the same rule as a first hop. Measured
+        # 2026-10-28 (DASBOOK 7.5.2): with the exemption disabled on hops, bing's
+        # 302 to cn.bing.com was rejected as out of scope and web search was
+        # unusable in a scoped CTF run. A hop to an internal target, an IP or any
+        # non-research host is still outside scope, and blocked
+        # hosts/paths/ports stay enforced on every hop regardless of the
+        # exemption, so an open redirect to a blocked host cannot be followed.
         research = is_research_host(host) if allow_research else False
 
         if (
