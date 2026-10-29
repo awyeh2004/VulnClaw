@@ -91,8 +91,15 @@ def _split_corrupted(text: str) -> tuple[dict[str, str], str] | None:
     if fp_at is None or tail_at - fp_at < 2:
         return None
 
+    # ``name`` spans lines exactly like ``fingerprint`` (both were written
+    # verbatim): its value is everything from the ``name:`` line up to the
+    # ``fingerprint:`` key line. The first-line-only read silently dropped the
+    # continuation lines, and the TOKENS printout could not see the loss because
+    # it rebuilt the before-count from the same truncated meta (round22,
+    # 2026-10-29).
+    name_parts = [lines[name_at][len("name:"):]] + lines[name_at + 1:fp_at]
     meta: dict[str, str] = {
-        "name": lines[name_at][len("name:"):].strip(),
+        "name": pb._single_line(" ".join(name_parts)),
     }
     value_parts = [lines[fp_at][len("fingerprint:"):]] + lines[fp_at + 1:tail_at]
     meta["fingerprint"] = pb._single_line(" ".join(value_parts))

@@ -593,7 +593,13 @@ def ensure_dirs() -> None:
 #: NOT a prefix match -- ``----`` (a Markdown horizontal rule, or the 勘误表
 #: separator inside a captured Chinese challenge description) and ``--- text``
 #: are ordinary content lines.
-_FM_DELIM = re.compile(r"^[ \t]*---[ \t]*$")
+#:
+#: ``\r?`` keeps Windows-edited notes loadable: with ``keepends=True`` a CRLF
+#: file's delimiter line is ``---\r\n``, and ``[ \t]*$`` cannot consume ``\r`` --
+#: the pre-52f0943 parser (``^---\s*\n``) accepted CRLF, so without ``\r?`` a
+#: hand-edited or restored-from-backup note would silently lose its whole
+#: frontmatter again (status/target_ref gone, invisible to auto-inject).
+_FM_DELIM = re.compile(r"^[ \t]*---[ \t]*\r?$")
 
 
 def _single_line(text: str) -> str:
@@ -1501,9 +1507,13 @@ def save_playbook(
         f"updated_at: {updated_at}",
     ]
     if target_ref:
+        # Hash the value AS STORED: the ref line is collapsed to one line, so a
+        # hash taken from the pre-collapse original would never match a hash any
+        # future consumer recomputes from the stored line (round22, 2026-10-29).
+        ref_single = _single_line(target_ref)
         lines.append(f"identity_version: 1")
-        lines.append(f"target_ref: {_single_line(target_ref)}")
-        lines.append(f"target_hash: {_target_ref_hash(target_ref)}")
+        lines.append(f"target_ref: {ref_single}")
+        lines.append(f"target_hash: {_target_ref_hash(ref_single)}")
     lines += [
         "---",
         "",

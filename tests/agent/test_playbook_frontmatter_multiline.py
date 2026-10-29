@@ -122,3 +122,71 @@ class TestWriterKeepsValuesOnOneLine:
         assert ack["slug"] == "autonotes-spaced"
         loaded = {p.slug: p for p in pb.list_playbooks()}["autonotes-spaced"]
         assert loaded.fingerprint == "a b"
+
+
+class TestCrlfFilesStillParse:
+    """Round22 audit (2026-10-29): the whole-line delimiter regex must accept CRLF.
+
+    With ``splitlines(keepends=True)`` a Windows-edited note's delimiter line is
+    ``---\r\n``; ``[ \t]*$`` cannot consume ``\\r``, so a strict ``$`` rejected
+    the whole block and the note lost its frontmatter -- the exact
+    status/target_ref loss 52f0943 set out to fix, via a different trigger
+    (hand edit or restore from an E-drive backup). The pre-52f0943 parser
+    (``^---\\s*\\n``) accepted CRLF, so this is a regression guard, not new
+    tolerance.
+    """
+
+    CRLF_NOTE = (
+        "---\r\n"
+        "name: n\r\n"
+        "fingerprint: f\r\n"
+        "status: validated\r\n"
+        "---\r\n"
+        "body\r\n"
+    )
+
+    def test_crlf_delimiters_parse(self):
+        meta, body = pb._parse_frontmatter(self.CRLF_NOTE)
+        assert meta["status"] == "validated"
+        assert meta["name"] == "n"
+        assert body.strip() == "body"
+
+    def test_crlf_block_with_dash_rule_inside_still_holds(self):
+        text = (
+            "---\r\n"
+            "name: n\r\n"
+            "fingerprint: 勘误表\r\n"
+            "----\r\n"
+            "status: validated\r\n"
+            "---\r\n"
+            "body\r\n"
+        )
+        meta, body = pb._parse_frontmatter(text)
+        assert meta["status"] == "validated"
+        assert meta["fingerprint"] == "勘误表"
+        assert body.strip() == "body"
+
+
+class TestTargetHashMatchesStoredRef:
+    """Round22 audit (2026-10-29): the hash must be taken from the stored line.
+
+    ``target_ref`` is flattened before it is written; hashing the pre-flatten
+    original meant the stored ``target_hash`` could never be reproduced from the
+    stored ``target_ref``. No consumer compares them today (verified: the field
+    is write-only across the repo), so this pins the invariant for whoever adds
+    the first comparison.
+    """
+
+    def test_hash_is_recomputable_from_the_stored_ref(self, tmp_playbooks):
+        slug = pb.save_playbook(
+            name="AutoNotes h",
+            fingerprint="h",
+            steps=STEPS,
+            target_ref="ctf2:practice:g:c\nmore",
+            slug="autonotes-hash",
+        )["slug"]
+        raw = (tmp_playbooks / f"{slug}.md").read_text(encoding="utf-8")
+        ref_line = next(l for l in raw.splitlines() if l.startswith("target_ref:"))
+        hash_line = next(l for l in raw.splitlines() if l.startswith("target_hash:"))
+        stored_ref = ref_line[len("target_ref:"):].strip()
+        assert hash_line == f"target_hash: {pb._target_ref_hash(stored_ref)}"
