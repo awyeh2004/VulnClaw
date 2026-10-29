@@ -969,6 +969,52 @@ class CompetitionConfig(BaseModel):
             "the handbook treats as grounds for disqualification."
         ),
     )
+    # 平台一接受就收工，不再让模型补一轮黑板。
+    #
+    # 不这么做实测代价（55 个已解会话，2026-10-18..29）：accepted 之后中位数还要
+    # 6.5 s，真实比赛那 10 个 `ctf2:competition:*` 会话的 p90 是 21 s，期间 4-12 次
+    # 工具调用几乎全是黑板记账——`_completion_lock_gate` 要求先补 LOCK 和 fact 才准
+    # 收工。60 分钟 19 题的量级下，每题白丢约 15 s 才能开下一题。
+    #
+    # 该门的设计意图（AGENTS.md §5）是"结论必须落盘"，不是"必须由模型的那一轮亲手
+    # 写"；而 accepted:true 恰好是唯一不需要模型判断"到底解没解出来"的情形——平台
+    # 已经判了。所以接受时由运行时自己把 LOCK 与 confirmed fact 写进黑板（取自提交
+    # 值与这次提交自己的 evidence id）再结束，笔记捕获链照样有内容，只是省掉轮次。
+    # 置 false 恢复"模型补板后再收工"的旧行为。
+    finish_on_accept: bool = Field(
+        default=True,
+        description=(
+            "Finish the run as soon as a submit returns accepted:true, recording the "
+            "LOCK/fact from the accepted submission instead of spending 1-2 more model "
+            "turns on blackboard bookkeeping. OFF restores the old behaviour."
+        ),
+    )
+    # 手工提交场景（强网杯这类：人在赛站上点提交，运行里没有 accepted 事件）的同一问题。
+    #
+    # 实测一次本地 LSB 题：解题只用了 1 次工具调用，之后补黑板那一轮占了 19.6 秒里的
+    # 17.8 秒（91%）。但那一轮不是白费——模型在那里写的 `[miss]` 角度（"行优先不行"
+    # "IEND 后没有附加数据"）正是让下次一次就解出的东西。所以只在"这题便宜到没什么
+    # 可记"时跳过：开关默认关闭，且受工具调用次数上限约束。
+    #
+    # 防猜门不动：`_completion_gate` 在前，只有 flag 已经在证据里时才会走到这里。
+    finish_on_grounded_flag: bool = Field(
+        default=False,
+        description=(
+            "When the model declares a GROUNDED final answer, skip the one bookkeeping "
+            "turn that `_completion_lock_gate` would demand: the runtime records the "
+            "LOCK/fact instead. Bounded by finish_when_calls_below so only cheap runs "
+            "(whose notes carry no angles worth a turn) take it. OFF by default."
+        ),
+    )
+    finish_when_calls_below: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Call-count bound for finish_on_grounded_flag: the early finish applies "
+            "only while the run has made fewer than this many tool calls. 0 removes "
+            "the bound."
+        ),
+    )
 
 
     # ── Submission timing (1024 sprint scoring windows) ──────────────────────

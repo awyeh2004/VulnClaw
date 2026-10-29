@@ -1297,6 +1297,18 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
                 message = str(result.get("message") or "")
                 if message:
                     return message
+                # Whatever else the server sent, never swallow it. Measured
+                # 2026-10-24 (competition b10634a1, challenge e599c7be): a submit
+                # answered ok=true with no content / structured_content / message
+                # and the verdict (accepted / is_solved / points) went down this
+                # hole -- the model saw "completed", could not tell whether it had
+                # scored, and submitted the same flag four more times. On the
+                # scoring platform that is the "invalid operation" the handbook
+                # counts against a team.
+                leftover = {k: v for k, v in result.items() if k != "ok"}
+                if leftover:
+                    dumped = json.dumps(leftover, ensure_ascii=False, default=str)
+                    return f"[tool:{tool_name}] {clip_text(dumped, 2000)}"
                 return f"[tool:{tool_name}] completed"
 
             message = str(result.get("message") or "")

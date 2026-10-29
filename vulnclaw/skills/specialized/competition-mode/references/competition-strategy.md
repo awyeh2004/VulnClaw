@@ -39,7 +39,8 @@ probe_llm_latency()  # 或实测一次小请求
 
 ## 四、提交与复用
 
-- flag 按平台格式提交（`flag{}` / `FLAG{}` / 纯 token 区分），拿到即交
+- **有平台 ref 才谈提交**：flag 按平台格式提交（`flag{}` / `FLAG{}` / 纯 token 区分），拿到即交。`platform_submit` 必须带 challenge ref（`ctf2:practice:<练习场>:<题>` / `ctf2:stage:<stage>:<题>` / `ctf2:daily:<题>` / `gcs:exercise:<题>`），没有 ref 只会得到 `missing ref`。
+- **题面是裸地址（`nc` / `ssh` / `openssl s_client -connect <host>:<port>`）或只给附件时，不要去搜 ref**：那种题没有平台条目可交，交付物就是 flag 值本身——在 FINAL 里写清 flag 与佐证证据即可。枚举 `platform_list` / `ctf2_list_*` 找 ref 是白花时间（实测一次 10/28 次工具调用、32/79 秒，撞 `403 agent_scope_forbidden` 后仍无 ref）。
 - 同题换实例：优先 `lookup_playbook` 查旧配方重放，而非重新推导（省时间）
 
 ## 五、时间分配

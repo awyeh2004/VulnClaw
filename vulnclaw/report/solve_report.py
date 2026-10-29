@@ -149,6 +149,20 @@ def render_solve_report(state: AgentState) -> str:
     if flags:
         lines.append(f"- Flag / proof: `{flags[0]}`")
 
+    # AI-use declaration (2026-10-29 强网杯 official Q&A): "可以使用 AI 辅助解题,
+    # 后续在 WP 中须注明". A rule that says "declare it in the writeup" is only
+    # satisfiable if the run's own output says what was used -- and the person
+    # assembling the WP works from this file, hours after the run. So the line is
+    # here, ready to copy, with the model name the run actually used.
+    lines.extend(
+        [
+            "",
+            "## 0. AI 使用声明（写 WP 时照抄）",
+            f"- 本题使用 AI 辅助解题：VulnClaw（模型 `{_model_label()}`），"
+            "由 Agent 自主执行工具调用并给出结论，人工负责复核与提交。",
+        ]
+    )
+
     lines.extend(["", _("report.solve.step1")])
     lines.extend(_render_solution_chain(state, sql_facts, key_requests, flags))
 
@@ -353,30 +367,45 @@ def _render_solution_chain(
     flags: list[str],
 ) -> list[str]:
     lines: list[str] = []
+    body: list[str] = []
     linked = [item.text for item in state.pinned_facts if "endpoint:" in item.text.lower()]
     forms = [item.text for item in state.pinned_facts if item.text.startswith("HTML ")]
 
     if linked:
-        lines.append(f"1. 从页面/脚本证据中定位入口：{'; '.join(linked[:4])}。")
+        body.append(f"从页面/脚本证据中定位入口：{'; '.join(linked[:4])}。")
     elif forms:
-        lines.append(f"1. 从页面表单证据中定位输入面：{'; '.join(forms[:4])}。")
+        body.append(f"从页面表单证据中定位输入面：{'; '.join(forms[:4])}。")
     else:
-        lines.append("1. 通过模型选择的 HTTP/浏览器工具建立目标页面和接口基线。")
+        # No web-shaped evidence. The old fallback here claimed "通过
+        # HTTP/浏览器工具建立目标页面和接口基线" for EVERY run, which is a
+        # fabrication on a non-web target -- measured 2026-10-29 on an nc
+        # firmware challenge whose run used nothing but python_execute, and whose
+        # report still asserted HTTP work. The rules now require a human-authored
+        # writeup that declares AI use, so a fabricated chain goes straight into
+        # it. Derive the chain from what the run actually did instead; when there
+        # is nothing recorded, say so rather than inventing a method.
+        steps = [s for s in (getattr(state, "steps", None) or []) if getattr(s, "reason", "")]
+        if steps:
+            for step in steps[:8]:
+                tools = ", ".join(step.tool_calls or []) or "no tool"
+                body.append(f"{one_line(step.reason, 200)}（{tools}）")
+        else:
+            body.append("本次运行未记录分步理由，无法从证据还原攻击链（不做推测）。")
 
     if sql_facts:
-        lines.append(f"2. 关键服务端表达式：`{sql_facts[0][len(_SOURCE_SQL_PREFIX):].strip()}`。")
-        lines.append(
-            "3. 利用点来自字符串拼接 SQL。优先从真实表达式推导 payload，而不是泛化枚举。"
+        body.append(f"关键服务端表达式：`{sql_facts[0][len(_SOURCE_SQL_PREFIX):].strip()}`。")
+        body.append(
+            "利用点来自字符串拼接 SQL。优先从真实表达式推导 payload，而不是泛化枚举。"
         )
-    else:
-        lines.append("2. 根据工具响应差异确认可控参数和可复现的利用路径。")
+    elif requests:
+        body.append("从记录的请求/响应差异确认可控参数和可复现的利用路径。")
 
     if requests:
-        payload_url = requests[0].url
-        lines.append(f"4. 成功复现请求：`{payload_url}`。")
+        body.append(f"成功复现请求：`{requests[0].url}`。")
     if flags:
-        lines.append(f"5. 响应中出现目标 proof/flag：`{flags[0]}`。")
-    return lines
+        body.append(f"证据中出现目标 flag：`{flags[0]}`。")
+
+    return [f"{index}. {text}" for index, text in enumerate(body, start=1)]
 
 
 def _response_excerpt(body: str, flags: list[str]) -> str:
@@ -390,6 +419,21 @@ def _response_excerpt(body: str, flags: list[str]) -> str:
             end = min(len(text), index + len(flag) + 220)
             return text[start:end].strip()
     return clip_text(text.strip(), 1200)
+
+
+def _model_label() -> str:
+    """The model this run is configured to use, for the AI-use declaration.
+
+    Best-effort: a report must still render when the config cannot be read (the
+    declaration then names the tool only, which is still the fact the rule asks
+    for).
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return str(getattr(load_config().llm, "model", "") or "unknown")
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _target_label(state: AgentState) -> str:

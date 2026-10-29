@@ -88,6 +88,35 @@ def effective_task_mode(config: Any, goal: str) -> tuple[str, str]:
     return mode, f"auto: {reason}"
 
 
+#: The submit line is CONDITIONAL on this run actually carrying a platform ref.
+#:
+#: Measured 2026-10-29 (GBU firmware console challenge, `task_mode: ctf` pinned in
+#: the operator's config): the flag was recovered at tool call 12, and the
+#: unconditional "submit via the platform submit verb" then sent the model to
+#: hunt for a challenge ref it could never have -- `platform_submit` needs a
+#: `ref` (`platforms/tools.py:_resolve` answers "missing `ref`" without one) and
+#: the goal was a bare `openssl s_client -connect <host>:9999` with no
+#: `ctf2:practice:<ground>:<challenge>` string anywhere. It spent 10 of 28 tool
+#: calls (32 of 79 seconds) enumerating collections, the forbidden daily scope
+#: (403 agent_scope_forbidden), all 26 practice challenges and two ended
+#: competitions before concluding no ref existed. Saying "do not hunt for a ref"
+#: is the difference between reporting the flag and reverse-engineering a
+#: platform listing API to find one.
+_CTF_SUBMIT_WITH_REF = (
+    "- The deliverable is a platform-formatted flag; submit via the platform "
+    "submit verb (`platform_submit` needs the challenge `ref` this run was given).\n"
+)
+_CTF_SUBMIT_WITHOUT_REF = (
+    "- This run was handed the target directly, so the goal carries NO platform "
+    "challenge ref. The flag value IS the deliverable: state it in FINAL with the "
+    "evidence that proves it. If a ref is already in hand (it appeared in the goal, "
+    "the origin, or a tool result this run), submit that; but do NOT enumerate "
+    "collections to go find one — no `platform_list` / `ctf2_list_*` sweeps, no "
+    "probing the platform's own endpoints. Measured cost of that hunt: 10 of 28 tool "
+    "calls and 32 of 79 seconds, ending in `403 agent_scope_forbidden` and no ref.\n"
+)
+
+
 _MODE_DISCIPLINE: dict[str, str] = {
     "ir": (
         "\n\n# Task mode: INCIDENT-RESPONSE answer round\n"
@@ -112,26 +141,38 @@ _MODE_DISCIPLINE: dict[str, str] = {
         "- Paths must be copied verbatim from command output, never reconstructed.\n"
         "Load skill reference `ir-competition-strategy` before sweeping.\n"
     ),
-    "ctf": (
+    "ctf": "",  # built per run: see mode_instruction(), the submit line is conditional
+    "pentest": "",  # default deep-dive behaviour; the stall guard already sets its pace
+}
+
+
+def _ctf_discipline(*, platform_ref: bool) -> str:
+    return (
         "\n\n# Task mode: CTF flag round\n"
-        "- The deliverable is a platform-formatted flag; submit via the platform "
-        "submit verb.\n"
-        "- Easiest first; fail-fast: if ~8 turns pass with no progress, drop the "
+        + (_CTF_SUBMIT_WITH_REF if platform_ref else _CTF_SUBMIT_WITHOUT_REF)
+        + "- Easiest first; fail-fast: if ~8 turns pass with no progress, drop the "
         "challenge and move on.\n"
         "- Exception: a security-hardening/defense challenge (安全加固/加固) is "
         "NOT an 8-turn fail-fast target; follow the hardening workflow, timebox "
         "30-40 minutes, and keep the service alive.\n"
         "Load skill reference `competition-strategy` for the full playbook.\n"
-    ),
-    "pentest": "",  # default deep-dive behaviour; the stall guard already sets its pace
-}
+    )
 
 
-def mode_instruction(mode: str) -> str:
+def mode_instruction(mode: str, *, platform_ref: bool = True) -> str:
     """The per-mode discipline block injected into the system prompt.
 
     This is the piece that used to mix: both disciplines lived side by side in
     the competition-mode skill text and the model picked whichever came to
     mind. One mode, one discipline.
+
+    ``platform_ref`` says whether THIS run was handed a platform challenge ref.
+    It only affects the CTF block's submit line: with a ref the flag must be
+    submitted (a competition run is graded by the platform), without one the
+    flag value is the deliverable and hunting for a ref is wasted work. Default
+    True keeps every caller that does not know about the distinction on the old
+    "submit" wording -- the stricter of the two.
     """
+    if mode == "ctf":
+        return _ctf_discipline(platform_ref=platform_ref)
     return _MODE_DISCIPLINE.get(mode, "")

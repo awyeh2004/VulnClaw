@@ -1,4 +1,75 @@
 <details open>
+<summary><strong>Unreleased</strong> — 手工提交场景的收工开关：简单题 19.6 s → 1.2 s</summary>
+
+- **背景（实测）**：`finish_on_accept` 靠平台返回 accepted 触发，而强网杯这类**人工提交**的比赛里运行内没有这个事件，所以每题解完仍要付一轮补黑板。实测同一道本地 LSB 题两次运行：`1 次 python_execute 出 flag`，之后 9 次调用 / 17.8 秒全是记账 —— **占 19.6 秒总墙钟的 91%**。
+- **那一轮不是白费**：模型在那里写的 `[miss]` 角度（「行优先不行」「IEND 后无附加数据」）正是让下次一次就解出的知识。所以**不全局开**，而是按"这题便宜到没什么可记"判定。
+- **新增两个配置**（`config/schema.py` 的 `CompetitionConfig`）：
+  - `finish_on_grounded_flag`（默认 **false**，按需开）：模型宣布 FINAL 且 `_completion_gate` 判定 flag 已在证据里时，跳过 `_completion_lock_gate` 那一轮，由运行时写 LOCK + CONFIRMED fact 再收工。
+  - `finish_when_calls_below`（默认 3，0 = 不设限）：只有本次运行的工具调用次数**小于**该值才生效；达到或超过就照旧走锁门，保留模型写的角度。
+- **护栏未动**：防猜门 `_completion_gate` 在前，只有已 grounding 的 flag 才可能走到这里；`_completion_lock_gate` 本身没改，调用计数照常推进；配置缺失/异常一律 fail-closed（返回 False，即旧行为）。
+- **效果（同一道题复跑）**：`steps=1 calls=2 wall=1.2 s`，事件 `completed_on_grounded_flag` 落进 `VULNCLAW_EVENT_LOG`；对照修复前 `steps=2 calls=11 wall=19.6 s`。板上仍有合成的 LOCK 与确认 fact（已核）。
+- **测试** — 新增 `tests/agent/test_solver_finish_on_grounded_flag.py`（17 例：默认关、边界 0/1/2 与 3/4/40、阈值 0 不设限、缺 config/缺 competition 段 fail-closed、schema 默认值与负数拒绝、合成时不覆盖模型写的 LOCK、黑板缺失不报错、锁门在开关关闭时行为不变、防猜门先于本开关）。全量 `-n 4` **5535 passed / 0 failed**。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 强网杯赛前准备：报告里的 AI 声明与"编造攻击链"</summary>
+
+- **修（中·官方规则驱动）：报告多了一段可照抄的 AI 使用声明** — 2026-10-29 强网杯官方答疑原文「可以使用 AI 辅助解题，后续在 WP 中须注明」。写 WP 的人是赛后数小时拿着这份报告写的，所以声明必须已经在文件里：`solve_report.py` 的报告头新增 `## 0. AI 使用声明（写 WP 时照抄）`，写明工具（VulnClaw）与本次实际模型名（`_model_label()` 读 `llm.model`，读不到配置时退回 `unknown`，报告照常渲染）。
+- **修（中·实测坐实）：攻击链段落对非 Web 题是编的** — `_render_solution_chain` 在没有 `endpoint:`/SQL 证据时无条件输出「1. 通过模型选择的 HTTP/浏览器工具建立目标页面和接口基线。2. 根据工具响应差异确认可控参数…」。实测 2026-10-29 那道 GBU nc 固件题全程只用了 `python_execute`，报告仍断言做了 HTTP 工作。现在改为**从本次运行记录的实际步骤推导**（步骤理由 + 工具名），没有记录时直说「无法从证据还原攻击链（不做推测）」而不是编方法。编号同时改成连续（原来会跳 1→2→5）。WP 要人写、且要注明 AI，所以这段编造会直接进交付物。
+- **测试** — 新增 `tests/report/test_solve_report_ai_disclosure.py`（6 例：声明存在且带模型名、配置读不到时退回 `unknown` 仍渲染、非 Web 题按真实步骤描述、链路段不含「HTTP/浏览器工具」、编号连续、无步骤时如实说明）。`tests/report` 125 passed，全量 `-n 4` **5518 passed**。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 平台已经判对之后还在补记账：比赛里每题白等 18 秒才开下一题</summary>
+
+- **修（中·实测坐实）：`accepted:true` 之后仍要花 1–2 轮补黑板** — 统计 55 个已解会话：确认解出后还有 385 次工具调用（占全部调用的 27%），其中 **291 次是 `blackboard_*`**（add_fact 97 / create_angle 67 / hit_angle 47 / verify_fact 36 / set_lock 22 / miss_angle 22）；墙钟中位 6.5 s。只看 14 个 `ctf2:competition:*` 会话，p90 是 21 s，而 1024 快闪赛是 60 分钟 19 题。
+- **修法**：新增 `competition.finish_on_accept`（默认 on）。提交返回 accepted 时，运行时自己把 LOCK 与一条 CONFIRMED fact 写进黑板（取自被接受的值和该次提交的 evidence id）并立刻结束本轮，不再等模型补板。**门本身没动**——`_completion_lock_gate` 仍在（AGENTS.md §5 的要求是"结论必须落盘"，不是"必须由模型那一轮亲手写"），而 accepted 恰好是唯一不需要模型判断"解没解出来"的情形：平台已经判了。置 false 恢复旧行为。
+- **判据要绕开两个坑**（都是实测踩到的）：
+  - 静态名字集合会漏掉比赛提交。比赛走 MCP 侧的 `ctf2_submit_competition_flag`，**这个字符串在本仓库源码里一次都不出现**（由远端 MCP 端点提供），所以第一版按 `{ctf2_submit_flag, gcs_submit_flag, platform_submit}` 判，14 场里一场都不会触发。改成形状判定：名字含 `submit` 且含 flag/competition 或属 `ctf2_`/`gcs_`/`platform_` 家族。
+  - `{"accepted":true}` 单独出现不算数（网页表单也可能这么答）。要求同时出现平台计分字段（`is_solved` / `submission_id` / `earned_points` / `points`）。
+- **效果（回放 14 场真实比赛会话）**：10/14 会在 accepted 处收工，合计省 **92 次调用 / 155 秒**，中位 **17.9 s**。剩下 4 场不触发的见下一条（判词本身丢了，不能猜）。
+- **顺带修（中·同一批数据暴露）：MCP 返回的判词被 `[tool:X] completed` 吞掉** — `builtin_tools.py` 的 ok 分支在没有 `content`/`structured_content`/`message` 时直接渲染 `[tool:X] completed`，把 `accepted`/`is_solved`/`points` 全丢了。实测 2026-10-24 一场比赛里，模型因此看不到判词、**对同一题连交 5 次**（按手册这属于"非有效操作"）。改为：其余键一律 JSON 落盘（截 2000 字符）再回显，真有内容时不再吞。
+- **未修，需你定**：比赛提交走 MCP 直通（`builtin_tools.py:1280` 的 `mcp_manager.call_tool` 前只有 :1006 那三个名字在拦），所以 `ctf2_submit_competition_flag` **不经过本地证据门，也不受 `allow_flag_submission` 开关约束**——即"猜的 flag 也能发出去"。今天没动它：收紧会让比赛提交开始被本地拒，属于策略决定。
+- **测试** — 新增 `tests/agent/test_solver_finish_on_accept.py`（30 例：比赛 JSON 形状、网页表单反例、去重占位不触发、MCP-only 名字识别、已有 LOCK 不被覆盖、config 可回退、黑板缺失不影响收工）。全量 `-n 4` → **5511 passed**，1 例 `test_ocr_vision` 在并发下抖动、单跑通过（AGENTS.md 记录的已知现象）。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — 裸地址题被"必须交平台"推着白找 ref（10/28 次工具调用、32/79 秒）</summary>
+
+- **修（中·实测坐实）：CTF 模式纪律块的提交要求与"本轮有没有 ref"无关** — 2026-10-29 那道 GBU 固件控制台题（`openssl s_client -connect <host>:9999`，`session.task_mode: ctf` 是显式固定的），模型在第 12 次工具调用就拿到了 flag，随后按 `task_mode.py` 那句无条件的 "The deliverable is a platform-formatted flag; submit via the platform submit verb" 去找 challenge ref：`platform_list` → `ctf2:daily`（`403 agent_scope_forbidden`）→ 26 道练习场题（单次 20.5 s）→ 两场已结束快闪赛逐层点进去 → 发现唯一那道 nc 题是 `DASCTF{}`+EXIF/xor 的另一题，才收手。**合计 10/28 次调用、32.3/79.3 秒（41% 的工具时间）花在一个不存在的目标上**，而 `platform_submit` 没有 ref 只会回 `missing ref`（`platforms/tools.py:_resolve`）。
+- **修法**：`mode_instruction(mode, *, platform_ref=True)` 增加 `platform_ref` 参数，CTF 块分两套提交行——有 ref 时维持原样（"submit via the platform submit verb"）；无 ref 时改为"flag 值本身就是交付物 + 明确禁止为了找 ref 去枚举 `platform_list` / `ctf2_list_*`、禁止探测平台自身端点"。默认 `platform_ref=True`，不知道这回事的调用方仍拿到更严的那套，约束不会因为漏传而放松。
+- **判据**：新增 `solver._run_has_platform_ref(state)`，在 goal / origin / 最近 40 条证据里找 challenge 形状的 ref（`<platform>:(practice|stage|daily|exercise|competition):<group>[:<id>]`）。**故意不复用 `playbook.derive_target_ref`**：后者只认 `ctf2:practice:<uuid>:<uuid>`（它是给笔记身份用的），会漏 `ctf2:stage:` / `ctf2:daily:` / `gcs:`——那正好是正式赛唯一必须提交的形状，用它会让比赛题被误判成"没有 ref"。方向上也刻意偏"有 ref"：误判有 ref 只多一次查询，误判没有则直接丢掉提交。运行中途由 `platform_list` 打出 ref 也算有（裸地址起步、后找到平台的正常路径）。
+- **效果（实跑 `_system_prompt`）**：同一轮 GBU 的 goal/origin 下，修复前提示词含 "submit via the platform submit verb"、不含任何"flag 即交付物"的说明；修复后该行消失、改为"flag value IS the deliverable"并点名枚举是白工。带 practice ref 的平台题提示词不变，仍要求提交。
+- **同源文档**：`skills/specialized/competition-mode/references/competition-strategy.md` §四 改成同样的条件表述（列出 4 种 ref 形状 + 裸地址题的处置）。
+- **测试** — 新增 `tests/agent/test_task_mode_submit_requires_ref.py`（17 例：两套提交行互斥、默认仍是严的一套、ir/pentest 不受影响；判据覆盖裸地址 / 纯 web / practice ref / stage ref / daily ref / gcs ref / origin 即 ref / 语料 ref 不算 / 证据中途出现 ref / 坏证据对象不抛）。`-k "task_mode or competition or prompt or playbook" -n 4` 631 passed。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — playbook frontmatter 被多行值打断：43 篇已验证笔记对自动注入隐身</summary>
+
+- **修（中·实测坐实）：`_parse_frontmatter` 用非贪婪 `\n---` 收尾，被正文里的破折号行提前截断** — `save_playbook` 把 `name`/`fingerprint` 原样写进 `key: value`，而捕获的 CTF2 goal 本身就是整段题面（描述 + 附件路径 + 平台政策），落到盘上是一个十几行的 `fingerprint:`。段落里的 `----`（中文书的勘误表分隔线）或 Markdown 水平线 `---` 于是成了 frontmatter 结束符：其后的 `status: validated`、`target_ref:`、`target_hash:` 全被当成正文。**实测本机 669 篇里 144 篇是这种形状，其中 18 篇加载后没有 `status`（按 draft 处理）、43 篇磁盘上明明写着 `validated`**；`solver.py` 的自动注入只收 validated，这些笔记等于对求解流程不可见。同一原因还让 `fingerprint` 被截到第一行（token 从 85+ 掉到 3–8 个），结构化身份层（audit item A 的 `target_ref` 精确匹配）一起失效。修法：结束符必须是**整行恰好三个破折号**（`^[ \t]*---[ \t]*$`），`----`/`--- text` 一律算内容。
+- **修（中·同因）：写入端把单行字段压成单行** — 新增 `_single_line()`，`name`/`fingerprint`/`target_ref` 落盘前折叠空白，从根上不让多行值再产生；正文（`steps`）不受影响，仍保留原格式。
+- **修历史数据**：新增 `scripts/repair_playbook_frontmatter.py`（默认 dry-run，`--apply --backup-to` 才写），把 144 篇的多行值折回单行。执行前 `updated_at` 等尾部键原样保留、正文逐字不动；实跑后校验 144 篇「尾部键一致 + 正文是原文子串 + fingerprint 单行」0 problems，原文件备份在 `E:\vulnclaw\playbook-frontmatter-backup-20261028`（144 篇 / 589 KB）。
+- **效果（实测）**：loader 视角 validated 567 → 610、带 `target_ref` 的 1 → 31、多行 fingerprint 144 → 0。回忆探针：`ctf2:practice:8e5c9260-…:850c2230-…`（parallelism 题）的 ref 查询修复前 **(none)**、修复后命中自己的笔记 score 1.000；`MPI 并行 flag checker 逆向` 从"三条全不相干"变成首条是 8e5c9260 家族的笔记。其余探针（zip 伪加密 / 音频频谱 / gzip 魔数 / ECDSA nonce）排序不变。
+- **测试** — 新增 `tests/agent/test_playbook_frontmatter_multiline.py`（7 例：`----` 不截断、`--- text` 不截断、无结束符仍返回空 meta、写入端多行 goal 往返、`target_ref` 压行、纯空白值只折叠不丢）。`pytest -k playbook -n 4` 316 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — CTF2 列题对不可读分区容错（过期 session 不再让整张题单死掉）</summary>
 
 - **修（中·实测坐实）：`ctf2.list_corpora` 让可选的 competition/stage 分区把整个列题打断** — 2026-10-15 现场日志：用户粘贴靶机 URL 直接解题（无平台 ref），agent 用 `platform_list` 找 ref 时，agent 作用域 PAT 对 `competition:read` 本就 403，回退的浏览器 session JWT 又已过期（401 TOKEN_EXPIRED），异常从 `list_corpora` 冒出去 → **整张题单返回空**；而 `platform_submit` 必须带 challenge ref，于是"flag 已经拿到却提交不了"。修法：competitions/stages 作为可选分区 try/except 跳过（practice 场次仍用 PAT 正常列出，实测过期 session 下仍返回 7 个练习场），与 `list_challenges` 已有的"跳过读不到的集合"容错一致。**遗留说明**：练习场内部的题目枚举仍是 session-only（Open API 无对应路由，实测 `/practice/<pid>/challenges/` 走 `_session_request`），所以过期 session 下"列出练习场"可、"展开场内题目"仍不可——要完整走 ref 流程需刷新浏览器 session，或改用 MCP 面的 `ctf2_*` 工具（Bearer PAT，不依赖 session）。

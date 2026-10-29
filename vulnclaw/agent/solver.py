@@ -903,6 +903,212 @@ def _completion_lock_gate(agent: AgentState, state: AgentState) -> bool:
     return True
 
 
+# ── Finishing on an ACCEPTED submission ──────────────────────────────────────
+#
+# The lock gate above stays (AGENTS.md §5: conclusions must LAND, not evaporate
+# with the run). But it costs 1-2 model turns, and on a submission the platform
+# already judged the answer -- measured over 55 solved sessions, the tail after
+# `accepted:true` is 4-12 tool calls of pure blackboard bookkeeping, p90 21 s in
+# the ten real competition sessions. In a 60-minute/19-challenge sprint that is
+# ~15 s of dead time per solve before the next challenge can start.
+#
+# So for THAT one case the runtime writes the conclusion itself, from the value
+# the platform accepted plus the submit's own evidence id, and finishes. The
+# board ends up in the same state the gate was asking for, and `capture_run_notes`
+# still produces a real note (a LOCK plus a CONFIRMED fact) instead of the
+# "LOCK: (from final answer)" fallback.
+
+#: Every submit verb the BUILTIN table knows. Deliberately not the whole story:
+#: real competitions submit through the CTF2 MCP server's own
+#: ``ctf2_submit_competition_flag``, which exists nowhere in this repo's source
+#: (it is provided by the remote MCP endpoint), so a static name set silently
+#: missed every competition submission when this was first written. See
+#: :func:`_is_submit_tool`, which is what the early-finish path actually uses.
+_SUBMIT_TOOL_NAMES = frozenset({"ctf2_submit_flag", "gcs_submit_flag", "platform_submit"})
+
+#: Accepted-flag markers. Builtin route renders
+#: ``[platform] flag ACCEPTED for <ref>`` (platforms/tools.py:submit_flag_via);
+#: an MCP platform result is JSON carrying ``"accepted":true`` plus at least one
+#: SCORING field -- requiring a scoring field is what keeps an unrelated web form
+#: that happens to answer ``{"accepted": true}`` from ending a pentest run.
+_ACCEPTED_SUBMIT_RE = re.compile(r"\[platform\] flag ACCEPTED for", re.I)
+_ACCEPTED_JSON_RE = re.compile(r"[\"']?accepted[\"']?\s*[:=]\s*(?:true|True)")
+_SCORING_FIELD_RE = re.compile(
+    r"[\"']?(?:is_solved|submission_id|earned_points|points|solve_count)[\"']?\s*[:=]"
+)
+_SUBMITTED_VALUE_RE = re.compile(r"\(submitted:\s*(.+?)\)\\?$", re.M)
+
+
+def _is_submit_tool(name: str) -> bool:
+    """Whether ``name`` is a flag-submission verb, including MCP-only ones.
+
+    Static enumeration cannot work here: the competition verb
+    (``ctf2_submit_competition_flag``) is defined by the remote MCP server, not by
+    this repo, and each platform ships its own. So the rule is shape-based and
+    still narrow -- the name must mention ``submit`` AND a flag/competition
+    concept, or belong to a platform tool family.
+    """
+    text = str(name or "").lower()
+    if text in _SUBMIT_TOOL_NAMES:
+        return True
+    if "submit" not in text:
+        return False
+    return "flag" in text or "competition" in text or text.startswith(
+        ("ctf2_", "gcs_", "platform_")
+    )
+
+
+def _submitted_value(call: Any, summary: str) -> str:
+    """The flag value this submit sent, as reported by the handler or the call args."""
+    match = _SUBMITTED_VALUE_RE.search(summary)
+    if match:
+        return match.group(1).strip()
+    try:
+        args = json.loads(str(getattr(call, "key_args", "") or "{}"))
+    except (TypeError, ValueError):
+        return ""
+    if isinstance(args, dict):
+        return str(args.get("flag") or "").strip()
+    return ""
+
+
+def _is_accepted_result(summary: str) -> bool:
+    if _ACCEPTED_SUBMIT_RE.search(summary):
+        return True
+    return bool(
+        _ACCEPTED_JSON_RE.search(summary) and _SCORING_FIELD_RE.search(summary)
+    )
+
+
+def _accepted_submission(state: AgentState, since: int) -> tuple[str, str] | None:
+    """``(flag, evidence_id)`` of an ACCEPTED submit among the calls after ``since``.
+
+    A refusal, a wrong guess and a queued submission (``queued: true``, the
+    scoring-window hold) all lack the accepted marker and therefore do not
+    finish the run -- they are exactly the cases where more work is still owed.
+    """
+    for call in list(getattr(state, "tool_calls", []) or [])[since:]:
+        if not _is_submit_tool(str(getattr(call, "tool", "") or "")):
+            continue
+        summary = str(getattr(call, "summary", "") or "")
+        if not _is_accepted_result(summary):
+            continue
+        flag = _submitted_value(call, summary)
+        if not flag:
+            continue
+        return flag, str(getattr(call, "evidence_id", "") or "")
+    return None
+
+
+def _record_conclusion(
+    agent: AgentState, *, flag: str, evidence_id: str, source: str
+) -> None:
+    """Put a confirmed answer on the board in the shape the capture path reads.
+
+    Used by both early-finish paths so a run that skips the bookkeeping turn still
+    leaves a LOCK and a CONFIRMED fact for `capture_run_notes` (instead of the
+    "LOCK: (from final answer)" fallback). Existing nodes are never replaced: a
+    model-authored LOCK is richer than anything synthesized here.
+    """
+    board = getattr(getattr(agent, "runtime", None), "blackboard", None)
+    if board is None:
+        return
+    try:
+        if board.current_lock() is None:
+            board.set_lock(
+                f"{source}: flag {flag} for this target, recovered via the run's "
+                "own evidence chain."
+            )
+        board.create_fact(
+            f"Flag {flag} confirmed by {source} (evidence {evidence_id or 'n/a'})",
+            evidence_ref=evidence_id or None,
+            verified=True,
+        )
+    except Exception:  # noqa: BLE001 - a board failure must not undo a solved run
+        pass
+
+
+def _record_accepted_conclusion(
+    agent: AgentState, *, flag: str, evidence_id: str
+) -> None:
+    _record_conclusion(
+        agent, flag=flag, evidence_id=evidence_id, source="platform accept"
+    )
+
+
+def _finish_on_accept(agent: AgentState, state: AgentState, *, since: int, emit: Callable) -> bool:
+    """End the run when this step's tool calls contain an ACCEPTED submission.
+
+    Returns True when the run was completed here. ``competition.finish_on_accept``
+    (default on) is the switch; a run that never submitted, or whose submit was
+    refused/queued, is untouched.
+    """
+    if not _finish_on_accept_enabled(agent):
+        return False
+    found = _accepted_submission(state, since)
+    if found is None:
+        return False
+    flag, evidence_id = found
+    _record_accepted_conclusion(agent, flag=flag, evidence_id=evidence_id)
+    reason = f"platform accepted {flag}; finishing without further probing"
+    try:
+        state.mark_complete(
+            reason,
+            final_answer=f"FINAL: flag = {flag} (accepted by the platform)",
+            evidence_ids=[evidence_id] if evidence_id else [],
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    emit("completed_on_accept", {"flag": flag, "evidence": evidence_id})
+    return True
+
+
+def _finish_on_accept_enabled(agent: AgentState) -> bool:
+    try:
+        cfg = getattr(agent, "config", None)
+        competition = getattr(cfg, "competition", None)
+        if competition is None:
+            return True
+        return bool(getattr(competition, "finish_on_accept", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+# ── Finishing on a GROUNDED final answer (competition, no platform submit) ───
+#
+# `_finish_on_accept` needs a platform verdict, which a hand-submitted event
+# never produces (measured use case: 强网杯, where the operator submits on the
+# site). There the run still pays the `_completion_lock_gate` turn: measured on a
+# local LSB challenge, the solve was 1 tool call and the bookkeeping turn that
+# followed was 17.8 s of a 19.6 s run -- 91 %.
+#
+# That turn is not waste in general: it is where the model writes the [miss]
+# angles that make the note worth recalling. It is waste on a challenge that fell
+# over in one or two calls, whose note adds nothing. So this is opt-in and
+# BOUNDED BY CALL COUNT rather than switched on globally:
+#
+#   competition.finish_on_grounded_flag: true    (default false -- opt in)
+#   competition.finish_when_calls_below: 3       (0 disables the bound)
+#
+# The anti-guess gate is untouched: it runs first (`_completion_gate`), so this
+# can only ever skip bookkeeping for a flag already grounded in evidence.
+
+def _grounded_finish_allowed(agent: AgentState, state: AgentState) -> bool:
+    """Whether a grounded FINAL may skip the bookkeeping turn on this run."""
+    try:
+        competition = getattr(getattr(agent, "config", None), "competition", None)
+        if competition is None:
+            return False
+        if not bool(getattr(competition, "finish_on_grounded_flag", False)):
+            return False
+        limit = int(getattr(competition, "finish_when_calls_below", 3) or 0)
+        if limit > 0 and len(getattr(state, "tool_calls", []) or []) >= limit:
+            return False
+        return True
+    except Exception:  # noqa: BLE001 - fail closed: keep the documented gate
+        return False
+
+
 # Names that mean "a live environment was started". A set, not one string: this
 # reminder is keyed off the tool name, so pointing the model at the
 # platform-neutral `platform_start_env` would silently turn the whole discipline
@@ -1866,6 +2072,45 @@ def _ask_user_rejection_reason(state: AgentState, question: str) -> str:
     return ""
 
 
+#: A challenge-shaped platform ref: ``<platform>:<kind>:<group>[:<id>]``, for every
+#: kind the adapters accept (``platforms/ctf2.py:KINDS`` + GCS). Deliberately
+#: PERMISSIVE and deliberately NOT ``playbook.derive_target_ref``: that one only
+#: recognises ``ctf2:practice:<uuid>:<uuid>`` because it stores note identity, so
+#: it misses ``ctf2:stage:<stage>:<chal>``, ``ctf2:daily:<id>`` and
+#: ``gcs:exercise:<id>`` -- i.e. it would call a COMPETITION run ref-less and tell
+#: the model not to submit, which is the one place submission is mandatory.
+_PLATFORM_REF_RE = re.compile(
+    r"\b[a-z][a-z0-9_]{1,15}:(?:practice|stage|daily|exercise|competition)"
+    r":[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*"
+)
+
+
+def _run_has_platform_ref(state: AgentState) -> bool:
+    """Whether this run was handed a platform challenge ref it could submit to.
+
+    ``platform_submit`` cannot do anything without one: ``platforms/tools.py:_resolve``
+    answers ``missing `ref``` for an empty token. Told "submit via the platform"
+    with no ref, a run that already holds the flag goes looking for one -- measured
+    2026-10-29: 10 of 28 tool calls and 32 of 79 seconds spent enumerating
+    collections, the forbidden ``daily`` scope (403 agent_scope_forbidden) and every
+    practice ground before giving up. The goal on that run was a bare
+    ``openssl s_client -connect <host>:9999``; no ref shape appeared anywhere.
+
+    A ref counts as present when it is in the goal, in the origin, or in anything
+    the run has already seen -- a tool result naming one is equally submit-ready,
+    which is how a run launched from a bare host reaches the platform after
+    ``platform_list``. Erring towards "has a ref" is intentional: a false positive
+    costs one wasted lookup, a false negative silently drops the submission.
+    """
+    texts = [state.goal or "", state.origin or ""]
+    try:
+        for record in list(getattr(state, "evidence", None) or [])[-40:]:
+            texts.append(str(getattr(record, "summary", "") or ""))
+    except Exception:  # noqa: BLE001 - identity detection must never break the prompt
+        pass
+    return any(_PLATFORM_REF_RE.search(text) for text in texts)
+
+
 def _reasoning_graph_enabled(agent: Any = None) -> bool:
     """Model-facing reasoning-graph switch (see blackboard.reasoning_graph_enabled).
 
@@ -2027,7 +2272,9 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
             if _tool_card_enabled(agent)
             else ""
         )
-        mode_block = mode_instruction(mode)
+        mode_block = mode_instruction(
+            mode, platform_ref=_run_has_platform_ref(state)
+        )
     except Exception:
         tool_card = ""
         mode_block = ""
@@ -3064,6 +3311,17 @@ async def _solve_impl(
             },
         )
 
+        # Platform already accepted the flag: record the conclusion and stop. The
+        # remaining turns of this run could only be bookkeeping (measured: 4-12
+        # calls, p90 21 s in real competitions), and every one of them delays the
+        # next challenge in a time-boxed sprint.
+        try:
+            if _finish_on_accept(agent, state, since=before_tools, emit=emit):
+                reason = state.complete_reason
+                break
+        except Exception:  # noqa: BLE001 - never turn a solved run into a crash
+            pass
+
         # Surrender signal: the model has stopped deriving and started looking up
         # someone else's solution. Measured 2026-10-18: 20 of 24 failed runs did
         # this, and none of them recovered -- copying cannot ground a flag in this
@@ -3383,13 +3641,26 @@ async def _solve_impl(
         if _has_marker(cleaned, _FINAL_MARKERS):
             ok, gate_reason, evidence_ids = _completion_gate(state, cleaned)
             if ok and _completion_lock_gate(agent, state):
-                ok = False
-                gate_reason = (
-                    "record your conclusion before finishing: set a LOCK "
-                    "(blackboard_set_lock), confirm key findings "
-                    "(blackboard_add_fact), and close your ANGLES — then "
-                    "declare success again"
-                )
+                if _grounded_finish_allowed(agent, state):
+                    # The flag is already grounded (that gate passed) AND this run
+                    # was cheap enough that its note would carry no angles worth
+                    # a turn: record the conclusion here and let it through.
+                    flag = (extract_flags(cleaned) or [""])[0]
+                    _record_conclusion(
+                        agent,
+                        flag=flag,
+                        evidence_id=evidence_ids[0] if evidence_ids else "",
+                        source="grounded final answer",
+                    )
+                    emit("completed_on_grounded_flag", {"flag": flag})
+                else:
+                    ok = False
+                    gate_reason = (
+                        "record your conclusion before finishing: set a LOCK "
+                        "(blackboard_set_lock), confirm key findings "
+                        "(blackboard_add_fact), and close your ANGLES — then "
+                        "declare success again"
+                    )
             if ok:
                 state.mark_complete(gate_reason, final_answer=cleaned, evidence_ids=evidence_ids)
                 reason = state.complete_reason
