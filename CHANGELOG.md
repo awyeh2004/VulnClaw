@@ -1,4 +1,24 @@
 <details open>
+<summary><strong>Unreleased</strong> — Windows 零安装工具箱（机房不能装东西时的兜底）</summary>
+
+- **背景**：现场赛可能只给机房 Windows PC，不能装软件、不保证有 Python，靶机类型未知。
+- **新增 `scripts/ctf_win_toolbox.ps1`**（只依赖 Windows 自带能力：PowerShell 5.1 + .NET + `tar.exe`）：
+  `info`（魔数/哈希/内嵌签名偏移/PNG IEND 之后追加的数据）、`strings`、`carve`（binwalk 替代，含 ZIP 的 EOCD 修正）、
+  `lsb`（内联 C# 读位面，zsteg 替代）、`tail`、`unpack`（`tar.exe` 解 zip/tar/gz）、`b64`/`hex` 编解码、`scan`。
+- **三个 5.1-only 缺陷是边写边测出来的**（都写进测试，避免在赛场才炸）：`[Convert]::FromHexString` 是 .NET 5+ API（5.1 没有）；
+  函数参数名 `$input` 撞 PowerShell 自动变量（b64/hex 静默无输出）；GIF 魔数写成奇数个十六进制字符会让 `Substring` 抛异常、连累整个 `info`。
+- **`carve` 切 ZIP 曾丢掉 EOCD**（止于下一个签名，而 EOCD `504B0506` 不是新头）→ tar.exe 能容忍、Python `zipfile` 判非法；
+  现在按 EOCD 的注释长度补回。
+- **测试** — `tests/scripts/test_ctf_win_toolbox.py` 5 例（help/info+PNG 尾部/carve 出可读 zip/hex+b64 往返/LSB 读出构造的 flag），
+  实测 subshell 输出是 GBK，测试按多编码回退解码。
+- **配套现场包**（在 `E:ulnclaw\work\capsule\`，不入库）：知识胶囊 5.0MB、命令速查、离线编码转换器（含自动多层解码）、
+  免安装 Python 3.12 + pillow/pycryptodome/requests + 7zr.exe。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 离线「现场知识胶囊」：机房只给浏览器时，把 999 篇知识压成一个 HTML</summary>
 
 - **背景**：2026-11-01 廊坊现场赛必须用机房 PC，VulnClaw 的运行环境（CUDA torch、本地模型、`E:` 盘布局、配置、playbook 库）带不过去；机房常只放行比赛平台。需要一个"不装任何东西、断网也能用"的东西。
