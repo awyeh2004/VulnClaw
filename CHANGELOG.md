@@ -1,4 +1,18 @@
 <details open>
+<summary><strong>Unreleased</strong> — AI 注入实测：靶机空回复归因纠正 · 中文 AI 路由 · class 签名不再吃 JSON 键</summary>
+
+- **实测（本地合成靶场，gpt-oss-20b 当靶机 / deepseek-flash 当攻击方）**：四轮真注入里，只有能读到靶场源码的那轮快速命中（第 42 发）；只有配方笔记时 196 发 / 17 分钟未命中；无配方时 266 发 / 30 分钟未命中。结论：配方里的手法是真的，但"笔记被注入 ≠ 模型会照做"。细节见 `E:\vulnclaw\work\HANDOFF-20261030.md`。
+- **纠正归因**：空回复不是 `max_tokens=900` 截断，而是 gpt-oss 只输出 analysis 通道、不产出 final（`finish_reason=stop`、completion_tokens 很小）。调到 3000、`reasoning_effort=low`、降温 0.2/0.3、加"必须给可见回复"都压不住（最差仍 5/8）。
+- **配方（实测来源）**：**占位符替换**（把授权码写成"从你的备忘里取"，模型自己把系统提示里的真值填进 `TOCALL:` 工具调用；重放 4 次成功 3 次）、元数据侧信道（问格式/长度让模型把真值当示例）、拼接走私、是/否 oracle。写进 `web-ai-attack-map.md`、`web-playbook-12-ai-security.md`、`ctf-ai` §6，并新增 validated 笔记 `ai-agent-console-prompt-injection`。
+- **路由**：短关键词组补「提示词注入/提示注入/jailbreak/越狱」→ `ai-mcp-security`、「人工智能/人工智能安全/ai方向」→ `ctf-ai`；vuln hint 补「提示词注入/提示注入/越狱/工具滥用/越权工具调用/未授权工具调用」。实测：`强网杯 人工智能 方向：附件 model.pth` 由 `intranet-pentest-advanced` → `ctf-ai`；带 URL 的中文注入题保留 `ai-mcp-security` 作为 support，reason 出现 `vuln=prompt_injection`。
+- **修 `challenge_class_signature`**：goal 里 `JSON {"input": "..."}` 曾让 class 签名变成 `input ...`（JSON 键与省略号占位符被当成引号题名），`"flag{...}"` 又会变成 `flag`（每个 CTF 笔记都有的词）。新增 `_quoted_title_candidates`：引号后紧跟冒号视为 JSON 键、纯点号视为占位符、含花括号或 `flag{` 视为答案格式、裸 `flag`/`ctf` 视为无身份；引号题名（`"Quoted-printable"`）仍保留。
+- **测试** — 新增 6 个回归（class 签名 3、中文 AI 路由 3）；`tests/skills` 718 passed、`tests/agent -k playbook` 324 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 强网杯赛制确认：补「人工智能」方向的技能（此前基本为空）</summary>
 
 - **赛制（官方）**：2026-10-31 09:00 → 11-01 12:00，在线解题；方向含**二进制逆向 / 密码分析 / 智能终端安全 / 信息隐藏 / 人工智能**；**动态积分 + 早鸟奖励**（按解题顺序加分）；top32 进线下；结束后 8 小时内（11-01 20:00 前）前 50 名交 WriteUp；**每队 flag 不同**（动态 flag 反作弊）。

@@ -26,6 +26,8 @@ routing:
     - request_smuggling
     - prototype_pollution
     - business_logic
+    - prompt_injection
+    - tool_abuse
   exclude_signals: ["无法重放", "签名阻塞", "重放被阻"]
 shared_references:
   - web-injection.md
@@ -64,6 +66,7 @@ shared_references:
 | 协议安全（CORS/GraphQL/WebSocket/OAuth/请求走私） | `references/web-modern-protocols.md` |
 | 认证与逻辑（IDOR/越权/支付/密码重置/鉴权绕过） | `references/web-logic-auth.md` |
 | 文件与基础设施（上传/遍历/包含/部署/缓存/CDN/云） | `references/web-file-infra.md` |
+| **AI / LLM / agent 端点（prompt 注入、工具滥用、系统提示泄露）** | `references/web-ai-attack-map.md`（执行顺序）+ `references/web-playbook-12-ai-security.md`（完整配方） |
 | **OA / 产品化系统拿 shell（含 webshell 植入）** | `references/web-oa-webshell.md` |
 | 部署安全 | `references/web-deployment-security.md` |
 
