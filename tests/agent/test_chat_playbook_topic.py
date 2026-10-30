@@ -158,3 +158,39 @@ def test_normal_chat_still_offers_tools(monkeypatch):
     asyncio.run(core.chat("看一下这个 target"))
 
     assert captured["offer_tools"] is True
+
+
+# ── attachment work needs chat WITH tools (2026-10-31) ───────────────────
+#
+# Copilot's no-tools rule makes "advice only" true, but an attachment challenge
+# needs the agent to READ the file. The two properties must be separate knobs:
+# VULNCLAW_REPL_NO_AUTO still means "single turn, no auto loop", while
+# VULNCLAW_CHAT_TOOLS=1 restores the tool schemas.
+
+
+def test_chat_tools_switch_restores_tools_in_copilot(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("VULNCLAW_REPL_NO_AUTO", "1")
+    monkeypatch.setenv("VULNCLAW_CHAT_TOOLS", "1")
+    captured = {}
+
+    async def fake_call_llm(agent, system_prompt, *, stream_sink=None, offer_tools=True):
+        captured["offer_tools"] = offer_tools
+        return "read the file"
+
+    monkeypatch.setattr("vulnclaw.agent.core.call_llm", fake_call_llm, raising=True)
+    core = AgentCore(load_config(), None)
+    asyncio.run(core.chat("看看 /root/a.png 里有什么"))
+
+    assert captured["offer_tools"] is True
+
+
+def test_chat_tools_switch_does_not_enable_the_auto_loop(monkeypatch):
+    """NO_AUTO must still win: a paste must not re-enter the autonomous solve loop."""
+    from vulnclaw.agent.core import _chat_tools_allowed, _copilot_pins_target
+
+    monkeypatch.setenv("VULNCLAW_REPL_NO_AUTO", "1")
+    monkeypatch.setenv("VULNCLAW_CHAT_TOOLS", "1")
+    assert _copilot_pins_target() is True
+    assert _chat_tools_allowed() is True

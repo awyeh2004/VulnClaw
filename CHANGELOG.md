@@ -1,4 +1,20 @@
 <details open>
+<summary><strong>Unreleased</strong> — 附件题要「对话 + 能读文件」：把工具开关从副驾里拆出来</summary>
+
+- **问题**：早上把副驾做成"不带工具"是对的（安全、能在网页后跑），但附件题没法用它——`png/zip/pcap` 不能贴进对话。实测（2026-10-31 Kali）：开 `VULNCLAW_REPL_NO_AUTO=1` 后问"读取 /root/attachments/c.txt"，模型自己报告"只有 fetch 与记忆工具，没有 shell 执行能力"，然后去试 `file://`。
+- **修法**：拆成两个独立开关。`VULNCLAW_REPL_NO_AUTO=1` 只管"单轮、不进自主循环、不挖 target"；新增 `VULNCLAW_CHAT_TOOLS=1` 恢复工具 schema。两层都要动：
+  1. `chat()` 的 `offer_tools`；
+  2. `_build_openai_tools()`——工具面原本按目标文本推断，对话里没有 target，推断出来的只是最小集，所以该开关下直接给全量工具面。
+  危险调用的批准仍由 `safety.permission_mode` 决定，这个开关不会绕过它。
+- **新脚本 `deploy/chat_files.sh`**：附件题专用对话入口（单轮 + 带工具 + 注入笔记）。开场自动发一句"你在 Linux，用 bash"——实测不说明时模型会拼 `Get-Content ... if (-not $?)` 在 Kali 上语法报错，而单轮不会自愈。
+- **实测**：`bash chat_files.sh` → 问"读取 /root/attachments/c.txt"，它执行 `cat` → 回 `flag{attachment_chat_ok}`。
+- **测试** — `tests/agent/test_chat_playbook_topic.py` 追加 2 例（开关恢复工具、但不启用自主循环）；全量 `pytest -q -n 4`：**5652 passed / 10 skipped / 0 failed**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 副驾模式真的不带工具了（注释一直这么写，实现没有）</summary>
 
 - **矛盾（实测）**：`core.py` 的注释写着"copilot mode tells the agent not to call tools"，但 `call_llm` 无条件构造工具 schema —— 于是 `echo '怎么取 flag' | bash copilot.sh` 得到的是**被拒绝的 `shell_command`**，不是建议：非交互通道没有审批通道，`handle_tool_calls` 直接 fail，整轮答案被吞掉。

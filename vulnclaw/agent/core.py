@@ -154,6 +154,31 @@ def _chat_topic_query(text: str) -> str:
     return " ".join(dict.fromkeys(hits))
 
 
+def _chat_tools_allowed() -> bool:
+    """``VULNCLAW_CHAT_TOOLS=1`` -> copilot's single-turn chat keeps tool schemas.
+
+    Copilot mode (``VULNCLAW_REPL_NO_AUTO=1``) deliberately offers no tools: that is
+    what makes "advice only" true, and what let the same mode run behind a web form
+    where no approval channel exists. But an ATTACHMENT challenge needs the agent to
+    read the file, which is a tool call -- without this switch the operator's only
+    options were pasting megabytes of binary into the chat or leaving chat entirely.
+
+    The two properties are therefore separate knobs:
+
+    * no auto loop / no target mining  -> ``VULNCLAW_REPL_NO_AUTO``
+    * can the agent actually touch files -> this switch
+
+    Approval of a dangerous call is still decided by ``safety.permission_mode``, so
+    this does not silently grant execution where approvals are set to "ask".
+    """
+    return os.environ.get("VULNCLAW_CHAT_TOOLS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _copilot_pins_target() -> bool:
     """True when the operator pinned the session target (copilot mode).
 
@@ -859,7 +884,7 @@ class AgentCore:
                 self,
                 system_prompt,
                 stream_sink=stream_sink,
-                offer_tools=not _copilot_pins_target(),
+                offer_tools=not _copilot_pins_target() or _chat_tools_allowed(),
             )
             result.output = response_text
 
@@ -1120,6 +1145,13 @@ class AgentCore:
         allowed = _infer_allowed_tools(
             user_input, latest_goal=getattr(self.runtime, "current_goal", "") or ""
         )
+        if _chat_tools_allowed():
+            # 附件对话（VULNCLAW_CHAT_TOOLS=1）：本轮没有 target 可推断，pruning
+            # 只会切出最小集 —— 实测问"读取 /root/attachments/c.txt"时工具面里
+            # 只有 fetch 与记忆工具，模型自己都报告"没有 shell 执行能力"，
+            # 于是只能去试 file:// 而不是 python_execute。这里给全量工具面，
+            # 危险调用的批准仍由 safety.permission_mode 决定。
+            allowed = None
         cfg = getattr(self.config, "subagent", None)
         session_kind = str(
             getattr(getattr(self.context, "state", None), "session_kind", "")
