@@ -170,6 +170,43 @@ def test_signature_carries_the_vulnerability_class():
     assert pb.vulnerability_classes(sig) == {"ssrf"}
 
 
+def test_signature_ignores_json_keys_and_placeholders():
+    """A goal that documents its endpoint must not name the challenge ``input``.
+
+    Measured 2026-10-30 on the local AI-injection sandbox: the goal carried
+    ``JSON {"input": "..."}`` to describe the endpoint, and the class signature
+    came back ``input ...`` -- the JSON key and the ellipsis placeholder were
+    both read as the quoted challenge title. Every such goal carries the same
+    junk pair, so the class key was confidently wrong rather than merely weak.
+    """
+    sig = pb.challenge_class_signature(
+        '目标是一个 AI agent 服务（POST /agent，JSON {"input": "..."}）。'
+        "请做 prompt injection，让目标模型交出 flag。"
+    )
+    tokens = sig.split()
+    assert "input" not in tokens, f"JSON key leaked into signature {sig!r}"
+    assert "..." not in tokens, f"placeholder leaked into signature {sig!r}"
+    # The class itself must still be carried.
+    assert "prompt_injection" in tokens, f"class missing from signature {sig!r}"
+
+
+def test_signature_ignores_a_quoted_flag_format():
+    """``"flag{...}"`` is the answer format, not the challenge name.
+
+    Measured 2026-10-30: it became the class signature ``flag{...}``, whose only
+    usable token is ``flag`` — present in every CTF note, so the class key
+    declared "this is about flag" and separated nothing.
+    """
+    sig = pb.challenge_class_signature("请提交 \"flag{...}\" 格式的答案")
+    assert "flag" not in sig.split(), f"flag format leaked into signature {sig!r}"
+
+
+def test_signature_keeps_a_quoted_title():
+    """The JSON guard must not eat real quoted titles (the reason the rule exists)."""
+    sig = pb.challenge_class_signature('题目是 "Quoted-printable"，请解出 flag。')
+    assert "Quoted-printable" in sig, f"quoted title lost: {sig!r}"
+
+
 def test_note_classes_are_read_from_name_and_slug_not_only_fingerprint(store):
     """The class must come from the note's declared NAME, not only its fingerprint.
 
