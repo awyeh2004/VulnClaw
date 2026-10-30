@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — 离线「现场知识胶囊」：机房只给浏览器时，把 999 篇知识压成一个 HTML</summary>
+
+- **背景**：2026-11-01 廊坊现场赛必须用机房 PC，VulnClaw 的运行环境（CUDA torch、本地模型、`E:` 盘布局、配置、playbook 库）带不过去；机房常只放行比赛平台。需要一个"不装任何东西、断网也能用"的东西。
+- **新增 `scripts/build_field_capsule.py`**：把 `vulnclaw/skills` 与 `~/.vulnclaw/playbooks` 的当前内容压成**单个 HTML**（全内嵌，无 CDN、无 `fetch`——`file://` 下 XHR 会被拦），带全文搜索（`Ctrl+K`）、类型筛选、只看 validated、左侧技能组/高频词跳转。
+- **本次产出**：5.0 MB 单文件，999 篇 = 708 条经验笔记（642 validated）+ 59 个技能 + 224 份参考文档；`node --check` 通过，实测 `blind watermark` / `提示词注入` / `CRC32` / `pickle` 等检索命中合理。
+- **两个静默失败模式已用测试锁住**（`tests/scripts/test_build_field_capsule.py`）：笔记里出现 `</script>` 会提前闭合脚本块（页面"能打开"但没有数据），裸 `</` 同理会截断解析；另一条验证内嵌 payload 仍是合法 JSON 且文档数正常。
+- **附带发现**（写进 `E:\vulnclaw\work\LANGFANG-FIELD-PLAN.md`）：`vulnclaw web` 可用但不适合当"聊天"用——它是**下任务 + SSE 流式回放**（`/api/tasks/run`，target+prompt+options），且**没有附件上传接口**；公网暴露需 token（非 loopback Host 强制鉴权，已实测），但等于把 `python_execute`/`shell_command` 开放到公网，方案里写了轮换与用完即删的做法。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — OCR「读到字 ≠ 读对了」：flag 读坏时自动复核 · 删掉从未工作的 Windows OCR 分支</summary>
 
 - **问题（实测坐实）**：旧逻辑只在「本地引擎一个都没读到字」时才升级到视觉模型。但 OCR 最典型的错误是**字形替换**——真值 `flag{easyocr_ok}` 被 easyocr 读成 `flagleasyccr_ok}`（两处替换 + 丢左括号）。这种串"看着像 flag、平台永远判不过"，却因为"非空"被当成成功结果直接返回，从不复核。这正是"第一个引擎错了怎么办"的答案所在，而不是去做短路。
