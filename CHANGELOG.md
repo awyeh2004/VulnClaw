@@ -1,4 +1,16 @@
 <details open>
+<summary><strong>Unreleased</strong> — 以 <code>/</code> 开头的路径被当成技能名，附件题的问题被吞</summary>
+
+- **实测（2026-10-31，Kali 里的 REPL）**：贴 `"/root/attachments/a.png 里有什么？"` 得到 `Unknown skill: /root/attachments/a.png`，问题被丢掉——而这正是附件题最自然的说法。
+- **根因**：`dispatch_repl_slash` 把以 `/` 开头的行一律按斜杠命令解析，`name` 取第一个空白前的整段（于是成了 `root/attachments/a.png`），查不到技能就报 Unknown skill。
+- **修法**：技能名不可能含 `/` 或 `.`。新增 `_REPL_SLASH_NAME_RE = [A-Za-z0-9][A-Za-z0-9_-]*`，不匹配的行按普通提问交给 agent；`/recon`、`/.md` 等原有行为不变。
+- **测试** — `tests/cli/test_cli.py::test_a_pasted_path_is_a_prompt_not_a_skill`；`tests/cli` 521 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 附件题要「对话 + 能读文件」：把工具开关从副驾里拆出来</summary>
 
 - **问题**：早上把副驾做成"不带工具"是对的（安全、能在网页后跑），但附件题没法用它——`png/zip/pcap` 不能贴进对话。实测（2026-10-31 Kali）：开 `VULNCLAW_REPL_NO_AUTO=1` 后问"读取 /root/attachments/c.txt"，模型自己报告"只有 fetch 与记忆工具，没有 shell 执行能力"，然后去试 `file://`。

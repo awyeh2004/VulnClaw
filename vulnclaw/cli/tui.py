@@ -1168,6 +1168,10 @@ class ReplSlashResult:
     value: str = ""
 
 
+#: A slash command name: letters, digits, underscores, dashes -- never a path.
+_REPL_SLASH_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
 def dispatch_repl_slash(text: str) -> ReplSlashResult:
     """Resolve a ``/`` or ``/.`` line into a request for the classic REPL.
 
@@ -1186,6 +1190,14 @@ def dispatch_repl_slash(text: str) -> ReplSlashResult:
     parts = body.split(maxsplit=1)
     name = parts[0]
     task = parts[1].strip() if len(parts) > 1 else ""
+
+    # A skill name never contains "/" or ".": a line that starts with a PATH is a
+    # prompt, not a command. Measured 2026-10-31 in the Kali REPL: pasting
+    # "/root/attachments/a.png 里有什么" answered "Unknown skill:
+    # /root/attachments/a.png" and silently dropped the question -- exactly the
+    # shape attachment work takes.
+    if not _REPL_SLASH_NAME_RE.fullmatch(name):
+        return ReplSlashResult("run", stripped)
 
     # Built-in REPL commands (/config, /language) take precedence over skills.
     command = _resolve_repl_command(name)
