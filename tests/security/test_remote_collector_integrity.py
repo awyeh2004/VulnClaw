@@ -146,14 +146,23 @@ class TestGeneratedScriptIsParseable:
         unavailable_markers = (
             "execvpe",
             "No such file or directory",
-            "WSL",
+            "wsl",
             "is not recognized",
             "CreateInstance",
             "E_ACCESSDENIED",
             "Bash/Service",
+            # Windows 11 / 中文系统：`bash` 解析到 WSL 中继且没有已安装发行版时，
+            # 它打印 UTF-16LE 的中文提示。原来只认英文标记，于是"环境缺失"被判成
+            # "生成的脚本语法错误"——正是本测试注释要避免的那种假失败（2026-10-30）。
+            "未安装用于 linux",
+            "windows 子系统",
+            "没有已安装的分发",
+            "wsl.exe",
+            "distro",
         )
+        lowered = blob.lower()
         if proc.returncode != 0 and (
-            not blob.strip() or any(m in blob for m in unavailable_markers)
+            not blob.strip() or any(m.lower() in lowered for m in unavailable_markers)
         ):
             pytest.skip(f"{shell[0]} could not be executed here: {blob.strip()[:120]}")
 
