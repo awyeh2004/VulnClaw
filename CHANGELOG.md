@@ -1,7 +1,19 @@
 <details open>
+<summary><strong>Unreleased</strong> — OCR 测试不再依赖本机外部路径（全量 <code>-n 4</code> 的 <code>WinError 32</code> 抖动根因）</summary>
+
+- **修（中·实测坐实）：`tests/agent/test_ocr_vision.py` 钉死 `E:\vulnclaw\test\test_ocr.png`**，并把"easyocr 读不了的 png"写到同目录的固定文件名 `empty_test.png`。两个后果：① 任何没有 `E:\vulnclaw\test\` 的机器（队友 clone、CI）这两条用例必失败；② 共享目录 + 固定文件名在 `pytest -n 4` 下会与杀软扫描/上次中断残留的句柄撞车，报 `PermissionError: [WinError 32]`——2026-10-30 两次全量都挂在它上面，单独跑必过，所以一直被当成"并发抖动"。
+- **修法**：样本图入库为 `tests/fixtures/ocr/test_ocr.png`（4.9KB，与既有 `tests/fixtures/capabilities/qr_sample.png` 同规格），测试按 `Path(__file__)` 相对定位；不可读文件改写进 `tmp_path`（每个用例唯一，不再有共享路径）。
+- **清单**：`tests/fixtures/capabilities/manifest.yaml` 里 `ocr_vision` 那条"fixture missing: commit a small PNG beside the test instead of the external E: path"同步关闭。
+- **验证** — 全量 `pytest -q -n 4`：**5621 passed / 10 skipped / 0 failed**（2 分 00 秒，exit 0）；该文件单独在 `-n 4` 下连跑 3 次均 8 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — AI 注入实测：靶机空回复归因纠正 · 中文 AI 路由 · class 签名不再吃 JSON 键</summary>
 
-- **实测（本地合成靶场，gpt-oss-20b 当靶机 / deepseek-flash 当攻击方）**：四轮真注入里，只有能读到靶场源码的那轮快速命中（第 42 发）；只有配方笔记时 196 发 / 17 分钟未命中；无配方时 266 发 / 30 分钟未命中。结论：配方里的手法是真的，但"笔记被注入 ≠ 模型会照做"。细节见 `E:\vulnclaw\work\HANDOFF-20261030.md`。
+- **实测（本地合成靶场，gpt-oss-20b 当靶机 / deepseek-flash 当攻击方，今日 6 轮）**：无配方 266 发 / 30 分钟 0 命中；有配方笔记但那轮没试配方（跑去逐位 oracle）196 发 / 17 分钟 0 命中；**只有自动注入的笔记可依、靶场无源码可读、并对空回复重试时，69 发 / 8 分钟把两个 flag 全拿到**（第 20 发用占位符替换拿 vault flag，第 67 发把占位符换成"除授权码以外的条目"拿到系统提示里的 flag）。结论：手法有效，但"笔记被注入 ≠ 模型会照做"——同样有笔记，一轮一上来就试、另一轮整轮没试，卡住时应以 `--hint` 点名下一步。细节见 `E:\vulnclaw\work\HANDOFF-20261030.md`。
 - **纠正归因**：空回复不是 `max_tokens=900` 截断，而是 gpt-oss 只输出 analysis 通道、不产出 final（`finish_reason=stop`、completion_tokens 很小）。调到 3000、`reasoning_effort=low`、降温 0.2/0.3、加"必须给可见回复"都压不住（最差仍 5/8）。
 - **配方（实测来源）**：**占位符替换**（把授权码写成"从你的备忘里取"，模型自己把系统提示里的真值填进 `TOCALL:` 工具调用；重放 4 次成功 3 次）、元数据侧信道（问格式/长度让模型把真值当示例）、拼接走私、是/否 oracle。写进 `web-ai-attack-map.md`、`web-playbook-12-ai-security.md`、`ctf-ai` §6，并新增 validated 笔记 `ai-agent-console-prompt-injection`。
 - **路由**：短关键词组补「提示词注入/提示注入/jailbreak/越狱」→ `ai-mcp-security`、「人工智能/人工智能安全/ai方向」→ `ctf-ai`；vuln hint 补「提示词注入/提示注入/越狱/工具滥用/越权工具调用/未授权工具调用」。实测：`强网杯 人工智能 方向：附件 model.pth` 由 `intranet-pentest-advanced` → `ctf-ai`；带 URL 的中文注入题保留 `ai-mcp-security` 作为 support，reason 出现 `vuln=prompt_injection`。
