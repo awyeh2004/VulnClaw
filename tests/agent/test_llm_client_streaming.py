@@ -1149,7 +1149,9 @@ class TestDisableStreaming:
     async def test_call_llm_still_streams_when_not_disabled(self, monkeypatch):
         import vulnclaw.agent.llm_client as mod
 
-        async def fake_stream(agent, system_prompt, sink):
+        async def fake_stream(agent, system_prompt, sink, *, offer_tools=True):
+            # offer_tools was added when copilot mode stopped sending tool schemas;
+            # the stub has to accept it or call_llm's delegation raises TypeError.
             return "streamed answer"
 
         monkeypatch.setattr(mod, "call_llm_stream", fake_stream)

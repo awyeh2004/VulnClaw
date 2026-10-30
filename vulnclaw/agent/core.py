@@ -851,7 +851,16 @@ class AgentCore:
 
         # Call LLM
         try:
-            response_text = await call_llm(self, system_prompt, stream_sink=stream_sink)
+            # Copilot mode offers NO tools: the mode promises "you run the commands,
+            # I judge", and an emitted tool call on a non-interactive channel is
+            # refused for lack of an approval channel -- which swallowed the answer
+            # entirely (measured 2026-10-30). Interactive solve/chat keep tools.
+            response_text = await call_llm(
+                self,
+                system_prompt,
+                stream_sink=stream_sink,
+                offer_tools=not _copilot_pins_target(),
+            )
             result.output = response_text
 
             # Add assistant response to context

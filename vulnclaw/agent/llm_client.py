@@ -1028,8 +1028,17 @@ async def call_llm(
     system_prompt: str,
     *,
     stream_sink: Optional["StreamSink"] = None,
+    offer_tools: bool = True,
 ) -> str:
-    """Call the LLM with the current context and system prompt (single turn)."""
+    """Call the LLM with the current context and system prompt (single turn).
+
+    ``offer_tools=False`` sends the request with NO tool schemas, so the model cannot
+    emit a tool call at all. Copilot mode uses it: that mode promises "advice only, a
+    human runs the commands", and on a non-interactive channel an emitted tool call is
+    refused for lack of an approval channel -- which swallowed the whole answer
+    (measured 2026-10-30: ``echo ... | copilot.sh`` produced a refused ``shell_command``
+    instead of advice).
+    """
     # session.disable_streaming: force the non-streaming path even when a sink
     # is present — added for intermittent SSE hangs between this host and the
     # LLM gateway (streaming stalled with zero tokens for 10-16 min while
@@ -1040,11 +1049,13 @@ async def call_llm(
     if stream_sink is not None and _streaming_disabled(agent):
         stream_sink = None
     if stream_sink is not None:
-        return await call_llm_stream(agent, system_prompt, stream_sink)
+        return await call_llm_stream(
+            agent, system_prompt, stream_sink, offer_tools=offer_tools
+        )
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(agent.context.get_messages())
-    tools = agent._build_openai_tools()
+    tools = agent._build_openai_tools() if offer_tools else []
     messages = _fit_context_window(agent, messages, tools, purpose="single_turn")
 
     kwargs = build_chat_completion_kwargs(agent, messages, tools)
@@ -1432,6 +1443,8 @@ async def call_llm_stream(
     agent: AgentContext,
     system_prompt: str,
     stream_sink: Optional["StreamSink"] = None,
+    *,
+    offer_tools: bool = True,
 ) -> str:
     """Call the LLM with streaming output.
 
@@ -1448,7 +1461,7 @@ async def call_llm_stream(
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(agent.context.get_messages())
-    tools = agent._build_openai_tools()
+    tools = agent._build_openai_tools() if offer_tools else []
     messages = _fit_context_window(agent, messages, tools, purpose="single_turn_stream")
 
     kwargs = build_chat_completion_kwargs(agent, messages, tools)
