@@ -1478,6 +1478,21 @@ class TestClassicReplSlashPalette:
         assert result.kind == "run"
         assert result.text == "Use VulnClaw skill recon. scan the box"
 
+    def test_a_pasted_path_is_a_prompt_not_a_skill(self):
+        """`/root/attachments/a.png 里有什么` must reach the agent, not "Unknown skill".
+
+        Measured 2026-10-31 in the Kali REPL: the line was parsed as skill name
+        "root/attachments/a.png", answered "Unknown skill", and the question was
+        dropped -- which is exactly how attachment work is phrased.
+        """
+        from vulnclaw.cli.tui import dispatch_repl_slash
+
+        line = "/root/attachments/a.png 里有什么？"
+        result = dispatch_repl_slash(line)
+
+        assert result.kind == "run"
+        assert result.text == line
+
     def test_flag_target_sets_target(self):
         from vulnclaw.cli.tui import dispatch_repl_slash
 
