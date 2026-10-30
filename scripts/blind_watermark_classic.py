@@ -127,12 +127,22 @@ def encode(image_path: str, watermark_path: str, out_path: str, *,
         raise SystemExit(f"cannot read {watermark_path}")
 
     h, w = img.shape[:2]
-    rwm = np.zeros(img.shape, dtype=np.float64)
     half = int(h * 0.5)
+    # A grayscale carrier (or watermark) used to crash on ``img.shape[2]``. Match
+    # the watermark to the carrier's channel count so both bands have one shape.
+    if img.ndim == 2:
+        if wm_img.ndim == 3:
+            wm_img = cv2.cvtColor(wm_img, cv2.COLOR_BGR2GRAY)
+        band_shape: tuple[int, ...] = (half, w)
+    else:
+        if wm_img.ndim == 2:
+            wm_img = cv2.cvtColor(wm_img, cv2.COLOR_GRAY2BGR)
+        band_shape = (half, w, img.shape[2])
+    rwm = np.zeros(img.shape, dtype=np.float64)
     rows, cols = _shuffle_pair(seed, half, w, oldseed)
 
     # place the watermark through the permutation, then mirror it
-    hwm = np.zeros((half, w, img.shape[2]), dtype=np.float64)
+    hwm = np.zeros(band_shape, dtype=np.float64)
     hwm2 = np.zeros_like(hwm)
     for i in range(min(wm_img.shape[0], half)):
         for j in range(min(wm_img.shape[1], w)):

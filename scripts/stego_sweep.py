@@ -11,8 +11,10 @@ measured failure mode in this repo is "found a plausible string, declared it the
 flag" (a PDF run reported `pass is air123` for 126 tool calls). One call that
 answers all six at once removes that.
 
-Everything here is local and read-only: it opens the file, never modifies it, and
-writes nothing unless --dump is given.
+Everything here is local and read-only with respect to the INPUT: it opens the
+file and never modifies it. Derived artifacts go to --dump when given; the one
+exception is an audio spectrogram, which is rendered next to the input file so a
+batch run cannot litter the current directory.
 
 Usage
 -----

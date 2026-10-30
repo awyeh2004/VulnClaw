@@ -91,7 +91,11 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("watermarked")
     ap.add_argument("original")
-    ap.add_argument("--out", default=".", help="write candidate PNGs here")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="write candidate PNGs here (default: next to the input, never cwd)",
+    )
     ap.add_argument("--top", type=int, default=6, help="how many candidates to keep")
     args = ap.parse_args(argv)
 
@@ -109,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         scored.append((bimodal, ink, label, image))
     scored.sort(key=lambda row: (-row[0], -row[1]))
 
-    out = Path(args.out)
+    out = Path(args.out) if args.out else wm_path.parent
     out.mkdir(parents=True, exist_ok=True)
     print(f"{'bimodal':>8} {'ink':>6}  label")
     for bimodal, ink, label, _ in scored[:12]:
