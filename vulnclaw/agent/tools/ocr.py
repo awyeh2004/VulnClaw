@@ -13,6 +13,31 @@ if TYPE_CHECKING:
 
 # ── OCR 工具（本地 GPU 加速）────────────────────────────────────────────────────
 
+#: Cached answer for "can easyocr run on this machine's GPU?".
+#: ``torch.cuda.is_available()`` initialises the CUDA context (~0.5 s) and the
+#: answer cannot change inside a process, so it is asked once.
+_CUDA_AVAILABLE: bool | None = None
+
+
+def _cuda_available() -> bool:
+    """Whether a CUDA build of torch with a visible device is importable.
+
+    easyocr is asked for ``gpu=<this>`` instead of a hardcoded ``True``. On a
+    CPU-only torch (teammates' laptops, CI) ``gpu=True`` only makes easyocr print
+    "Neither CUDA nor MPS are available" and fall back to CPU anyway, so the flag
+    costs nothing either way -- but asking torch directly keeps the log honest and
+    lets a future caller distinguish "no GPU here" from "GPU rejected the work".
+    """
+    global _CUDA_AVAILABLE
+    if _CUDA_AVAILABLE is None:
+        try:
+            import torch
+
+            _CUDA_AVAILABLE = bool(torch.cuda.is_available())
+        except Exception:
+            _CUDA_AVAILABLE = False
+    return _CUDA_AVAILABLE
+
 
 def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
     """Run easyocr on the image, reusing a process-wide cached Reader to avoid
@@ -28,7 +53,7 @@ def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
         with _OCR_READER_LOCK:
             reader = _OCR_READER_CACHE.get(key)
             if reader is None:
-                reader = easyocr_module.Reader([lang], gpu=True)
+                reader = easyocr_module.Reader([lang], gpu=_cuda_available())
                 _OCR_READER_CACHE[key] = reader
     chunks = reader.readtext(image_path, detail=0)
     return " ".join(chunk for chunk in chunks if chunk)

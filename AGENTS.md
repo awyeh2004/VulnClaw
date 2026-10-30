@@ -159,3 +159,27 @@ stall guard 的动作是**交还给人**（`waiting for user input`），不是�
 - `.test-tmp/` 随测试增长，磁盘紧张时 `rm -rf .test-tmp`，测试会重建。
 - `.ir-tools/` 是本地取证工具包（已 gitignore），**不要删**——应急响应题依赖它。
 - 并发下偶发 OCR / token-provider 类测试抖动；见到失败先单独重跑，再判断是否真回归。
+  **2026-10-30 校正**：OCR 那条抖动的真因是测试钉死外部路径
+  `E:\vulnclaw\test\`（已改为 `tests/fixtures/ocr/` + `tmp_path`），不是并发本身。
+
+### 6.1 easyocr 走 GPU 的前提（只影响速度，不影响功能）
+
+`execute_ocr` 会先问 `torch.cuda.is_available()` 再决定 easyocr 用不用 GPU，
+所以**不需要任何配置**：
+
+| 机器 | torch 构建 | 效果 |
+|---|---|---|
+| 有 NVIDIA 卡 | `torch==2.11.0+cu128` 等 CUDA 版 | 1440×900 截图约 1.4s，占显存约 0.5 GB |
+| 没卡 / 装了 CPU 版 | `torch==...+cpu` | 同一张图约 4.8s；easyocr 自动退 CPU，不报错 |
+
+换 CUDA 版的命令（Windows，注意别让 pip 顺手升级 numpy）：
+
+```bash
+python -m pip install --no-deps --index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.11.0+cu128 torchvision==0.26.0+cu128
+```
+
+官方 CDN 在本机只有 ~0.4 MB/s；国内镜像 `mirrors.aliyun.com/pytorch-wheels/cu128/`
+约 0.4 MB/s、`mirror.sjtu.edu.cn/pytorch-wheels/cu128/` 约 2 MB/s，多连接分段下载
+可到 ~9 MB/s（实测脚本见 `E:\vulnclaw\tmp\dlw.py`）。
+

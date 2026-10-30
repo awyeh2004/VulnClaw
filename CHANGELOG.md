@@ -1,4 +1,18 @@
 <details open>
+<summary><strong>Unreleased</strong> — easyocr 真正吃到 GPU（torch 是 +cpu 构建）· 无 GPU 机器自动退 CPU</summary>
+
+- **根因（实测）**：`torch` 装的是 `2.11.0+cpu`，`torch.cuda.is_available()` 为 False，所以 easyocr 一直在 CPU 上跑——它在日志里只打印一行 `Neither CUDA nor MPS are available`，不报错，于是"GPU 加速"的注释与实际行为脱节了三个月没人发现。同机实测 1440×900 截图 **4.76 s**。
+- **环境**：改装 `torch==2.11.0+cu128` + `torchvision==0.26.0+cu128`（版本号与原来一致，只换构建），`--no-deps` 安装以免顺手升级 numpy——`numpy` 仍是 1.26.4。同机同一张图降到 **1.39–1.64 s（约 3×）**，显存占用约 0.47 GB（留得住：easyocr + 8 GB 的本地 LLM 可共存）。
+- **代码**：`execute_ocr` 不再硬写 `gpu=True`，改问 `torch.cuda.is_available()`（进程内缓存，CUDA 上下文只初始化一次）。队友的无 N 卡机器 → `gpu=False` 直接走 CPU，不再打误导性警告；有卡但装的是 CPU 版 torch 同样安全。
+- **量到的其它数字**：`import torch` + 首次 CUDA 检查 2.4 s（easyocr 本来就会 import torch，故实际不额外付费）；`Reader` 初始化 1.4–1.6 s 且进程内缓存；小图 300×50 热调用 0.04–0.10 s。
+- **文档**：`AGENTS.md` 补 §6.1（有无 GPU 的行为对照 + 换 CUDA 版的命令 + 镜像速度实测），并把"并发偶发 OCR 抖动"那条校正为真因——外部路径 `E:\vulnclaw\test\`，不是并发本身。
+- **验证** — 全量 `pytest -q -n 4`：**5621 passed / 10 skipped / 0 failed**（2 分 11 秒，比之前快约一倍）；`easyocr` 模型显式落在 `cuda:0`。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — OCR 测试不再依赖本机外部路径（全量 <code>-n 4</code> 的 <code>WinError 32</code> 抖动根因）</summary>
 
 - **修（中·实测坐实）：`tests/agent/test_ocr_vision.py` 钉死 `E:\vulnclaw\test\test_ocr.png`**，并把"easyocr 读不了的 png"写到同目录的固定文件名 `empty_test.png`。两个后果：① 任何没有 `E:\vulnclaw\test\` 的机器（队友 clone、CI）这两条用例必失败；② 共享目录 + 固定文件名在 `pytest -n 4` 下会与杀软扫描/上次中断残留的句柄撞车，报 `PermissionError: [WinError 32]`——2026-10-30 两次全量都挂在它上面，单独跑必过，所以一直被当成"并发抖动"。
