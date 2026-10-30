@@ -1,11 +1,10 @@
-"""Local OCR tool (easyocr / pytesseract / Windows.Media.Ocr) + vision-LLM fallback."""
+"""Local OCR tool (easyocr / pytesseract) + vision-LLM fallback."""
 
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING, Any
-
-from vulnclaw.agent.tools.subprocess_util import run_subprocess_capture
 
 if TYPE_CHECKING:
     from vulnclaw.agent.agent_context import AgentContext
@@ -39,6 +38,35 @@ def _cuda_available() -> bool:
     return _CUDA_AVAILABLE
 
 
+#: A complete flag-shaped token: a word-ish prefix, balanced braces, printable body.
+#: Spaces inside the braces are allowed on purpose -- OCR inserts them
+#: (``DASCTF{test_ 123}`` is a real read of ``DASCTF{test_123}``), and treating
+#: that as "mangled" would escalate to the vision model on every such read.
+_FLAG_COMPLETE_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]{1,15})\{[^{}\n]{2,}\}")
+
+#: A *failed attempt* at a flag token: the word is glued straight onto a brace or
+#: onto more word characters before any brace appears -- ``flagleasyccr_ok}``
+#: (dropped brace) or ``flag{easyocr_ok`` (missing close). Prose mentions
+#: ("submit the flag") have a separator after the word and must NOT match.
+_FLAG_ATTEMPT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(flag|ctf|dasctf|ctf2|qwb)[A-Za-z0-9_{}]", re.IGNORECASE
+)
+
+
+def _flag_read_is_suspect(reads: list[str]) -> bool:
+    """True when a local engine read something flag-shaped but not flag-valid.
+
+    This is the "the first engine answered, but the answer may be wrong" case that
+    a short-circuit would silently lose. Measured 2026-10-30: easyocr read the
+    synthetic truth ``flag{easyocr_ok}`` as ``flagleasyccr_ok}`` -- two glyph
+    substitutions plus a dropped brace. That string is a plausible flag to a
+    model, fails every platform's judge, and used to be returned as a success.
+    """
+    if any(_FLAG_COMPLETE_RE.search(text) for text in reads):
+        return False
+    return any(_FLAG_ATTEMPT_RE.search(text) for text in reads)
+
+
 def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
     """Run easyocr on the image, reusing a process-wide cached Reader to avoid
     reloading the model on every call (GPU warm-up dominates single-shot cost)."""
@@ -60,18 +88,26 @@ def _ocr_with_cached_reader(easyocr_module, image_path: str, lang: str) -> str:
 
 
 def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
-    """本地 OCR：优先 easyocr（GPU 加速），降级到 pytesseract/Windows.Media.Ocr，
-    全部失败时可选降级到 vision LLM 理解图片。
+    """本地 OCR：优先 easyocr（GPU 加速），可选 pytesseract，必要时用 vision LLM 复核。
 
-    完全本地运行，无需外部 API。easyocr reader 进程内缓存复用，避免重复加载模型。
+    easyocr reader 进程内缓存复用，避免重复加载模型。
+
+    两个降级条件（都只在 ``method="auto"`` 下生效）：
+
+    * 本地引擎**一个都没读到字** → 交给 vision LLM；
+    * 本地读到的字**看起来是 flag 但格式不合法**（缺花括号 / 前缀被粘连成
+      ``flagleasyccr_ok}``）→ 也交给 vision LLM 复核。这条是"有输出 ≠ 读对了"的
+      落地：OCR 的典型错误是字形替换（0/O、l/1、{/l），而这种错误恰好会把 flag
+      读成一个**看着像却永远提交不通过**的串。以前只在"完全读不到"时才升级，
+      于是一个被读坏的 flag 会被当成成功结果返回。
 
     Args:
         agent: Agent 上下文
         args: {"image_path": str, "method": str, "lang": str, "use_llm": bool, "prompt": str}
             - image_path: 图片路径（必需）
-            - method: "auto"（默认）/"easyocr"/"pytesseract"/"windows"/"llm"
+            - method: "auto"（默认）/"easyocr"/"pytesseract"/"llm"
             - lang: 语言代码，默认 "en"（easyocr 支持 "ch_sim" 中文）
-            - use_llm: 本地 OCR 全部失败时是否降级到 vision LLM（默认 true）
+            - use_llm: 本地读不到、或读出的 flag 可疑时，是否用 vision LLM 复核（默认 true）
             - prompt: 覆盖 vision LLM 的默认“提取文字”指令。图形类题目（波形/频谱/
               二维码画出来的字）要传一句“描述这张图里画了什么、有没有字形”，否则
               模型只会找印刷体字符并回空。
@@ -95,7 +131,10 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
         return f"[+] vision-llm: {vision}" if vision else "[!] vision LLM OCR failed or no credentials"
     
     results = []
-    
+    # Text each local engine actually read (no caveat suffix): the flag-plausibility
+    # check below must look at the read, not at this module's own prose.
+    local_reads: list[str] = []
+
     # 尝试 easyocr（推荐，GPU 加速；进程内缓存 reader）
     if method in {"auto", "easyocr"}:
         try:
@@ -106,6 +145,7 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
             try:
                 text = _ocr_with_cached_reader(_easyocr, image_path, lang)
                 if text.strip():
+                    local_reads.append(text)
                     # NOTE (2026-10-19): this used to report a "confidence" computed as
                     # the share of alphabetic characters in the output. That is not a
                     # confidence -- it says nothing about whether the model read the
@@ -125,7 +165,7 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
                         return "\n".join(results)
             except Exception as e:
                 results.append(f"[!] easyocr failed: {str(e)[:100]}")
-    
+
     # 尝试 pytesseract
     if method in {"auto", "pytesseract"}:
         try:
@@ -134,41 +174,38 @@ def execute_ocr(agent: AgentContext, args: dict[str, Any]) -> str:
             img = Image.open(image_path)
             text = pytesseract.image_to_string(img, lang=lang).strip()
             if text:
+                local_reads.append(text)
                 results.append(f"[+] pytesseract: {text}")
                 if method == "pytesseract":
                     return "\n".join(results)
         except Exception as e:
             results.append(f"[!] pytesseract failed: {str(e)[:100]}")
     
-    # 尝试 Windows.Media.Ocr（Windows 10/11 原生）
-    if method in {"auto", "windows"}:
-        try:
-            ps_code = f"""
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime] | Out-Null
-$null=[Windows.ApplicationModel.Core.CoreApplication,Windows.ApplicationModel.Core,ContentType=WindowsRuntime] | Out-Null
-$b=[Windows.Storage.StorageFile]::GetFileFromPathAsync('{image_path.replace(chr(92), chr(92)*2)}')
-$r=await $b
-$e=[Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-$a=await $e.RecognizeAsync($r)
-$a.Text
-"""
-            result = run_subprocess_capture(
-                ["powershell", "-Command", ps_code],
-                timeout=10,
-                errors="replace",
-            )
-            if result["success"] and result["stdout"].strip():
-                results.append(f"[+] Windows OCR: {result['stdout'].strip()}")
-        except Exception as e:
-            results.append(f"[!] Windows OCR failed: {str(e)[:100]}")
-    
-    # 本地 OCR 全部无结果时, 降级到 vision LLM 理解图片内容
-    if use_llm and not any(r.startswith("[+]") for r in results):
+    # Windows.Media.Ocr 分支已删除（2026-10-30 实测）：它用 `await $b`，而
+    # PowerShell 5.1 没有 await 关键字（`await : 无法将"await"项识别为 cmdlet`），
+    # 所以它**从未产出过任何文本**，只花 0.2–0.4 s（PowerShell 启动），并且失败时
+    # 连 `[!]` 行都不写，静默得像"这台机器没有第二个引擎"。真要用 WinRT 得走
+    # `[System.WindowsRuntimeSystemExtensions]` 的 AsTask 反射 + BitmapDecoder
+    # 解成 SoftwareBitmap；本机实测只有 ja / zh-Hans-CN 两个 OCR 包（无 en-US），
+    # 读 ASCII flag 会得到 `password` -> `囚 氛 vord` 这种结果，作为第二个意见不可信。
+    # 需要时按上述两条注意点重建，别直接抄原来的 await 写法。
+
+    # 本地引擎给出结果时也要判断"读得对不对"：OCR 最典型的错误是字形替换
+    # （0/O、l/1、{/l），恰好把 flag 读成"看着像、提交不通过"的串。
+    suspect = _flag_read_is_suspect(local_reads)
+
+    # 本地全部无结果、或读出的 flag 可疑时，降级到 vision LLM 复核
+    if use_llm and (not any(r.startswith("[+]") for r in results) or suspect):
         vision = _ocr_via_vision_llm(image_path, prompt)
         if vision:
-            results.append(f"[+] vision-llm: {vision}")
-            if method in {"auto", "easyocr", "pytesseract", "windows"}:
+            note = (
+                " (cross-check: the local read looks like a mangled flag — "
+                "glyph substitutions drop or move braces; prefer this reading)"
+                if suspect
+                else ""
+            )
+            results.append(f"[+] vision-llm{note}: {vision}")
+            if method in {"auto", "easyocr", "pytesseract"}:
                 return "\n".join(results)
     
     if not results:

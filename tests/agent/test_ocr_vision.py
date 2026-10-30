@@ -201,3 +201,69 @@ def test_ocr_does_not_report_a_fake_confidence(fake_deepseek_config):
     assert "confidence=" not in out, out
     assert "no confidence score" in out, out
     assert "lookalike glyphs" in out, out
+
+
+# ── 「读到字」不等于「读对了」：flag 读坏时必须二次复核（2026-10-30） ──────────
+#
+# 实测真值 flag{easyocr_ok} 被 easyocr 读成 flagleasyccr_ok}（两处字形替换 + 丢花
+# 括号）。旧逻辑只在「本地一个引擎都没读到字」时才升级到视觉模型，于是这种读坏的串
+# 会被当成成功结果返回——看着像 flag、平台永远判不过。下面两条锁住新行为：格式可疑
+# 的 flag 一定复核，格式完整的 flag 不复核（否则每张图都多打一次云端）。
+
+
+@pytest.mark.parametrize(
+    "text,suspect",
+    [
+        ("flag{easyocr_ok}", False),          # 完整：不升级
+        ("DASCTF{test_ 123}", False),         # 括号内空格是 OCR 的常态，仍算完整
+        ("flagleasyccr_ok}", True),           # 丢左括号 + 字形替换
+        ("flag{easyocr_ok", True),            # 丢右括号
+        ("submit the flag", False),           # 散文里提到 flag，不该触发
+        ("password=hunter2", False),          # 普通文本
+    ],
+)
+def test_flag_suspicion_heuristic(text, suspect):
+    from vulnclaw.agent.tools.ocr import _flag_read_is_suspect
+
+    assert _flag_read_is_suspect([text]) is suspect, text
+
+
+def test_auto_escalates_when_the_local_read_is_a_mangled_flag(monkeypatch):
+    from vulnclaw.agent.tools import ocr as ocr_mod
+
+    monkeypatch.setattr(ocr_mod, "_ocr_with_cached_reader",
+                        lambda *a, **k: "flagleasyccr_ok}")
+    called = {}
+
+    def fake_vision(path, prompt=None):
+        called["n"] = called.get("n", 0) + 1
+        return "flag{easyocr_ok}"
+
+    monkeypatch.setattr(ocr_mod, "_ocr_via_vision_llm", fake_vision)
+
+    class _Agent:
+        pass
+
+    out = ocr_mod.execute_ocr(_Agent(), {"image_path": TEST_IMG, "method": "auto"})
+    assert called.get("n") == 1, "a mangled flag read must trigger a cross-check"
+    assert "cross-check" in out, out
+    assert "flag{easyocr_ok}" in out, out
+
+
+def test_auto_does_not_escalate_on_a_clean_flag_read(monkeypatch):
+    from vulnclaw.agent.tools import ocr as ocr_mod
+
+    monkeypatch.setattr(ocr_mod, "_ocr_with_cached_reader",
+                        lambda *a, **k: "flag{easyocr_ok}")
+
+    def boom(path, prompt=None):
+        raise AssertionError("clean read must not call the vision model")
+
+    monkeypatch.setattr(ocr_mod, "_ocr_via_vision_llm", boom)
+
+    class _Agent:
+        pass
+
+    out = ocr_mod.execute_ocr(_Agent(), {"image_path": TEST_IMG, "method": "auto"})
+    assert "easyocr" in out, out
+    assert "cross-check" not in out, out
