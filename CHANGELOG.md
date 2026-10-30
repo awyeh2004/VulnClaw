@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — 副驾模式拿不到经验库（708 条笔记在最需要它的场景里不可达）</summary>
+
+- **实测坐实（2026-10-30，机房只给终端那种场景）**：`VULNCLAW_CHAT_PLAYBOOKS=1` 打开后，副驾仍拿不到笔记。四个典型提问（盲水印 / `[隐写]` / CRC32 压缩包 / usb.capdata 鼠标）全部 `matches=0`：`_chat_playbook_brief` 只用「target 指纹」和「操作员显式标签」构造查询，而副驾没有 target、普通提问也没有 `[标签]` —— `queries` 为空直接返回。显式 `[隐写]` 也不行：单 token 查询过不了重叠门槛。
+- **修法**：新增封闭词表 `_CHAT_TOPIC_HINTS`（21 组技术名 → 多 token 查询），只认操作员**说出的技术名词**，粘贴内容无法凭空造出 topic（这正是 2026-10-10 ransomware 误命中的成因）。ASCII needle 加词边界（`lsb` 不会在别的词里触发）。
+- **draft 放开（仅聊天路径）**：`_lookup_prior_playbooks(validated_only=...)` 默认仍为 True（solve 循环保持"注入的笔记都验证过"这条保证）；聊天路径传 False，因为简报会逐条标 ✅/📝，且实测 top1 命中就是 draft（"CRC32 压缩包怎么爆破" → `zip-password-attack-and-crc32-collision` 0.700 被过滤）。
+- **效果（同一台 ECS 实测）**：修前 `盲水印…` 得到通用 FFT 解法（我们验证过复现不了）；修后直接给出 `python blind_watermark_classic.py decode blind2.png blind1.png out.png` + 判据（哪个方向出字/出噪），即那条 validated 笔记的内容。闲聊（"今天天气不错"）仍 0 命中。
+- **测试** — 新增 `tests/agent/test_chat_playbook_topic.py` 12 例（词表命中、闲聊不出题、ASCII 词边界、无 target 也能召回、draft 可见、闲聊不注入）；`tests/agent -k "playbook or chat"` 333 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — Windows 零安装工具箱（机房不能装东西时的兜底）</summary>
 
 - **背景**：现场赛可能只给机房 Windows PC，不能装软件、不保证有 Python，靶机类型未知。

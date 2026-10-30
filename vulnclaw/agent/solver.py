@@ -1635,12 +1635,21 @@ def _accepts_out_blocked(func: Any) -> bool:
         return True
 
 
-def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
+def _lookup_prior_playbooks(
+    queries: list[tuple[str, str]], *, validated_only: bool = True
+) -> tuple[list[dict], list[dict]]:
     """Run the merged lookup, returning ``(matches, rows the overlap floor withheld)``.
 
     The withheld rows are returned rather than dropped so the run log can name them:
     the floor deliberately costs recall, and a recall cost nobody can see turns into
     "why was nothing injected for this challenge" with no way to answer it later.
+
+    ``validated_only`` defaults to True -- the solve loop's guarantee that an injected
+    note has been proven on a real challenge. The copilot chat path passes False: its
+    brief prints the ✅/📝 status on every note and a human is reading it, while the
+    validated-only filter measurably hid the top hit for real questions (2026-10-30:
+    "CRC32 压缩包怎么爆破" ranked ``zip-password-attack-and-crc32-collision`` at 0.700
+    and dropped it because that note is a draft).
     """
     from vulnclaw.agent.playbook import lookup_playbook_multi
 
@@ -1652,7 +1661,7 @@ def _lookup_prior_playbooks(queries: list[tuple[str, str]]) -> tuple[list[dict],
     if "out_blocked" in parameters:
         kwargs["out_blocked"] = gated
     if "validated_only" in parameters:
-        kwargs["validated_only"] = True
+        kwargs["validated_only"] = validated_only
     matches = lookup_playbook_multi(queries, **kwargs)
     return matches, gated
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,76 @@ def _chat_playbook_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+#: Closed vocabulary for the copilot lookup's *topic* key.
+#:
+#: Why it exists (measured 2026-10-30, on a console-only rehearsal): in copilot mode the
+#: operator has no pinned target and usually writes a plain question ("两张图看着一样，
+#: 怎么取 flag？"). ``_chat_playbook_brief`` built its queries from the target fingerprint
+#: and from operator-declared labels only, so ``queries`` was empty and the 708-note
+#: library was unreachable in exactly the mode it exists for -- four typical questions
+#: (盲水印 / [隐写] / CRC32 / usb.capdata) all returned ``matches=0``. An explicit
+#: ``[隐写]`` label did not help either: one token fails the lookup's overlap floor.
+#:
+#: Each row maps a technique the operator NAMES to a multi-token query. The fixed list is
+#: deliberate: the 2026-10-10 failure came from letting arbitrary tokens of a pasted
+#: terminal dump become the query (a ransomware paste pulled RCE notes), and a closed
+#: vocabulary cannot do that -- a paste contributes only phrases somebody wrote here.
+_CHAT_TOPIC_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("盲水印", "blind watermark", "bwm"), "盲水印 blind watermark DFT fft 镜像 置换 频谱"),
+    (("lsb", "最低有效位", "隐写"), "LSB 隐写 隐写术 steganography 最低有效位"),
+    (("频谱", "声谱", "spectrogram", "音频隐写"), "频谱 spectrogram 声谱 音频 频率"),
+    (("usb.capdata", "鼠标流量", "usb hid"), "usb.capdata HID 鼠标 坐标 键盘 流量分析"),
+    (("crc32", "压缩包密码", "zip 密码"), "CRC32 压缩包 zip 密码 字典 爆破 已知明文"),
+    (("pickle", "反序列化", "deserial"), "pickle 反序列化 deserialization"),
+    (("ssti", "模板注入"), "SSTI 模板注入 template injection"),
+    (("sql注入", "sqli", "sql 注入"), "SQL 注入 sqli 盲注 boolean"),
+    (("jwt",), "JWT none 算法 伪造 密钥"),
+    (("rsa", "大数分解"), "RSA 分解 共模 低指数 广播"),
+    (("aes", "分组密码"), "AES CBC 分组 填充 模式"),
+    (("提权", "suid"), "提权 suid sudo 内核 计划任务"),
+    (("webshell", "哥斯拉", "冰蝎"), "webshell 哥斯拉 冰蝎 流量 解密"),
+    (("内存取证", "volatility"), "内存取证 volatility 内存镜像 进程"),
+    (("磁盘取证", "分区表", "文件系统"), "磁盘取证 分区 ext4 恢复 文件系统"),
+    (("二维码", "qrcode"), "二维码 QR 解码 扫描"),
+    (("png 修复", "图片修复", "宽高"), "PNG 宽高 CRC 修复 结构 图片"),
+    (("提示词注入", "prompt injection", "越狱"), "prompt injection 提示词注入 系统提示 工具调用"),
+    (("ssrf",), "SSRF 内网 元数据 请求伪造"),
+    (("xxe",), "XXE 外部实体 文件读取"),
+    (("容器逃逸", "docker 逃逸"), "容器逃逸 docker 特权 挂载"),
+)
+
+_ASCII_NEEDLE_RE = {
+    needle: re.compile(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])")
+    for needles, _ in _CHAT_TOPIC_HINTS
+    for needle in needles
+    if needle.isascii()
+}
+
+
+def _chat_topic_query(text: str) -> str:
+    """Multi-token lookup phrase for the technique(s) the operator named, or ``""``.
+
+    ASCII needles are word-bounded (``lsb`` must not fire inside another word); CJK ones
+    are plain substrings. The result is a joined phrase so the lookup has enough tokens to
+    clear its overlap floor -- that floor is why a single ``[隐写]`` label returned nothing.
+    """
+    low = (text or "").lower()
+    if not low:
+        return ""
+    hits: list[str] = []
+    for needles, phrase in _CHAT_TOPIC_HINTS:
+        for needle in needles:
+            matched = (
+                bool(_ASCII_NEEDLE_RE[needle].search(low))
+                if needle.isascii()
+                else needle in low
+            )
+            if matched:
+                hits.append(phrase)
+                break
+    return " ".join(dict.fromkeys(hits))
 
 
 def _copilot_pins_target() -> bool:
@@ -684,9 +755,17 @@ class AgentCore:
                 labels = ""
             if labels:
                 queries.append(("class", labels))
+            # Copilot has no target and rarely an explicit label, so without this the
+            # library is unreachable exactly where it matters (see _CHAT_TOPIC_HINTS).
+            topic = _chat_topic_query(goal)
+            if topic:
+                queries.append(("topic", topic))
             if not queries:
                 return "", []
-            matches, _gated = _lookup_prior_playbooks(queries)
+            # Drafts included: this brief prints ✅/📝 per note and a human reads it,
+            # and the validated-only filter measurably dropped the top hit for a real
+            # question (2026-10-30, see solver._lookup_prior_playbooks).
+            matches, _gated = _lookup_prior_playbooks(queries, validated_only=False)
         except Exception:
             return "", []
         if not matches:
