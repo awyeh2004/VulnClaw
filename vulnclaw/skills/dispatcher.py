@@ -31,6 +31,10 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "认证漏洞|逻辑漏洞|越权|idor|支付逻辑|文件上传|路径穿越|authentication flaw|logic flaw|authorization bypass|payment logic|file upload|path traversal": ["web-security-advanced"],
     "ai安全|mcp安全|prompt注入|工具滥用|agent安全|模型安全": ["ai-mcp-security"],
     "ai渗透|大模型安全|llm安全|prompt injection|tool abuse": ["ai-mcp-security"],
+    # 中文赛题写「提示词注入」，不是「prompt注入」。2026-10-30 实测：库里只有后者，
+    # 中文题面的注入题因此只落到 web-security-advanced（带 URL 时它靠 target=web
+    # 的 typed 权重 3.0 压过一切）。短组保持单次命中分值高：1/4*1.5 = 0.38。
+    "提示词注入|提示注入|jailbreak|越狱": ["ai-mcp-security"],
     # NOTE: this line used to contain a bare "数据泄露", which stole real
     # incident-response queries -- measured: "客户数据泄露了" resolved to
     # ai-mcp-security (conf 0.17) instead of incident-response, because a bare
@@ -126,6 +130,9 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     # 模型逆向的内容（关键词命中里绝大多数是误中）。短组保持单次命中分值够高。
     "对抗样本|adversarial|fgsm|pgd攻击|模型逆向|模型窃取|成员推断|触发词": ["ctf-ai"],
     "onnx|pytorch|pth模型|权重文件|机器学习模型|神经网络模型|模型文件|模型后门": ["ctf-ai"],
+    # 题面往往只写方向名。2026-10-30 实测："强网杯 人工智能 方向：附件 model.pth"
+    # 原本落到 intranet-pentest-advanced（keywords:0.21）；补这一短组后 → ctf-ai。
+    "人工智能|人工智能安全|ai方向": ["ctf-ai"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],

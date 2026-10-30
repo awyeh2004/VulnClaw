@@ -47,6 +47,16 @@ _VULN_HINT_KEYWORDS: dict[str, str] = {
     "认证绕过": "auth_bypass",
     "prompt注入": "prompt_injection",
     "prompt injection": "prompt_injection",
+    # 中文题面几乎不写 "prompt injection"，写「提示词注入」/「提示注入」/「越狱」。
+    # 不加这几条，vuln hint 为空，AI 注入题就只剩 target=web 这一条信号（2026-10-30）。
+    "提示词注入": "prompt_injection",
+    "提示注入": "prompt_injection",
+    "越狱": "prompt_injection",
+    "工具滥用": "tool_abuse",
+    # 赛题实际写「越权工具调用」（2026-10-30 本地靶场 goal 原文），不写「工具滥用」；
+    # 没有这条时整句只剩 `越权`→idor，AI 目标被当成普通越权 Web 题。
+    "越权工具调用": "tool_abuse",
+    "未授权工具调用": "tool_abuse",
     "提权": "privilege_escalation",
     "横向": "lateral_movement",
 }

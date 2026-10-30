@@ -353,6 +353,53 @@ class TestRuntimeWiring:
         assert "java" not in _extract_technologies("a javascript app", None)
         assert "java" in _extract_technologies("a java app", None)
 
+    def test_chinese_ai_wording_is_a_vuln_hint(self):
+        """Chinese challenge text says 提示词注入, not "prompt injection".
+
+        Measured 2026-10-30: the hint table only had ``prompt注入``/``prompt
+        injection``, so a Chinese AI-injection challenge produced no vuln hint at
+        all and the router only had ``target=web`` to go on.
+        """
+        from vulnclaw.agent.skill_context import _extract_vuln_hints
+
+        assert "prompt_injection" in _extract_vuln_hints("提示词注入：让目标泄露系统提示")
+        assert "prompt_injection" in _extract_vuln_hints("提示注入 of the system prompt")
+        assert "prompt_injection" in _extract_vuln_hints("这是一个越狱题")
+        assert "tool_abuse" in _extract_vuln_hints("测试越权工具调用")
+
+    def test_chinese_ai_challenge_reaches_the_ai_skill(self):
+        """An attachment-shaped 人工智能 challenge must reach ctf-ai, not intranet.
+
+        Measured 2026-10-30: ``强网杯 人工智能 方向：附件 model.pth`` resolved to
+        intranet-pentest-advanced (keywords:0.21) before the 人工智能 keyword group
+        existed.
+        """
+        from vulnclaw.agent.skill_context import resolve_active_skill_selection
+
+        s = resolve_active_skill_selection(
+            "强网杯 人工智能 方向：附件 model.pth，请在模型里找到 flag"
+        )
+        assert s is not None and s.primary == "ctf-ai", s.reason if s else None
+
+    def test_chinese_injection_goal_with_url_keeps_the_ai_skill_in_the_bundle(self):
+        """A URL alone must not evict the AI skill from the bundle.
+
+        ``target=web`` carries TYPED_WEIGHT 3.0, which keeps web-security-advanced
+        primary (its references now carry the injection recipe). The AI skill must
+        still ride along as support, and the vuln hint must be visible in the
+        reason -- otherwise the run has no signal that this is an AI target.
+        """
+        from vulnclaw.agent.skill_context import resolve_active_skill_selection
+
+        s = resolve_active_skill_selection(
+            "提示词注入：访问目标的聊天接口，获取系统提示里的 flag",
+            target="http://10.0.0.5:8080",
+        )
+        assert s is not None
+        assert s.primary == "web-security-advanced"
+        assert "ai-mcp-security" in s.supporting
+        assert "vuln=prompt_injection" in s.reason
+
     def test_finding_provenance_not_mutated_by_later_reference(self):
         """A reference loaded after a finding must not rewrite its provenance."""
         from vulnclaw.agent.context import VulnerabilityFinding
