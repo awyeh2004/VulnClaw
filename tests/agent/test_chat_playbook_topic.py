@@ -115,3 +115,46 @@ def test_chat_brief_stays_silent_for_a_chatty_message(store):
     brief, matches = core._chat_playbook_brief("", "今天天气不错，随便聊聊")
 
     assert matches == [] and brief == ""
+
+
+# ── copilot mode offers no tools at all (2026-10-30) ─────────────────────
+#
+# The docstring always claimed "copilot mode tells the agent not to call tools", but
+# `call_llm` built the tool schemas regardless: piping a question into copilot.sh
+# produced a refused `shell_command` instead of advice, because a non-interactive
+# channel has no approval channel. These pin both directions.
+
+
+def test_copilot_chat_offers_no_tools(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("VULNCLAW_REPL_NO_AUTO", "1")
+    captured = {}
+
+    async def fake_call_llm(agent, system_prompt, *, stream_sink=None, offer_tools=True):
+        captured["offer_tools"] = offer_tools
+        return "advice only"
+
+    monkeypatch.setattr("vulnclaw.agent.core.call_llm", fake_call_llm, raising=True)
+    core = AgentCore(load_config(), None)
+    result = asyncio.run(core.chat("两张图看着一样，怎么取 flag？"))
+
+    assert captured["offer_tools"] is False
+    assert result.output == "advice only"
+
+
+def test_normal_chat_still_offers_tools(monkeypatch):
+    import asyncio
+
+    monkeypatch.delenv("VULNCLAW_REPL_NO_AUTO", raising=False)
+    captured = {}
+
+    async def fake_call_llm(agent, system_prompt, *, stream_sink=None, offer_tools=True):
+        captured["offer_tools"] = offer_tools
+        return "ok"
+
+    monkeypatch.setattr("vulnclaw.agent.core.call_llm", fake_call_llm, raising=True)
+    core = AgentCore(load_config(), None)
+    asyncio.run(core.chat("看一下这个 target"))
+
+    assert captured["offer_tools"] is True

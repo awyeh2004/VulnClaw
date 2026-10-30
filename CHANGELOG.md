@@ -1,4 +1,16 @@
 <details open>
+<summary><strong>Unreleased</strong> — 副驾模式真的不带工具了（注释一直这么写，实现没有）</summary>
+
+- **矛盾（实测）**：`core.py` 的注释写着"copilot mode tells the agent not to call tools"，但 `call_llm` 无条件构造工具 schema —— 于是 `echo '怎么取 flag' | bash copilot.sh` 得到的是**被拒绝的 `shell_command`**，不是建议：非交互通道没有审批通道，`handle_tool_calls` 直接 fail，整轮答案被吞掉。
+- **修法**：`call_llm` / `call_llm_stream` 增加 `offer_tools` 参数（默认 True，其他调用点行为不变）；`chat()` 在副驾语义下传 `False`，请求里就没有工具 schema，模型无法发出工具调用。
+- **效果（同一台 ECS，管道输入）**：修前是一行 `[!] shell_command execution refused (no_channel)`；修后直接给 `blind_watermark_classic.py` 的用法与判据（seed 20160930 / alpha 3.0 / 顺序反了只出噪声 / OCR 逐字符核对），即那条 validated 笔记的内容。交互式 solve 与普通 chat 仍带工具。
+- **测试** — `tests/agent/test_chat_playbook_topic.py` 追加 2 例（副驾 `offer_tools=False`、普通 chat 仍为 True）；`tests/agent/test_llm_client_streaming.py` 的桩补上新参数；`-k "chat or playbook or llm"` 419 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — 副驾模式拿不到经验库（708 条笔记在最需要它的场景里不可达）</summary>
 
 - **实测坐实（2026-10-30，机房只给终端那种场景）**：`VULNCLAW_CHAT_PLAYBOOKS=1` 打开后，副驾仍拿不到笔记。四个典型提问（盲水印 / `[隐写]` / CRC32 压缩包 / usb.capdata 鼠标）全部 `matches=0`：`_chat_playbook_brief` 只用「target 指纹」和「操作员显式标签」构造查询，而副驾没有 target、普通提问也没有 `[标签]` —— `queries` 为空直接返回。显式 `[隐写]` 也不行：单 token 查询过不了重叠门槛。
