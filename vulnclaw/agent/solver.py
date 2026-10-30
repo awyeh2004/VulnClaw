@@ -936,7 +936,12 @@ _ACCEPTED_JSON_RE = re.compile(r"[\"']?accepted[\"']?\s*[:=]\s*(?:true|True)")
 _SCORING_FIELD_RE = re.compile(
     r"[\"']?(?:is_solved|submission_id|earned_points|points|solve_count)[\"']?\s*[:=]"
 )
-_SUBMITTED_VALUE_RE = re.compile(r"\(submitted:\s*(.+?)\)\\?$", re.M)
+#: The value the handler echoed back. NOT anchored to end-of-line: the stored
+#: summary is ``one_line(...)`` of the whole tool result, so the platform's raw
+#: payload follows on the same line (audit 2026-10-30 -- the end-anchored form
+#: only matched the multi-line fixture). A ``)`` inside the flag is tolerated by
+#: requiring a delimiter after the closing paren.
+_SUBMITTED_VALUE_RE = re.compile(r"\(submitted:\s*(.+?)\)(?=\s|$)")
 
 
 def _is_submit_tool(name: str) -> bool:
@@ -1043,7 +1048,7 @@ def _finish_on_accept(agent: AgentState, state: AgentState, *, since: int, emit:
     (default on) is the switch; a run that never submitted, or whose submit was
     refused/queued, is untouched.
     """
-    if not _finish_on_accept_enabled(agent):
+    if not _finish_on_accept_enabled(agent, state):
         return False
     found = _accepted_submission(state, since)
     if found is None:
@@ -1063,15 +1068,40 @@ def _finish_on_accept(agent: AgentState, state: AgentState, *, since: int, emit:
     return True
 
 
-def _finish_on_accept_enabled(agent: AgentState) -> bool:
+def _finish_on_accept_enabled(agent: AgentState, state: AgentState) -> bool:
+    """Whether an accepted submission may end THIS run.
+
+    ``competition.finish_on_accept`` is the off switch. An explicitly configured
+    ``competition`` section (the operator wrote one, or env set one) turns the
+    early finish on for every mode. With the default, unconfigured section it is
+    limited to platform-graded runs: CTF mode, or a run carrying a platform
+    challenge ref. The optimisation targets a time-boxed flag sprint (measured
+    4-12 bookkeeping calls after ``accepted:true``); a plain pentest run asked to
+    cover several targets must not stop at the first accepted submit.
+    """
     try:
         cfg = getattr(agent, "config", None)
         competition = getattr(cfg, "competition", None)
-        if competition is None:
+        if competition is not None and not bool(
+            getattr(competition, "finish_on_accept", True)
+        ):
+            return False
+        # ``model_fields_set`` is empty for the default section nobody configured.
+        # A non-pydantic stub (tests) has no such attribute and counts as configured.
+        explicit = (
+            getattr(competition, "model_fields_set", None)
+            if competition is not None
+            else None
+        )
+        if competition is not None and (explicit is None or len(explicit) > 0):
             return True
-        return bool(getattr(competition, "finish_on_accept", True))
-    except Exception:  # noqa: BLE001
-        return True
+        from vulnclaw.agent.task_mode import effective_task_mode
+
+        if effective_task_mode(cfg, getattr(state, "goal", "") or "")[0] == "ctf":
+            return True
+        return _run_has_platform_ref(state)
+    except Exception:  # noqa: BLE001 - fail closed: keep the documented gate
+        return False
 
 
 # ── Finishing on a GROUNDED final answer (competition, no platform submit) ───
@@ -2102,7 +2132,10 @@ def _run_has_platform_ref(state: AgentState) -> bool:
     ``platform_list``. Erring towards "has a ref" is intentional: a false positive
     costs one wasted lookup, a false negative silently drops the submission.
     """
-    texts = [state.goal or "", state.origin or ""]
+    texts = [
+        str(getattr(state, "goal", "") or ""),
+        str(getattr(state, "origin", "") or ""),
+    ]
     try:
         for record in list(getattr(state, "evidence", None) or [])[-40:]:
             texts.append(str(getattr(record, "summary", "") or ""))

@@ -21,12 +21,14 @@ from types import SimpleNamespace
 import pytest
 
 from vulnclaw.agent import builtin_tools, solver
+from vulnclaw.agent.agent_state import one_line
 from vulnclaw.agent.blackboard import Blackboard
 from vulnclaw.agent.solver import (
     _accepted_submission,
     _finish_on_accept,
     _submitted_value,
 )
+from vulnclaw.config.schema import CompetitionConfig
 
 FLAG = "CTF2{2a4ad682-a9da-441d-a3d3-dabcd779c2d7}"
 BUILTIN_ACCEPTED = (
@@ -224,6 +226,71 @@ class TestFinishOnAccept:
         agent, _ = self._agent()
         state = _State(call("platform_submit", "[submit-gate] no grounding"))
         assert _finish_on_accept(agent, state, since=0, emit=lambda k, p: None) is False
+
+
+class TestProductionSummaryShape:
+    """``ToolCallRecord.summary`` is ``one_line(summary, 220)``, not the raw text.
+
+    The fixtures above keep the handler output multi-line. Production collapses
+    it, so the platform's raw payload trails ``(submitted: <flag>)`` on the SAME
+    line -- an end-of-line anchored regex matched the fixture and never the real
+    summary (audit 2026-10-30).
+    """
+
+    def test_one_line_summary_still_yields_the_echoed_value(self):
+        summary = one_line(BUILTIN_ACCEPTED, 220)
+        assert "ACCEPTED" in summary
+        assert _submitted_value(call("platform_submit", summary), summary) == FLAG
+
+    def test_a_closing_paren_inside_the_flag_is_not_truncated(self):
+        summary = "[platform] flag ACCEPTED for r (submitted: flag{ab)cd}) tail"
+        assert _submitted_value(call("platform_submit", summary), summary) == "flag{ab)cd}"
+
+
+class TestModeBoundary:
+    """The early finish is a competition optimisation, not a global default.
+
+    A default ``CompetitionConfig`` (nobody configured the section) must not end
+    a plain pentest run at its first accepted submit -- a run asked to cover
+    several targets would silently drop the rest.
+    """
+
+    def _agent(self, competition=None):
+        config = SimpleNamespace(
+            competition=competition if competition is not None else CompetitionConfig(),
+            session=SimpleNamespace(task_mode="auto"),
+        )
+        return SimpleNamespace(
+            config=config, runtime=SimpleNamespace(blackboard=Blackboard())
+        )
+
+    def test_default_config_does_not_end_a_pentest_run(self):
+        state = _State(call("platform_submit", BUILTIN_ACCEPTED))
+        state.goal = "对 10.0.0.5 做一次基线渗透并记录结果"
+        assert _finish_on_accept(
+            self._agent(), state, since=0, emit=lambda k, p: None
+        ) is False
+        assert state.completed is False
+
+    def test_default_config_ends_a_ctf_run(self):
+        state = _State(call("platform_submit", BUILTIN_ACCEPTED))
+        state.goal = "ctf2:practice:ground:chal 提交 flag"
+        assert _finish_on_accept(
+            self._agent(), state, since=0, emit=lambda k, p: None
+        ) is True
+
+    def test_a_platform_ref_is_enough_without_ctf_wording(self):
+        state = _State(call("platform_submit", BUILTIN_ACCEPTED))
+        state.goal = "gcs:exercise:env-42 拿到 proof 就提交"
+        assert _finish_on_accept(
+            self._agent(), state, since=0, emit=lambda k, p: None
+        ) is True
+
+    def test_an_explicitly_configured_competition_ends_any_mode(self):
+        state = _State(call("platform_submit", BUILTIN_ACCEPTED))
+        state.goal = "对 10.0.0.5 做一次基线渗透"
+        agent = self._agent(CompetitionConfig(stall_turns=8))
+        assert _finish_on_accept(agent, state, since=0, emit=lambda k, p: None) is True
 
 
 def _mark(state, reason, **kwargs):
