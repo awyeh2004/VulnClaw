@@ -738,6 +738,39 @@ _CLASS_LABEL_RES = (
     re.compile(r"difficulty\s+([A-Za-z\u4e00-\u9fff][\w\u4e00-\u9fff\-]*)", re.IGNORECASE),
 )
 _CLASS_QUOTED_RE = re.compile(r"['\"]([^'\"]{3,60})['\"]")
+#: A quoted token immediately followed by ``:`` is a JSON/JS key, not a title.
+#: Measured 2026-10-30: a goal that documents the endpoint
+#: (``POST /agent，JSON {"input": "..."}``) produced the class signature
+#: ``input ...`` -- both the key and the ellipsis placeholder were read as the
+#: challenge title, so the class key could never match a note. Every such goal
+#: carries that same junk pair, which makes the key not just useless but
+#: confidently wrong.
+_JSON_KEY_AFTER_RE = re.compile(r"\s*:")
+_PLACEHOLDER_QUOTED_RE = re.compile(r"^[.\u2026\s]+$")
+#: Quoted ``"flag{...}"`` is the answer FORMAT example, not a challenge title.
+#: Measured 2026-10-30: it became the class signature ``flag{...}`` whose only
+#: usable token is ``flag`` -- a token every CTF note contains, so the class key
+#: declared "this is about flag" and separated nothing.
+_FLAG_SHAPE_RE = re.compile(r"^flag\{", re.IGNORECASE)
+#: Bare generic tokens that carry no identity even when quoted.
+_GENERIC_QUOTED = frozenset({"flag", "ctf"})
+
+
+def _quoted_title_candidates(text: str) -> list[str]:
+    """Quoted strings that plausibly name a challenge, not code or a placeholder."""
+    out: list[str] = []
+    for match in _CLASS_QUOTED_RE.finditer(text):
+        candidate = match.group(1).strip()
+        if not candidate or _PLACEHOLDER_QUOTED_RE.match(candidate):
+            continue
+        if "{" in candidate or "}" in candidate or _FLAG_SHAPE_RE.match(candidate):
+            continue
+        if candidate.lower() in _GENERIC_QUOTED:
+            continue
+        if _JSON_KEY_AFTER_RE.match(text[match.end():match.end() + 8]):
+            continue
+        out.append(candidate)
+    return out
 #: The CTF2 practice-ground task sentence carries the challenge title right after
 #: the id: ``用 ctf2 工具解练习场 <pid> 的题目 <cid>：<name>。``.
 #:
@@ -929,7 +962,7 @@ def challenge_class_signature(goal: str) -> str:
         match = rx.search(text)
         if match:
             bits.append(match.group(1))
-    bits += [m.group(1).strip() for m in _CLASS_QUOTED_RE.finditer(text)]
+    bits += _quoted_title_candidates(text)
     # Vulnerability classes belong in here too. Measured on a real store: with the
     # challenge name written as "([Weblogic]SSRF)" the bracketed tag is only
     # "Weblogic", so the whole signature collapsed to one token, every Weblogic note
@@ -1189,6 +1222,10 @@ _VULN_CLASS_PATTERNS: dict[str, tuple[str, ...]] = {
     "upload": ("file upload", "文件上传", "上传", "webshell"),
     "ssti": ("ssti", "template injection", "模板注入"),
     "auth_bypass": ("weak password", "弱口令", "brute force", "爆破", "未授权", "unauth", "unacc"),
+    # AI 注入题没有这一类时，challenge_class_signature 对「提示词注入」题面恒为空，
+    # 只有 target 查询可用；补上后 class 键也能参与召回（2026-10-30 实测）。
+    "prompt_injection": ("prompt injection", "prompt注入", "提示词注入", "提示注入",
+                         "jailbreak", "越狱", "系统提示泄露"),
     "steganography": ("steg", "隐写", "隐写术"),
     "crypto": ("rsa", "aes", "cipher", "加密", "解密", "密码学"),
     "reverse": ("reverse", "逆向", "crackme", "disassembl", "反汇编"),
