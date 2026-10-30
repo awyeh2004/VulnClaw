@@ -193,7 +193,44 @@ def prepare_task(request: TaskCreateRequest) -> PreparedTask:
 
 
 def build_task_constraints(request: TaskCreateRequest) -> TaskConstraints:
-    return build_scope_constraints(request.target, request.options.model_dump())
+    constraints = build_scope_constraints(request.target, request.options.model_dump())
+    # ``--target`` (additional_targets) was documented but never reached the scope
+    # gate: measured 2026-10-27, passing a second host left ``allowed_hosts`` at
+    # the primary target only, so every request to the extra host came back
+    # "[constraint_violation] ... is outside allowed scope". An operator who names
+    # a host expects it to be in scope; only the explicit --only-host stays exact.
+    if not request.options.only_host:
+        merge_additional_target_hosts(constraints, request.additional_targets)
+    return constraints
+
+
+def merge_additional_target_hosts(
+    constraints: TaskConstraints, additional_targets: Any
+) -> TaskConstraints:
+    """Add the hosts named by ``--target`` to an existing host scope.
+
+    Shared by every path that builds scope for a run, because the paths derive it
+    from different places: ``prepare_task`` (CLI ``run``/``recon``/``scan``/
+    ``exploit``/``persistent``, the TUI and the Web task API) starts from the
+    structured target, while ``vulnclaw solve`` starts from the prose prompt
+    (``vulnclaw/agent/core.py`` → ``extract_task_constraints``), and neither used
+    to see ``--target`` at all. A host named on the command line is in scope by
+    definition; callers whose operator pinned an exact ``--only-host`` skip this.
+
+    Entries go through the same ``scope_hosts_for_target`` rule as a primary
+    target, so naming ``api.example.com`` also brings its registrable apex -- the
+    documented behaviour of naming a target, not a new widening.
+    """
+    for extra in additional_targets or []:
+        for entry in scope_hosts_for_target(_target_host(extra)):
+            if entry and entry not in constraints.allowed_hosts:
+                constraints.allowed_hosts.append(entry)
+    if constraints.allowed_hosts:
+        # ``build_scope_constraints`` computed strict_mode before the extras
+        # existed; a host added here is a constraint, so the prompt block must
+        # say strict as well (the gate itself keys off the non-empty list).
+        constraints.strict_mode = True
+    return constraints
 
 
 def build_scope_constraints(target: str, scope: dict[str, Any]) -> TaskConstraints:

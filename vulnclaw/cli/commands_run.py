@@ -46,12 +46,14 @@ from vulnclaw.cli.repl import (
     _scope_option_kwargs,
     _validate_headless_choices,
 )
+from vulnclaw.config.domain_models import TaskConstraints
 from vulnclaw.config.schema import ENGINE_CHOICES
 from vulnclaw.i18n import _
 from vulnclaw.target_state.store import load_target_state
 from vulnclaw.task_service import (
     TaskCreateRequest,
     TaskOptions,
+    merge_additional_target_hosts,
     prepare_task,
     run_task_action,
 )
@@ -471,6 +473,28 @@ def run(
     console.print(_("cli.report_generated", path=report_path))
 
 
+def _solve_task_constraints(
+    prompt: str, additional_targets: Optional[list[str]]
+) -> Optional[TaskConstraints]:
+    """Scope for a ``solve`` run: the prompt's own mining plus ``--target`` hosts.
+
+    ``solve`` is the one command that never goes through ``prepare_task``: it hands
+    its prompt to ``AgentCore.solve``, which derives the scope from the prose
+    (``_reset_runtime_state`` → ``extract_task_constraints``). The prompt names
+    only the primary target, so ``--target`` stayed outside ``allowed_hosts`` on
+    this command while working on ``run``/``recon``/``scan``/``exploit``/
+    ``persistent`` -- every request to the extra host came back
+    ``[constraint_violation]`` (2026-10-30 audit of the ``--target`` fix).
+
+    Returning ``None`` for an empty result preserves the older fallback in
+    ``_reset_runtime_state``: a resumed run whose ``--prompt`` names no target
+    inherits the stored constraints instead of having them wiped.
+    """
+    constraints = extract_task_constraints(prompt)
+    merge_additional_target_hosts(constraints, additional_targets)
+    return None if constraints.is_empty() else constraints
+
+
 def solve(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
     goal: Optional[str] = typer.Option(
@@ -536,6 +560,7 @@ def solve(
 
     resolved_goal = goal or _("cli.default_goal")
     task_prompt = prompt or _("cli.task_prompt", target=target, goal=resolved_goal)
+    solve_constraints = _solve_task_constraints(task_prompt, additional_targets)
     console.print(f"[*] Target: [bold]{target}[/] | Goal: [bold]{resolved_goal}[/]")
 
     holder: dict = {}
@@ -568,6 +593,7 @@ def solve(
                 max_tool_rounds=max_tool_rounds,
                 stream_sink=sink,
                 on_event=on_event,
+                task_constraints=solve_constraints,
                 hints=list(hint or []),
             )
             holder["agent_state"] = agent.context.state.agent_state.get_summary()
