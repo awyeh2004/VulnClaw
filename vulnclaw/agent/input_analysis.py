@@ -16,8 +16,16 @@ _SKILL_LAUNCH_RE = re.compile(r"^\s*Use VulnClaw skill\s+([A-Za-z0-9_-]+)\.", re
 # Common attachment/archive extensions. A token ending in one of these is a file
 # name (e.g. ``real-03.zip``), not a host — deriving an allowed-host scope from it
 # would lock the run out of the real target machine.
+#
+# Web source/assets were missing until 2026-10-27: a prompt saying
+# "取根路径与 /space/app.version.js" mined ``app.version.js`` as the single
+# allowed host, so every request to the real target was refused with
+# ``Host ... is outside allowed scope [app.version.js]``. Hostile ccTLDs are
+# deliberately absent (``.do``, ``.sh``): ``x.com.do`` is a host, not a file.
 _FILENAME_EXT_RE = re.compile(
-    r"\.(zip|tar\.gz|tgz|7z|rar|gz|bz2|xz|pdf|png|jpg|jpeg|gif|svg|pyc|py|txt|md|enc|lime|bin|exe|elf|jar|apk|pcap|pcapng)$",
+    r"\.(zip|tar\.gz|tgz|7z|rar|gz|bz2|xz|pdf|png|jpg|jpeg|gif|svg|pyc|py|txt|md|enc|lime|bin|exe|elf|jar|apk|pcap|pcapng"
+    r"|js|mjs|cjs|jsx|ts|tsx|json|map|css|scss|less|html?|shtml|xhtml|vue|jsp|jspx|aspx|asp|php|php3|xml|ya?ml|toml"
+    r"|ini|conf|config|log|sql|bak|old|swp|lock|wasm|env)$",
     re.IGNORECASE,
 )
 
@@ -25,6 +33,133 @@ _FILENAME_EXT_RE = re.compile(
 def _looks_like_filename(token: str) -> bool:
     """Return True when ``token`` looks like a file name rather than a host."""
     return bool(_FILENAME_EXT_RE.search(token or ""))
+
+
+#: Last labels we accept as a real TLD when mining a host out of prose.
+#:
+#: Measured 2026-10-27, twice in one evening: ``app.version.js`` and then
+#: ``coze.token`` were both mined as the *only* allowed host, so every request to
+#: the real target came back "[constraint_violation] Host ... is outside allowed
+#: scope [<dotted token>]" and the round was lost before it started. A field name
+#: is not a host; requiring a plausible TLD is the cheapest way to tell them
+#: apart (``token`` is not a TLD, ``cn`` is).
+#:
+#: This stays a WHITELIST on purpose. A "anything alphabetic is a TLD" fallback
+#: would re-admit ``coze.token`` and ``config.coze`` -- the exact measured
+#: failures -- so a new gTLD is added here explicitly instead (``.icu``,
+#: ``.buzz``, ``.zip``-style file/model collisions stay out).
+_HOST_TLDS = frozenset(
+    {
+        "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "name",
+        "pro", "mobi", "asia", "tel", "travel", "jobs", "museum", "aero", "coop",
+        "io", "ai", "app", "dev", "cloud", "tech", "top", "site", "online", "shop",
+        "store", "work", "ltd", "group", "vip", "xyz", "club", "link", "live",
+        "space", "website", "host", "press", "wiki", "design", "digital", "plus",
+        "cn", "hk", "tw", "mo", "jp", "kr", "sg", "my", "th", "vn", "ph", "id",
+        "in", "pk", "bd", "lk", "np", "uk", "de", "fr", "nl", "be", "ch", "at",
+        "se", "no", "dk", "fi", "pl", "cz", "sk", "hu", "ro", "bg", "gr", "pt",
+        "es", "it", "ie", "is", "lt", "lv", "ee", "ua", "by", "kz", "ru", "us",
+        "ca", "mx", "br", "ar", "cl", "pe", "au", "nz", "za", "eg", "ng", "ke",
+        "il", "tr", "sa", "ae", "ir", "am", "ge", "az", "uz", "mn",
+        # Common gTLDs added 2026-10-30. Without them a bare-domain target on one
+        # of these suffixes (``chal.icu``) was silently mined to nothing, and an
+        # empty ``allowed_hosts`` switches the host gate OFF entirely -- the
+        # failure direction moved from "locked out" to "unpinned". Extensions that
+        # are also file names (``zip``/``mov``/``md``/``py``) stay out: for those,
+        # treating the token as a file is the safer mistake.
+        "icu", "buzz", "monster", "foo", "security", "cyou", "sbs", "cam", "rest",
+        "art", "blog", "page", "one", "wang", "ren", "xin", "win", "bid", "men",
+        "date", "faith", "review", "trade", "science", "party", "racing", "stream",
+        "download", "fashion", "gift", "hosting", "lol", "mom", "uno", "wtf",
+        "bond", "best", "ceo", "cfd", "click", "fit", "help", "how", "ing", "life",
+        "market", "mba", "med", "new", "news", "observer", "photography", "pics",
+        "pink", "pub", "report", "rich", "rip", "rocks", "run", "sale", "school",
+        "services", "show", "software", "solutions", "studio", "style", "support",
+        "surf", "systems", "tax", "team", "today", "tools", "tours", "town",
+        "toys", "tube", "university", "vet", "video", "vin", "vision", "vodka",
+        "vote", "voting", "voyage", "watch", "works", "world", "zone",
+    }
+)
+
+#: Internal / special-use last labels that ARE hosts even though no public
+#: suffix list contains them. Measured in real engagements: ``corp.local``
+#: (2026-10-11 决赛企业网应急) and ``hancloud.local`` (同场) were rejected by the
+#: TLD whitelist, so the target never reached ``allowed_hosts`` -- with any other
+#: mined host present that locked every request to the real target out of scope,
+#: and with none it left the run wide open. RFC 6762 reserves ``.local`` for
+#: mDNS; RFC 2606 reserves ``.test``/``.example``/``.invalid``/``.localhost``;
+#: the rest are lab/intranet naming conventions seen on CTF and pentest ranges.
+#:
+#: ``home`` is deliberately ABSENT: ``user.home`` is a Java property name, and
+#: accepting it would re-mine a field name as a host -- the exact ``coze.token``
+#: failure the whitelist exists to stop.
+_INTERNAL_SUFFIXES = frozenset(
+    {
+        "local", "lab", "lan", "corp", "internal", "intranet", "dmz",
+        "test", "example", "invalid", "localhost", "arpa",
+    }
+)
+
+#: First labels that name a FIELD or RECORD in prose, not a host. Consulted only
+#: when the last label is two letters, where the two readings collide: ``.id``,
+#: ``.ip``, ``.db``, ``.os``, ``.vm`` are real ccTLDs AND everyday field
+#: suffixes. Measured 2026-10-30 (audit): ``user.id`` passed the TLD whitelist
+#: (``id`` is Indonesia), was mined as the sole allowed host, and every request
+#: to the real target would have been refused with ``[constraint_violation]`` --
+#: the same shape as the ``coze.token`` incident this heuristic exists to stop.
+#: A bare ``app.id`` stays a host: it is a plausible Indonesian hostname and
+#: nothing in the prose marks it as a field.
+_FIELD_HOST_PREFIXES = frozenset(
+    {
+        "user", "users", "order", "orders", "row", "rows", "item", "items",
+        "obj", "object", "record", "entry", "table", "column", "field",
+        "session", "request", "response", "req", "res", "account", "member",
+        "customer", "product", "invoice", "ticket", "task", "node", "edge",
+        "point", "vector", "model", "result", "output", "input", "param",
+        "params", "config", "setting", "settings", "log", "event", "message",
+        "msg", "file", "path", "dir", "host", "port", "key", "token", "secret",
+        "hash", "salt", "nonce", "uuid", "guid", "uid", "gid", "pid", "name",
+        "value", "type", "status", "code", "time", "date", "version", "ver",
+        "size", "count", "index", "idx", "score", "points", "flag", "auth",
+        "role", "group", "owner", "parent", "child", "root", "data", "meta",
+        "info", "detail", "details", "content", "body", "header", "headers",
+        "query", "args", "argv", "env", "uri", "url", "email", "phone", "addr",
+        "address",
+    }
+)
+
+
+def _looks_like_hostname(token: str) -> bool:
+    """Whether a dotted token mined from prose is plausible as a host.
+
+    Rejecting non-TLD last labels keeps field names and dotted identifiers
+    (``coze.token``, ``config.coze``) from becoming scope entries. Internal
+    naming schemes (``corp.local``, ``web01.lab``) stay hosts via
+    ``_INTERNAL_SUFFIXES``.
+    """
+    candidate = str(token or "").strip().lower().rstrip(".")
+    if not candidate or " " in candidate or "/" in candidate:
+        return False
+    if _looks_like_filename(candidate):
+        return False
+    try:
+        from vulnclaw.config.url_utils import is_ip_address
+
+        if is_ip_address(candidate):
+            return True
+    except Exception:
+        pass
+    labels = candidate.split(".")
+    if len(labels) < 2:
+        return False
+    tld = labels[-1]
+    if not tld.isalpha():
+        return False
+    if not (tld in _HOST_TLDS or tld in _INTERNAL_SUFFIXES or len(tld) == 2):
+        return False
+    # Two-letter suffixes are ccTLDs AND field suffixes; the first label decides
+    # (``user.id`` is a record identifier, ``app.id`` may be a host).
+    return not (len(tld) == 2 and labels[0] in _FIELD_HOST_PREFIXES)
 
 
 def _is_self_discovering_skill_launch(text: str) -> bool:
@@ -433,7 +568,7 @@ def extract_task_constraints(user_input: str) -> TaskConstraints:
                 host = host_match.group(1)
                 if host and host not in constraints.allowed_hosts:
                     constraints.allowed_hosts.append(host)
-        elif "." in target_lower and not _looks_like_filename(target_lower):
+        elif "." in target_lower and _looks_like_hostname(target_lower):
             if target_lower not in constraints.allowed_hosts:
                 constraints.allowed_hosts.append(target_lower)
 

@@ -129,3 +129,159 @@ class TestUnchangedBehaviour:
         assert _extract_target_from_input("今天天气怎么样") is None
         assert _has_actionable_target("今天天气怎么样") is False
         assert _should_auto_pentest("今天天气怎么样", None) is False
+
+
+class TestWebAssetNamesNeverBecomeHosts:
+    """Measured 2026-10-27 by driving ``vulnclaw solve`` headlessly.
+
+    The prompt said "取根路径与 /space/app.version.js 各一次". The miner had no
+    ``.js`` in its filename extensions, so it took ``app.version.js`` as the one
+    allowed host; every request to the real target came back
+    ``[constraint_violation] Host opac.ouc.edu.cn is outside allowed scope
+    [app.version.js]`` and the whole round was lost to a scope entry that was a
+    file name.
+    """
+
+    def test_web_source_extensions_are_filenames(self):
+        from vulnclaw.agent.input_analysis import _looks_like_filename
+
+        for token in (
+            "app.version.js",
+            "/space/app.version.js",
+            "login.php",
+            "site.css",
+            "data.json",
+            "page.xhtml",
+            "app.config.yaml",
+            "bundle.js.map",
+        ):
+            assert _looks_like_filename(token) is True, token
+
+    def test_real_hosts_are_still_hosts(self):
+        from vulnclaw.agent.input_analysis import _looks_like_filename
+
+        # .do and .sh are ccTLDs -- a host must not be mistaken for a file.
+        for token in ("opac.ouc.edu.cn", "x.com.do", "example.sh", "evil.com"):
+            assert _looks_like_filename(token) is False, token
+
+    def test_prompt_naming_a_file_mining_no_host(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("只读：取根路径与 /space/app.version.js 各一次")
+        assert constraints.allowed_hosts == []
+
+    def test_prompt_with_target_and_file_keeps_the_target(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints(
+            "目标 https://opac.ouc.edu.cn/ ，顺便看看 /space/app.version.js"
+        )
+        assert constraints.allowed_hosts == ["opac.ouc.edu.cn"]
+
+
+class TestDottedFieldNamesNeverBecomeHosts:
+    """Measured 2026-10-27 (second occurrence the same evening).
+
+    The prompt said "计算 coze.token 的 sha256". ``.token`` was not treated as a
+    file extension, so ``coze.token`` was mined as the sole allowed host and every
+    request to the real target was refused with
+    ``[constraint_violation] Host opac.ouc.edu.cn is outside allowed scope
+    [coze.token]`` — a whole round lost before its first request.
+    """
+
+    def test_field_names_are_not_hosts(self):
+        from vulnclaw.agent.input_analysis import _looks_like_hostname
+
+        for token in (
+            "coze.token", "config.coze", "app.version.js", "user.password",
+            # Two-letter suffixes are ccTLDs AND field suffixes (audit 2026-10-30):
+            # ``user.id`` passed the TLD whitelist because ``id`` is Indonesia.
+            "user.id", "order.id", "session.id", "item.id", "data.id",
+        ):
+            assert _looks_like_hostname(token) is False, token
+
+    def test_real_hosts_and_ips_still_qualify(self):
+        from vulnclaw.agent.input_analysis import _looks_like_hostname
+
+        for token in (
+            "opac.ouc.edu.cn", "evil.com", "x.com.do", "192.168.1.1",
+            # A host on an Indonesian .id domain is not a field name.
+            "app.id",
+        ):
+            assert _looks_like_hostname(token) is True, token
+
+    def test_bare_domain_on_a_public_gtld_still_pins_scope(self):
+        """A closed whitelist used to drop these silently, leaving NO host scope.
+
+        An empty ``allowed_hosts`` switches the host gate off entirely, so a
+        target on an unlisted gTLD went from "locked out" to "unpinned" — the
+        failure direction the audit flagged (2026-10-30).
+        """
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        for token in ("chal.icu", "chal.buzz", "chal.security"):
+            constraints = extract_task_constraints(f"对 {token} 做一次基线探测")
+            assert constraints.allowed_hosts == [token], token
+            assert constraints.strict_mode is True
+
+    def test_field_name_before_a_two_letter_suffix_mines_nothing(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("计算 user.id 的 md5 前 8 位")
+        assert constraints.allowed_hosts == []
+
+    def test_prompt_with_a_field_name_mines_nothing(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("计算 coze.token 的 sha256 前 16 位")
+        assert constraints.allowed_hosts == []
+
+    def test_prompt_with_host_and_field_keeps_only_the_host(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints(
+            "取 opac.ouc.edu.cn 配置里 coze.token 的摘要"
+        )
+        assert constraints.allowed_hosts == ["opac.ouc.edu.cn"]
+
+
+class TestInternalSuffixesStayHosts:
+    """Round22 audit (2026-10-29): the TLD whitelist rejected internal schemes.
+
+    ``corp.local`` (2026-10-11 决赛企业网应急) and ``hancloud.local`` were not
+    hosts by the whitelist, so a target named that way never reached
+    ``allowed_hosts`` — with another mined host present, every request to the
+    real target was refused; with none, the run went out with no host pinning
+    at all. ``home`` stays excluded: ``user.home`` is a Java property name, and
+    accepting it would re-mine a field name as a host.
+    """
+
+    def test_internal_schemes_are_hosts(self):
+        from vulnclaw.agent.input_analysis import _looks_like_hostname
+
+        for token in (
+            "corp.local", "www.hancloud.local", "web01.lab",
+            "dc01.corp", "mysql.intranet", "fw.dmz", "host.home.arpa",
+        ):
+            assert _looks_like_hostname(token) is True, token
+
+    def test_java_property_shaped_tokens_stay_non_hosts(self):
+        from vulnclaw.agent.input_analysis import _looks_like_hostname
+
+        for token in ("user.home", "coze.token", "config.coze"):
+            assert _looks_like_hostname(token) is False, token
+
+    def test_prompt_with_internal_target_mines_it(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints("对 corp.local 做一次基线探测")
+        assert constraints.allowed_hosts == ["corp.local"]
+
+    def test_prompt_with_internal_url_and_allowed_host_keeps_both(self):
+        from vulnclaw.agent.input_analysis import extract_task_constraints
+
+        constraints = extract_task_constraints(
+            "目标 https://web01.lab/ 做基线，allowed host db.corp"
+        )
+        assert "web01.lab" in constraints.allowed_hosts
+        assert "db.corp" in constraints.allowed_hosts
