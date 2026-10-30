@@ -3,7 +3,17 @@
 These tests do NOT hit the real network or require real credentials. The
 config used by the fallback is monkeypatched, and the HTTP call is stubbed,
 so the suite is hermetic and green on any machine.
+
+The sample image lives in ``tests/fixtures/ocr/`` and the unreadable file is
+written into pytest's ``tmp_path``. Both used to be a hardcoded
+``E:\\vulnclaw\\test\\...`` directory with a fixed filename, which (a) failed on
+any machine that lacked it -- teammates clone this repo without it -- and
+(b) under ``-n 4`` intermittently raised ``PermissionError: [WinError 32]``,
+because a fixed path outside the repo is shared with antivirus scans and with
+leftover handles from interrupted runs.
 """
+
+from pathlib import Path
 
 import pytest
 
@@ -14,7 +24,9 @@ class MockAgent:
     pass
 
 
-TEST_IMG = r"E:\vulnclaw\test\test_ocr.png"
+TEST_IMG = str(
+    Path(__file__).resolve().parent.parent / "fixtures" / "ocr" / "test_ocr.png"
+)
 
 
 class _LLM:
@@ -56,18 +68,16 @@ def test_ocr_llm_only_mode(fake_deepseek_config, stub_vision_http):
     assert r.startswith("[+] vision-llm:")
 
 
-def test_ocr_vision_fallback_fires_when_local_fails(fake_deepseek_config, stub_vision_http):
+def test_ocr_vision_fallback_fires_when_local_fails(
+    fake_deepseek_config, stub_vision_http, tmp_path
+):
     # Point at a file easyocr cannot read (a corrupt/empty png) so local OCR
     # produces nothing and the vision fallback kicks in.
-    import os
+    empty = tmp_path / "empty_test.png"
+    empty.write_bytes(b"not a real image")
 
-    empty = os.path.join(os.path.dirname(TEST_IMG), "empty_test.png")
-    with open(empty, "wb") as f:
-        f.write(b"not a real image")
-
-    r = execute_ocr(MockAgent(), {"image_path": empty, "method": "auto", "use_llm": True})
+    r = execute_ocr(MockAgent(), {"image_path": str(empty), "method": "auto", "use_llm": True})
     assert "vision-llm" in r
-    os.unlink(empty)
 
 
 def test_ocr_auto_prefers_local_when_it_works(fake_deepseek_config):

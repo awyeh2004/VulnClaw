@@ -34,11 +34,11 @@ capabilities:
 
   - name: ocr_vision
     unit_test: "tests/agent/test_ocr_vision.py::test_ocr_auto_prefers_local_when_it_works"
-    fixture: ""
-    external_deps: ["easyocr (torch)", "E:/vulnclaw/test/test_ocr.png (external path pinned by the test)"]
+    fixture: tests/fixtures/ocr/test_ocr.png
+    external_deps: ["easyocr (torch)"]
     closed_loop: "known substitution errors documented (flag{easyocr_ok} -> flagleasyccr_ok)"
     real_hit: ""
-    note: "fixture missing: commit a small PNG beside the test instead of the external E: path"
+    note: "2026-10-30: the external E: path is now a repo fixture; the unreadable file goes to tmp_path (the fixed name in a shared dir was also the WinError 32 flake under -n 4)"
 
   - name: cve_alias_fallback
     unit_test: "tests/intel/test_cve.py"
