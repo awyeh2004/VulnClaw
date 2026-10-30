@@ -1,4 +1,17 @@
 <details open>
+<summary><strong>Unreleased</strong> — OCR「读到字 ≠ 读对了」：flag 读坏时自动复核 · 删掉从未工作的 Windows OCR 分支</summary>
+
+- **问题（实测坐实）**：旧逻辑只在「本地引擎一个都没读到字」时才升级到视觉模型。但 OCR 最典型的错误是**字形替换**——真值 `flag{easyocr_ok}` 被 easyocr 读成 `flagleasyccr_ok}`（两处替换 + 丢左括号）。这种串"看着像 flag、平台永远判不过"，却因为"非空"被当成成功结果直接返回，从不复核。这正是"第一个引擎错了怎么办"的答案所在，而不是去做短路。
+- **修法**：`auto` 模式新增 `_flag_read_is_suspect()`——本地读到的文本里出现**粘连的 flag 形态**（`flag`/`ctf`/`dasctf`/`ctf2`/`qwb` 直接接花括号或再接词字符，如 `flagleasyccr_ok}`、`flag{easyocr_ok`）且**没有完整 flag 形态**时，视为可疑，额外调一次视觉模型复核，并在输出里写明 `cross-check: the local read looks like a mangled flag`。散文里的 "submit the flag" 不触发（词后有分隔符）。
+- **不做的**：不加"第一个引擎成功就短路"。实测 auto 相比单跑 easyocr 只多 **0.2–0.4 s**（那还是 PowerShell 子进程的钱），省这点时间却丢掉唯一的交叉验证不划算。
+- **删掉 Windows.Media.Ocr 分支**：它写的是 `$r=await $b`，而 PowerShell 5.1 没有 `await` 关键字（实测 `await : 无法将"await"项识别为 cmdlet`），**从未产出过任何文本**；失败时连 `[!]` 行都不写，静默得像"这台机器没有第二个引擎"，却每次白花 0.2–0.4 s 启动 PowerShell。本机实测只装了 `ja` / `zh-Hans-CN` 两个 OCR 包（无 en-US），即便修好 `AsTask` 反射链，读 ASCII flag 也会得到 `password` → `囚 氛 vord`，作为第二意见不可信。注释里记下了重建要点，避免有人再抄回 `await` 写法。
+- **验证** — `tests/agent/test_ocr_vision.py` 新增 8 例（6 条形态判据参数化 + 可疑则复核 + 完整则不复核）；全量 `pytest -q -n 4`：**5621 passed / 10 skipped / 0 failed**。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — easyocr 真正吃到 GPU（torch 是 +cpu 构建）· 无 GPU 机器自动退 CPU</summary>
 
 - **根因（实测）**：`torch` 装的是 `2.11.0+cpu`，`torch.cuda.is_available()` 为 False，所以 easyocr 一直在 CPU 上跑——它在日志里只打印一行 `Neither CUDA nor MPS are available`，不报错，于是"GPU 加速"的注释与实际行为脱节了三个月没人发现。同机实测 1440×900 截图 **4.76 s**。
