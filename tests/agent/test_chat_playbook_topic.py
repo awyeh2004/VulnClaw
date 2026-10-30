@@ -1,0 +1,117 @@
+"""Copilot chat must reach the note library without a pinned target (2026-10-30).
+
+Measured on a console-only rehearsal (the mode this feature exists for): in copilot
+mode the operator has no target and writes plain questions, so
+``_chat_playbook_brief`` produced no queries at all -- four typical questions
+(盲水印 / [隐写] / CRC32 / usb.capdata) returned ``matches=0`` and the library was
+unreachable exactly where it matters. An explicit ``[隐写]`` label did not help
+either: one token fails the lookup's overlap floor.
+
+These tests pin the three decisions that fix it:
+
+* a closed technique vocabulary supplies the query (so a pasted dump cannot invent
+  one -- the 2026-10-10 ransomware failure);
+* ASCII needles are word-bounded (``lsb`` must not fire inside another word);
+* drafts are visible here, because the brief prints ✅/📝 per note and the top hit
+  for a real CRC32 question *is* a draft.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from vulnclaw.agent import playbook as pb
+from vulnclaw.agent.core import AgentCore, _chat_topic_query
+from vulnclaw.config.settings import load_config
+
+STEPS = (
+    "LOCK: something concrete and long enough to pass the quality gate.\n"
+    "CONFIRMED: witnessed in evidence.\n"
+    "ANGLES: [hit] one angle.\n"
+    "STEPS: do the thing."
+)
+
+
+@pytest.fixture()
+def store(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(pb, "PLAYBOOKS_DIR", tmp_path / "playbooks")
+    pb.ensure_dirs()
+    return tmp_path / "playbooks"
+
+
+def _write(slug: str, fingerprint: str, status: str = "validated") -> None:
+    block = [
+        "---",
+        f"name: {slug}",
+        f"fingerprint: {fingerprint}",
+        f"status: {status}",
+        f"source: {pb.SOURCE_CURATED}",
+        "---",
+        "",
+        STEPS,
+        "",
+    ]
+    (pb.PLAYBOOKS_DIR / f"{slug}.md").write_text("\n".join(block), encoding="utf-8")
+
+
+# ── the vocabulary itself ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("盲水印：两张图看着一样", "盲水印"),
+        ("这个 pcap 里 usb.capdata 怎么还原鼠标", "usb.capdata"),
+        ("CRC32 压缩包怎么爆破", "CRC32"),
+        ("提示词注入怎么打", "prompt injection"),
+    ],
+)
+def test_topic_query_names_the_technique(text, needle):
+    assert needle in _chat_topic_query(text)
+
+
+@pytest.mark.parametrize("text", ["今天天气不错", "帮我看看这个日志", "", "the clsbase test"])
+def test_topic_query_stays_empty_for_chatter(text):
+    """No technique named -> no query. A pasted dump must not invent a topic."""
+    assert _chat_topic_query(text) == ""
+
+
+def test_ascii_needle_is_word_bounded():
+    assert _chat_topic_query("the clsbase field") == ""
+    assert "LSB" in _chat_topic_query("try lsb first")
+
+
+# ── the path that was measurably broken ───────────────────────────────────
+
+
+def test_chat_brief_reaches_notes_without_a_target(store):
+    """No target, plain question -> the note arrives without any label."""
+    _write("crc32-note", "CRC32 压缩包 zip 密码 字典 爆破 crc")
+    core = AgentCore(load_config(), None)
+
+    brief, matches = core._chat_playbook_brief("", "CRC32 压缩包怎么爆破")
+
+    assert matches, "library unreachable for a plain copilot question"
+    assert any(m["slug"] == "crc32-note" for m in matches), matches
+    assert "crc32-note" in brief
+
+
+def test_chat_brief_sees_drafts(store):
+    """The top hit for a real question can be a draft; the brief marks it 📝."""
+    _write("draft-note", "盲水印 blind watermark DFT fft 镜像 置换", status="draft")
+    core = AgentCore(load_config(), None)
+
+    brief, matches = core._chat_playbook_brief("", "盲水印两张图看着一样怎么取 flag")
+
+    assert matches and matches[0]["slug"] == "draft-note", matches
+    assert "📝 draft" in brief
+
+
+def test_chat_brief_stays_silent_for_a_chatty_message(store):
+    _write("unrelated-note", "Kubernetes RBAC 权限 提升 集群")
+    core = AgentCore(load_config(), None)
+
+    brief, matches = core._chat_playbook_brief("", "今天天气不错，随便聊聊")
+
+    assert matches == [] and brief == ""
