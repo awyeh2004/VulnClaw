@@ -589,17 +589,50 @@ def ensure_dirs() -> None:
     PLAYBOOKS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+#: A delimiter line: exactly three dashes, optional surrounding whitespace.
+#: NOT a prefix match -- ``----`` (a Markdown horizontal rule, or the 勘误表
+#: separator inside a captured Chinese challenge description) and ``--- text``
+#: are ordinary content lines.
+_FM_DELIM = re.compile(r"^[ \t]*---[ \t]*$")
+
+
+def _single_line(text: str) -> str:
+    """Collapse a frontmatter value to ONE line.
+
+    ``save_playbook`` writes ``key: value`` per line and ``_parse_frontmatter``
+    reads it back line by line, so a value carrying newlines is not
+    representable: a captured CTF2 goal (challenge description, attachment
+    paths, platform policy boilerplate) pushed the real ``status:`` and
+    ``target_ref:`` lines past the block's closing delimiter and the note
+    loaded as a draft with no identity (measured: 53 notes on the home store).
+    """
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Parse an optional ``---`` YAML-ish frontmatter block into (meta, body).
 
     Kept dependency-free: values are parsed as plain strings / lists manually.
+
+    The closing delimiter must be a WHOLE line of three dashes. The previous
+    non-greedy ``\\n---`` match ended the block at the first ``---`` PREFIX in
+    the text, so a note whose captured goal contained a ``----`` rule lost
+    everything after it: measured on the home store, 53 notes (43 of them
+    written ``status: validated``) loaded as ``draft`` -- invisible to the
+    validated-only auto-inject path -- and 30 also lost ``target_ref`` /
+    ``identity_version``, the structured identity tie-break layer.
     """
     if not content.startswith("---"):
         return {}, content
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, flags=re.DOTALL)
-    if not m:
+    lines = content.splitlines(keepends=True)
+    if not _FM_DELIM.match(lines[0]):
         return {}, content
-    raw_meta, body = m.group(1), m.group(2)
+    for i in range(1, len(lines)):
+        if _FM_DELIM.match(lines[i]):
+            raw_meta, body = "".join(lines[1:i]), "".join(lines[i + 1:])
+            break
+    else:
+        return {}, content
     meta: dict[str, Any] = {}
     for line in raw_meta.splitlines():
         if ":" not in line:
@@ -1415,8 +1448,8 @@ def save_playbook(
     # prompt, reopening the "resubmit a previous instance's flag" channel this gate
     # exists to close. `capture_run_notes` was never affected (its name is the fixed
     # AutoNotes prefix); the model-initiated path was.
-    name = _fingerprint_flags(str(name or ""))
-    fingerprint = _fingerprint_flags(str(fingerprint or ""))
+    name = _single_line(_fingerprint_flags(str(name or "")))
+    fingerprint = _single_line(_fingerprint_flags(str(fingerprint or "")))
     steps = _fingerprint_flags(stripped)
 
     status = "validated" if status == "validated" else "draft"
@@ -1469,7 +1502,7 @@ def save_playbook(
     ]
     if target_ref:
         lines.append(f"identity_version: 1")
-        lines.append(f"target_ref: {target_ref}")
+        lines.append(f"target_ref: {_single_line(target_ref)}")
         lines.append(f"target_hash: {_target_ref_hash(target_ref)}")
     lines += [
         "---",
