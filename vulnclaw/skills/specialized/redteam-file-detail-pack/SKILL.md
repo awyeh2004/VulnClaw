@@ -6,6 +6,7 @@ routing:
   aliases: [文件上传漏洞, 任意文件读取]
   role: support
 shared_references:
+  - vulnclaw-mechanisms.md
   - upstream-source.md
 ---
 

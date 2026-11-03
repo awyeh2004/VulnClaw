@@ -6,6 +6,9 @@ routing:
   task_types: [pentest, audit]
   technologies: [llm, rag, memory, plugin]
   vulnerability_classes: [prompt_injection, tool_abuse, info_disclosure]
+shared_references:
+  - vulnclaw-mechanisms.md
+
 ---
 
 # AI 与 MCP 安全评估 Skill

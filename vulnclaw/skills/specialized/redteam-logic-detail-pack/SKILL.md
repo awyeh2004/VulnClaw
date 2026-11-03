@@ -6,6 +6,7 @@ routing:
   aliases: [逻辑漏洞, 业务逻辑, 支付逻辑]
   role: support
 shared_references:
+  - vulnclaw-mechanisms.md
   - upstream-source.md
 ---
 

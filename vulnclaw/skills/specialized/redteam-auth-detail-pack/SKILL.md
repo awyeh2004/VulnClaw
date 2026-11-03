@@ -6,6 +6,7 @@ routing:
   aliases: [认证漏洞, 登录绕过, 弱口令策略]
   role: support
 shared_references:
+  - vulnclaw-mechanisms.md
   - upstream-source.md
 ---
 

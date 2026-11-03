@@ -6,6 +6,7 @@ routing:
   aliases: [代码审计, 源码审计, 白盒]
   role: support
 shared_references:
+  - vulnclaw-mechanisms.md
   - upstream-source.md
 ---
 

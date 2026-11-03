@@ -6,6 +6,7 @@ routing:
   task_types: [reverse]
   tooling: [frida, jadx, burp, scrcpy]
 shared_references:
+  - vulnclaw-mechanisms.md
   - android-external-url-runtime-first-workflow.md
   - android-signing-and-crypto-workflow.md
   - android-ui-driven-observation-and-packet-loop.md
