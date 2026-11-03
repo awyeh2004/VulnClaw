@@ -4,6 +4,8 @@ description: CTF密码学攻击知识库 — RSA攻击（小指数/共模/Wiener
 routing:
   target_types: [ctf, crypto]
   task_types: [ctf, crypto]
+shared_references:
+  - vulnclaw-mechanisms.md
 ---
 
 # CTF 密码学攻击知识库

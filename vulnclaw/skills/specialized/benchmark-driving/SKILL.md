@@ -13,6 +13,8 @@ routing:
     - 网站性能
     - 页面性能
     - 压力测试
+shared_references:
+  - vulnclaw-mechanisms.md
 ---
 
 # 跑分基准驱动 Skill

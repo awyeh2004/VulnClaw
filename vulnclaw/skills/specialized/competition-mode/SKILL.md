@@ -1,10 +1,12 @@
 ---
 name: competition-mode
-description: 比赛模式策略 — CTF 竞赛(西湖论剑/DASCTF)下抢分策略 + 应急响应实战赛答题制策略。CTF: 赛前探 LLM 延迟决定单/多 agent、易题优先排序、fail-fast 停滞弃题换题、按平台 flag 格式提交。IR赛: 快速分型→按面排查→答案格式化→逐题提交。适用于限时多人竞赛环境，追求单位时间得分最大化。
+description: "比赛模式策略 — CTF 竞赛(西湖论剑/DASCTF)下抢分策略 + 应急响应实战赛答题制策略。CTF: 赛前探 LLM 延迟决定单/多 agent、易题优先排序、fail-fast 停滞弃题换题、按平台 flag 格式提交。IR赛: 快速分型→按面排查→答案格式化→逐题提交。适用于限时多人竞赛环境，追求单位时间得分最大化。"
 requires_target: false
 routing:
   task_types: [ctf, triage, audit]
   target_types: [ctf, host, web]
+shared_references:
+  - vulnclaw-mechanisms.md
 ---
 
 # 比赛模式 Skill

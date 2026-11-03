@@ -4,6 +4,8 @@ description: CTF 二进制利用知识库 — 判题型与保护面（PIE/NX/Can
 routing:
   target_types: [ctf]
   task_types: [ctf]
+shared_references:
+  - vulnclaw-mechanisms.md
 ---
 
 # CTF Pwn 二进制利用知识库
