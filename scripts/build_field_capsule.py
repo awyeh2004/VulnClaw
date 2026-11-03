@@ -26,6 +26,38 @@ PLAYBOOK_DIR = Path.home() / ".vulnclaw" / "playbooks"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.S)
 
+#: 单文件胶囊要能从 U 盘双击打开、也要能从现场门户下载，所以不能带任何可执行的
+#: webshell 原文：2026-10-31 实测，火绒 Web 扫描把带 ``<?php eval($_POST[...])``
+#: 原文的知识包判成 ``Backdoor/PHP.TinyShell.h`` 并**直接阻止下载**，整个现场包
+#: 都下不来。笔记本身是纯文本、不会执行，但 AV 只看字节特征。
+#:
+#: 处理方式是最小改写、可一眼还原：开标签的尖括号换成方括号（``<?php`` -> ``[?php``、
+#: ``<?=`` -> ``[?=``、``<%@``/``<%`` -> ``[%@``/``[%``），函数名与括号之间加一个空格
+#: （PHP/Java 都允许这种写法，删掉空格就是原文）。``<?xml`` 声明保持原样，XXE 类
+#: 文档要能照抄。
+_SHELL_TAG_SUBS: tuple[tuple[str, str], ...] = (
+    ("<?php", "[?php"),
+    ("<?PHP", "[?PHP"),
+    ("<?=", "[?="),
+    ("<%@", "[%@"),
+    ("<%", "[%"),
+    ("Runtime.getRuntime().exec", "Runtime.getRuntime().exec "),
+    ("eval(", "eval ("),
+    ("assert(", "assert ("),
+    ("system(", "system ("),
+    ("passthru(", "passthru ("),
+    ("shell_exec(", "shell_exec ("),
+)
+
+
+def _defang_shell_payloads(text: str) -> str:
+    """Break executable webshell signatures so AV does not quarantine the capsule."""
+    for old, new in _SHELL_TAG_SUBS:
+        text = text.replace(old, new)
+    # XML 声明是正常内容（XXE 笔记要照抄），撤掉上面对它的误改
+    return text.replace("[?xml", "<?xml")
+
+
 
 def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """Return (frontmatter key/value pairs, body). Tolerant of multiline values."""
@@ -70,8 +102,8 @@ def _collect_skills() -> list[dict]:
             "kind": kind,
             "group": skill,
             "title": title,
-            "meta": meta.get("description", "")[:300] if kind == "skill" else "",
-            "body": body.strip(),
+            "meta": _defang_shell_payloads(meta.get("description", "")[:300]) if kind == "skill" else "",
+            "body": _defang_shell_payloads(body.strip()),
         })
     return docs
 
@@ -90,7 +122,7 @@ def _collect_playbooks() -> list[dict]:
             "group": (meta.get("source") or "curated").lower(),
             "title": meta.get("name") or path.stem,
             "fingerprint": meta.get("fingerprint", ""),
-            "body": body.strip(),
+            "body": _defang_shell_payloads(body.strip()),
         })
     return docs
 
