@@ -116,3 +116,48 @@ def test_completeness_check_is_narrow():
     # ...but these two shapes are (synthetic bodies, same shapes as the real incident)
     assert flag_completeness_issues("x", ["CTF2{01234567-89ab-cdef-0123-456789}"])
     assert flag_completeness_issues("只有 CTF2{01234567-89ab-cdef-0123 这一段", [])
+
+
+# ── multi-layer ("套娃") goals ────────────────────────────────────────────────
+# 2026-10-31 ezphp: the first flag that reached evidence was a decoy baked into the
+# image; the gate accepted it and the run stopped two stages early. For goals that
+# themselves say the challenge is nested, FINAL must assert finality.
+
+def _make_multilayer_state(evidence_text: str) -> AgentState:
+    st = _make_flag_state(evidence_text)
+    st.goal = "这是一道套娃题：每拿到一层答案都要继续，直到拆到底，最终拿到 flag"
+    return st
+
+
+def test_multilayer_goal_rejects_grounded_decoy_without_finality_claim():
+    flag = "flag{decoy_inner_layer_123}"
+    st = _make_multilayer_state(f"GET /flag.php -> {flag}")
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+    assert not ok
+    assert "deepest layer" in reason
+
+
+def test_multilayer_goal_accepts_with_finality_claim():
+    flag = "flag{real_last_layer_456}"
+    st = _make_multilayer_state(f"cat /flag -> {flag}")
+    ok, reason, _ = _completion_gate(
+        st, f"FINAL: Flag: {flag} —— 已确认这是最深层：flag 文件 mtime 等于容器启动时间 (e008)"
+    )
+    assert ok, reason
+
+
+def test_single_layer_goal_unaffected_by_multilayer_rule():
+    """An ordinary one-flag goal still completes without any finality wording."""
+    flag = "flag{plain_single_layer_789}"
+    st = _make_flag_state(f"cat /flag -> {flag}")
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+    assert ok, reason
+
+
+def test_multilayer_goal_still_needs_grounded_flag():
+    """Finality wording must not substitute for grounding."""
+    st = _make_multilayer_state("nothing here")
+    ok, reason, _ = _completion_gate(
+        st, "FINAL: Flag: flag{ungrounded_000} —— 这是最深层"
+    )
+    assert not ok

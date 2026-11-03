@@ -259,6 +259,26 @@ _EXPLICIT_FLAG_DEMAND_RE = re.compile(
     r"(?<![A-Za-z0-9_])(flag|shell|getshell)(?![A-Za-z0-9_])", re.IGNORECASE
 )
 
+# Multi-layer ("套娃") goals. When the task itself says the challenge has several
+# nested stages, the FIRST flag-shaped token to reach evidence is usually not the
+# answer: on 2026-10-31 the ezphp run read a decoy baked into the image
+# (``flag{You_are_so_smart_8080}``), it was grounded in evidence, the gate accepted
+# it, and the run ended two stages early. These two patterns add ONE requirement
+# for such goals only -- FINAL must state why it believes there is no deeper layer
+# -- so acceptance criteria stay untouched for every ordinary single-flag task.
+_MULTILAYER_GOAL_RE = re.compile(
+    r"套娃|多层|多阶段|层层|一层一层|逐层|链式|拆到底|挖到底|继续挖|接续|"
+    r"multi-?stage|nested|layered|multi-?layer",
+    re.IGNORECASE,
+)
+# Deliberately permissive about wording, strict about MEANING: the model has to
+# assert finality, not merely repeat the flag.
+_DEEPEST_LAYER_CLAIM_RE = re.compile(
+    r"最深层|最后一层|最后层|最终层|没有下一层|无下一层|没有更深|已到底|拆到底了|挖到底了|"
+    r"deepest\s+layer|final\s+layer|last\s+layer|no\s+(?:further|deeper)\s+layer",
+    re.IGNORECASE,
+)
+
 
 def _goal_wants_flag(goal: str) -> bool:
     return _FLAG_DEMAND_RE.search(goal or "") is not None
@@ -2552,6 +2572,21 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
                     cited,
                 )
             return False, f"claimed flag not present in tool evidence: {ungrounded[0]}", cited
+        # Multi-layer goals only: a grounded flag is not yet the answer, because
+        # every inner layer of a 套娃 challenge is grounded too. Require the model
+        # to say, in FINAL, why it believes this is the deepest layer. Skipped
+        # entirely for single-flag goals, so nothing changes there.
+        if _MULTILAYER_GOAL_RE.search(goal_text) and not _DEEPEST_LAYER_CLAIM_RE.search(
+            final_text
+        ):
+            return (
+                False,
+                "goal describes a multi-layer/nested challenge, but FINAL does not state "
+                "why this is the deepest layer. Say explicitly that no further layer "
+                "remains (最深层/没有下一层/…), or keep digging: a flag that merely "
+                "appears in evidence is also exactly what a decoy looks like.",
+                cited,
+            )
 
     if not state.evidence:
         return False, "FINAL has no recorded tool evidence", cited
