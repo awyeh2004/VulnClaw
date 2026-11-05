@@ -62,18 +62,59 @@ _VULN_HINT_KEYWORDS: dict[str, str] = {
 }
 
 # Technology keywords worth passing as routing signals.
-_TECH_KEYWORDS = ("php", "java", "python", "nodejs", "node.js", "wordpress", "django", "spring")
+_TECH_KEYWORDS = (
+    "php", "java", "python", "nodejs", "node.js", "wordpress", "django", "spring",
+    "electron",
+)
+
+# Strong desktop-client markers: if one is present in the REQUEST text, the target
+# is a PC client even when the operator pasted a local URL (e.g. a CDP endpoint).
+# Bare "electron" is not enough -- see _mentions_desktop_client.
+_DESKTOP_MARKERS = (
+    "app.asar",
+    ".asar",
+    "pc客户端",
+    "pc 客户端",
+    "桌面客户端",
+    "desktop client",
+    "electron client",
+    "electron desktop",
+    "electron app",
+    "electron 客户端",
+    "electron桌面",
+)
+
+# "electron" alone also names the page engine of an ordinary web target
+# ("审计使用 Electron 打开的 Web 页面"), so it only counts next to a client word.
+_DESKTOP_CONTEXT_WORDS = ("desktop", "client", "客户端", "桌面", "ipc", "preload")
+
+_DESKTOP_SUFFIXES = (".exe", ".dmg", ".app", ".asar")
+
+
+def _mentions_desktop_client(text: str) -> bool:
+    low = (text or "").lower()
+    if any(marker in low for marker in _DESKTOP_MARKERS):
+        return True
+    return "electron" in low and any(word in low for word in _DESKTOP_CONTEXT_WORDS)
 
 
 def _infer_target_type(target: Optional[str], text: str) -> Optional[str]:
     """Conservatively infer a target type from the target string/request text."""
 
     blob = f"{target or ''} {text}".lower()
+    low_target = (target or "").lower()
+    # The request text is the operator's intent; a local artifact path is itself
+    # proof of a desktop target. Checked BEFORE the URL branch so a CDP endpoint
+    # plus "Electron 客户端" stays desktop, while a plain web URL wins over a host
+    # name that merely contains "electron".
+    if _mentions_desktop_client(text) or _mentions_desktop_client(low_target):
+        return "desktop"
+    if low_target.endswith(_DESKTOP_SUFFIXES):
+        return "desktop"
     if target:
-        low = target.lower()
-        if low.startswith(("http://", "https://")):
+        if low_target.startswith(("http://", "https://")):
             return "web"
-        if _looks_like_ip(low):
+        if _looks_like_ip(low_target):
             return "network"
     if any(keyword in blob for keyword in ("apk", "安卓", "android")):
         return "android"

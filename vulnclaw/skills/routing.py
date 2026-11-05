@@ -131,6 +131,7 @@ TECHNOLOGIES = frozenset(
         "rag",
         "memory",
         "plugin",
+        "electron",
     }
 )
 

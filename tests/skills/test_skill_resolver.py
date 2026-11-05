@@ -346,6 +346,73 @@ class TestRuntimeWiring:
         assert _extract_vuln_hints("test for rce here") == ["rce"]
         assert get_active_skill_context("show me the source code") is None
 
+    def test_desktop_client_text_routes_to_desktop(self):
+        """Electron/ASAR goals must not be inferred as plain web targets.
+
+        Measured 2026-11-04: `_infer_target_type` only knew web/network/android,
+        so an audit goal for an Electron client with a local CDP URL inferred
+        `web` and the desktop/client skill could never be selected by routing.
+        """
+        from vulnclaw.agent.skill_context import _infer_target_type
+
+        assert _infer_target_type(None, "审计 Electron 客户端 app.asar") == "desktop"
+        assert _infer_target_type(None, "pc客户端 桌面客户端 安全评估") == "desktop"
+        assert _infer_target_type("C:/tools/WorkBuddy/app.exe", "") == "desktop"
+        assert (
+            _infer_target_type("http://127.0.0.1:9223", "审计 WorkBuddy Desktop Electron/MCP Apps")
+            == "desktop"
+        )
+
+    def test_plain_web_target_stays_web(self):
+        from vulnclaw.agent.skill_context import _infer_target_type
+
+        assert _infer_target_type("https://target.example.com", "web pentest") == "web"
+        assert _infer_target_type("10.0.0.5", "network scan") == "network"
+
+    def test_electron_mention_does_not_reroute_a_web_target(self):
+        """The desktop marker must not swallow ordinary web work.
+
+        `electron` also names the page engine: a host called electron.example.com,
+        or a web page that merely happens to run inside Electron, is still a web
+        target. Only a client word next to it makes it desktop.
+        """
+        from vulnclaw.agent.skill_context import _infer_target_type
+
+        assert _infer_target_type("https://electron.example.com", "web pentest") == "web"
+        assert (
+            _infer_target_type(
+                "https://target.example.com", "审计使用 Electron 打开的 Web 页面"
+            )
+            == "web"
+        )
+
+    def test_desktop_request_selects_a_specialized_skill(self):
+        """Inference is useless unless the resolver actually picks a skill.
+
+        Measured 2026-11-04: `_infer_target_type` returned `desktop` for Electron
+        goals but no skill declared that target type, so every such request fell
+        through to the generic pentest-flow fallback.
+        """
+        from vulnclaw.agent.skill_context import resolve_active_skill_selection
+
+        selection = resolve_active_skill_selection(
+            "审计 Electron 客户端 app.asar", target="C:/tools/WorkBuddy/app.exe"
+        )
+        assert selection is not None
+        assert selection.primary == "client-reverse"
+
+        selection = resolve_active_skill_selection(
+            "审计 WorkBuddy Desktop Electron/MCP Apps",
+            target="http://127.0.0.1:9223",
+        )
+        assert selection is not None
+        assert selection.primary == "client-reverse"
+
+    def test_electron_technology_is_extracted(self):
+        from vulnclaw.agent.skill_context import _extract_technologies
+
+        assert "electron" in _extract_technologies("Electron desktop client", None)
+
     def test_ascii_tech_keyword_requires_token_boundary(self):
         from vulnclaw.agent.skill_context import _extract_technologies
 
