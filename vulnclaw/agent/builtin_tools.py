@@ -689,10 +689,15 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
 
     def _tail(recorded_as_verified: bool) -> str:
         """The refusal note belongs in the answer only when it actually took effect."""
+        # 本地 finding ≠ 平台提交。CTF 里模型曾把 report_finding 的成功回执写成
+        # “已上报漏洞”，而它只写 session.findings；平台提交是 ctf2_submit_flag /
+        # gcs_submit_flag / platform_submit 的职责，也只有它们能改 submission 状态。
+        note = "（本地 finding，仅写入本次运行；不是平台提交，不产生 submission、不计分。）"
         if not refused_verification or recorded_as_verified:
-            return ""
+            return note
         return (
-            "  ⚠️ verified=true 未被采纳：报告里没有任何可核查的依据（evidence / vuln_type / "
+            note
+            + "  ⚠️ verified=true 未被采纳：报告里没有任何可核查的依据（evidence / vuln_type / "
             "remediation 至少给一项），已按候选记录。补上依据后再报一次即可升级。"
         )
 
@@ -921,6 +926,22 @@ JSON to duplicate enforcement the platform already applies.
 _SUBMIT_TOOL_NAMES = _GATED_SUBMIT_TOOL_NAMES | {"platform_submit"}
 
 
+def _profile_blocks_submission() -> bool:
+    """Whether this run must not send anything to a scoring platform.
+
+    ``VULNCLAW_PROFILE=prod`` marks the production workspace, where a CTF scoring
+    platform submission is never intended. This is the builtin-route half of the
+    same boundary ``mcp/lifecycle.py:_profile_blocks_submission`` enforces for the
+    platform passthrough verbs.
+    """
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile() == "prod"
+    except Exception:  # noqa: BLE001 - never block scoring on a policy read error
+        return False
+
+
 from vulnclaw.agent.tools._shared import _runtime_config  # noqa: F401 — re-export
 
 
@@ -1004,6 +1025,11 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
     # (``vulnclaw/agent/submit_gate.py``), which refuses locally so a rejected
     # candidate never spends a platform attempt.
     if tool_name in _SUBMIT_TOOL_NAMES:
+        if _profile_blocks_submission():
+            return (
+                "[profile] 当前 VULNCLAW_PROFILE=prod（生产）：比赛平台提交工具在此 "
+                "profile 下不可用。生产 finding 用 report_finding 记录。"
+            )
         if not _flag_submission_enabled():
             return _submission_disabled_message()
         from vulnclaw.agent.submit_gate import submission_refusal

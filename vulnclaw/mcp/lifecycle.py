@@ -152,6 +152,24 @@ def _is_submission_tool(tool_name: str) -> bool:
     return any(name.endswith(suffix) for suffix in _SUBMISSION_TOOL_SUFFIXES)
 
 
+def _profile_blocks_submission(tool_name: str) -> bool:
+    """Whether the run profile forbids sending an answer to a scoring platform.
+
+    ``VULNCLAW_PROFILE=prod`` marks the production workspace. Sending a
+    production finding to a CTF scoring platform is never intended, and the
+    platform verbs arrive through MCP (``ctf2_submit_*``), so the check lives on
+    the one funnel every MCP call passes through rather than in prompt wording.
+    """
+    if not _is_submission_tool(tool_name):
+        return False
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile() == "prod"
+    except Exception:  # noqa: BLE001 - never block scoring on a policy read error
+        return False
+
+
 _submit_hold_lock = threading.Lock()
 _submit_hold: Any = None
 
@@ -1621,6 +1639,15 @@ class MCPLifecycleManager(ProbeMixin):
         # ``ctf2_submit_competition_flag`` that never reaches our own dispatch
         # table. Anything narrower would miss exactly the route the competition
         # uses.
+        # Production profile never talks to a scoring platform (see
+        # _profile_blocks_submission). Checked before the hold scheduler so a
+        # held submission cannot fire later from a prod run either.
+        if _profile_blocks_submission(tool_name):
+            return (
+                "[profile] 当前 VULNCLAW_PROFILE=prod（生产）：比赛平台提交工具在此 "
+                "profile 下不可用。生产 finding 用 report_finding 记录，不要提交到"
+                "计分平台。"
+            )
         held = self._maybe_hold_submission(server_name, tool_name, arguments)
         if held is not None:
             return held
