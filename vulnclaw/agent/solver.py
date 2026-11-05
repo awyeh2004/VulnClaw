@@ -264,20 +264,122 @@ _EXPLICIT_FLAG_DEMAND_RE = re.compile(
 # answer: on 2026-10-31 the ezphp run read a decoy baked into the image
 # (``flag{You_are_so_smart_8080}``), it was grounded in evidence, the gate accepted
 # it, and the run ended two stages early. These two patterns add ONE requirement
-# for such goals only -- FINAL must state why it believes there is no deeper layer
-# -- so acceptance criteria stay untouched for every ordinary single-flag task.
+# for such goals only -- the completion text must state why it believes there is
+# no deeper layer -- so acceptance criteria stay untouched for every ordinary
+# single-flag task.
+#
+# Scope is deliberately narrow: only phrasing that says the ANSWER itself has more
+# hidden stages behind it. 多层/逐层/多阶段/multi-stage/nested/layered on their own
+# describe ordinary work ("这是一道多层编码题，逐层解码直到 flag", "多阶段流程",
+# "layered defense", "nested archive") where the flag IS the end of the task;
+# matching those rejected fully-grounded flags and pushed runs into extra digging.
 _MULTILAYER_GOAL_RE = re.compile(
-    r"套娃|多层|多阶段|层层|一层一层|逐层|链式|拆到底|挖到底|继续挖|接续|"
-    r"multi-?stage|nested|layered|multi-?layer",
+    r"套娃"
+    r"|多层(?:嵌套|套娃|关卡|封装)"
+    r"|一层套一层|层层套|层层包装"
+    r"|下一层|下一关|更深一层|更深层"
+    r"|一层[^。\n]{0,16}(?:继续|接着|往下|再进)"
+    r"|拆到底|挖到底"
+    r"|(?:deepest|final|last)\s+layer"
+    r"|nested\s+(?:challenge|stage|level|layer)"
+    r"|(?:multi-?stage|multi-?layer)\s+(?:challenge|pwn|goal)",
     re.IGNORECASE,
 )
 # Deliberately permissive about wording, strict about MEANING: the model has to
-# assert finality, not merely repeat the flag.
+# assert finality, not merely repeat the flag. The list covers the shapes
+# measured in real finals; a synonym that is missing here rejects a correct
+# answer and feeds the rejection back into the run (2026-11-04 review), so the
+# vocabulary is deliberately wider than the wording the prompt suggests.
 _DEEPEST_LAYER_CLAIM_RE = re.compile(
-    r"最深层|最后一层|最后层|最终层|没有下一层|无下一层|没有更深|已到底|拆到底了|挖到底了|"
-    r"deepest\s+layer|final\s+layer|last\s+layer|no\s+(?:further|deeper)\s+layer",
+    r"最深层|最底层|最内层|最后一层|最后层|最终层|最后的阶段|最后一个阶段|"
+    r"没有下一层|无下一层|没有后续层|没有后续的层|不存在下一层|不存在后续层|"
+    r"后面没有新的?层|没有更深|再没有更深的?层|已到底|拆到底了|挖到底了|"
+    r"这是底|确认是底|已经到底|"
+    r"deepest\s+layer|final\s+layer|last\s+layer|terminal\s+layer|"
+    r"no\s+(?:further|deeper|more)\s+(?:layer|stage)s?|"
+    r"nothing\s+(?:deeper|below)|no\s+deeper\s+stage|"
+    r"reached\s+the\s+(?:bottom|last)\s+layer",
     re.IGNORECASE,
 )
+# A claim only counts when it is not negated ("还不能确认没有下一层"). Without
+# this the widened vocabulary would accept the opposite statement.
+_FINALITY_NEGATION_RE = re.compile(
+    r"(?:还没|尚未|没有到|未到|不能确认|无法确认|无法确定|不确定|不敢确认|"
+    r"not\s+yet|cannot\s+(?:confirm|verify|tell)|unable\s+to\s+confirm|"
+    r"can(?:'|no)t\s+confirm|unclear|unverified)[^。！？!?\n]{0,24}$",
+    re.IGNORECASE,
+)
+#: Structured alternative to natural-language wording. Free prose is what the
+#: model actually writes, but a deterministic marker removes the synonym lottery
+#: entirely; the rejection message suggests it.
+_FINALITY_STATUS_RE = re.compile(
+    r"FINAL_STATUS\s*[:=]\s*[\"']?(?:deepest[_-]layer[_-]confirmed|deepest[_-]layer|"
+    r"final[_-]layer|terminal[_-]layer)[\"']?",
+    re.IGNORECASE,
+)
+
+
+def _states_finality(text: str) -> bool:
+    """True when ``text`` asserts, un-negated, that this is the last layer."""
+    value = text or ""
+    if _FINALITY_STATUS_RE.search(value):
+        return True
+    for match in _DEEPEST_LAYER_CLAIM_RE.finditer(value):
+        window = value[max(0, match.start() - 32):match.start()]
+        if _FINALITY_NEGATION_RE.search(window):
+            continue
+        return True
+    return False
+
+
+def _multilayer_gate_enabled(state: AgentState) -> bool:
+    """Whether the deepest-layer completion rule applies to this run.
+
+    The rule exists to stop a CTF run on a decoy flag (2026-10-31 ezphp), but the
+    trigger vocabulary (``multi-stage``/``layered``/``nested``/``多阶段``) is also
+    ordinary production prose -- a remediation or defense review is not a nested
+    flag challenge, and rejecting its FINAL would keep a finished audit running.
+    So the rule is a CTF completion policy, decided from the run's task mode and
+    never from the nested wording alone.
+
+    ``state.task_mode`` is filled in by ``_system_prompt`` each turn. Older
+    snapshots and direct callers carry no mode; for those the CTF marker
+    vocabulary (or a platform challenge ref) has to agree before the rule fires.
+    """
+    mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if mode:
+        return mode == "ctf"
+    try:
+        from vulnclaw.agent.task_mode import detect_task_mode
+
+        if detect_task_mode(getattr(state, "goal", "") or "")[0] == "ctf":
+            return True
+        return _run_has_platform_ref(state)
+    except Exception:  # noqa: BLE001 - fail open: never block an ordinary run
+        return False
+
+
+def _multilayer_completion_issue(state: AgentState, text: str) -> Optional[str]:
+    """Return why a multi-layer goal is not finished yet, or ``None``.
+
+    Shared by the explicit ``FINAL:`` gate and the implicit flag path so the decoy
+    protection cannot be bypassed by simply omitting the marker: on 2026-10-31 the
+    ezphp run ended two stages early on a decoy that was grounded in evidence, and
+    only the explicit path was guarded at first.
+    """
+    if not _multilayer_gate_enabled(state):
+        return None
+    if not _MULTILAYER_GOAL_RE.search(getattr(state, "goal", "") or ""):
+        return None
+    if _states_finality(text or ""):
+        return None
+    return (
+        "goal describes a multi-layer/nested challenge, but the completion does not "
+        "state why this is the deepest layer. Say explicitly that no further layer "
+        "remains (最深层/没有下一层/…), or emit `FINAL_STATUS: deepest_layer_confirmed`, "
+        "or keep digging: a flag that merely appears in evidence is also exactly what "
+        "a decoy looks like."
+    )
 
 
 def _goal_wants_flag(goal: str) -> bool:
@@ -2326,6 +2428,14 @@ def _system_prompt(agent: AgentContext, state: AgentState) -> str:
         from vulnclaw.agent.task_mode import effective_task_mode, mode_instruction
 
         mode, mode_reason = effective_task_mode(getattr(agent, "config", None), state.goal or "")
+        # The completion gate is a pure function of ``state``; record the resolved
+        # mode there so the CTF-only deepest-layer rule can read it later. Guarded
+        # separately: a stub state in an entry point without the declared field
+        # must not cost the prompt its tool card / mode block.
+        try:
+            state.task_mode = mode
+        except Exception:  # noqa: BLE001
+            pass
         if runtime is not None:
             runtime.task_mode = mode  # visible to the run log / watchdog
             runtime.task_mode_reason = mode_reason
@@ -2576,17 +2686,9 @@ def _completion_gate(state: AgentState, text: str) -> tuple[bool, str, list[str]
         # every inner layer of a 套娃 challenge is grounded too. Require the model
         # to say, in FINAL, why it believes this is the deepest layer. Skipped
         # entirely for single-flag goals, so nothing changes there.
-        if _MULTILAYER_GOAL_RE.search(goal_text) and not _DEEPEST_LAYER_CLAIM_RE.search(
-            final_text
-        ):
-            return (
-                False,
-                "goal describes a multi-layer/nested challenge, but FINAL does not state "
-                "why this is the deepest layer. Say explicitly that no further layer "
-                "remains (最深层/没有下一层/…), or keep digging: a flag that merely "
-                "appears in evidence is also exactly what a decoy looks like.",
-                cited,
-            )
+        multilayer_issue = _multilayer_completion_issue(state, final_text)
+        if multilayer_issue:
+            return False, multilayer_issue, cited
 
     if not state.evidence:
         return False, "FINAL has no recorded tool evidence", cited
@@ -2630,6 +2732,12 @@ def _implicit_flag_completion(state: AgentState, text: str) -> tuple[bool, str, 
     grounded = [flag for flag in flags if flag in evidence_text]
     if not grounded:
         return False, "", []
+    # Same multi-layer guard as the explicit FINAL: gate. Without it a nested goal
+    # completes on the first grounded decoy simply because the model left out the
+    # ``FINAL:`` marker -- the exact 2026-10-31 early-stop, just via another path.
+    multilayer_issue = _multilayer_completion_issue(state, text or "")
+    if multilayer_issue:
+        return False, multilayer_issue, []
     evidence_ids = [
         item.id
         for item in state.evidence
@@ -3763,6 +3871,14 @@ async def _solve_impl(
             reason = state.complete_reason
             emit("completed", {"reason": reason, "evidence": implicit_evidence})
             break
+
+        if implicit_reason:
+            # Only the multi-layer guard produces a reason here; feed it back so the
+            # model can either justify finality or keep digging instead of looping
+            # silently on the same grounded decoy.
+            agent.context.add_user_message(
+                "[evidence gate] Completion not accepted: " + implicit_reason
+            )
 
         try:
             agent.context.state.save()

@@ -428,6 +428,12 @@ class AgentState(BaseModel):
 
     origin: str = ""
     goal: str = ""
+    #: Resolved task mode for this run (``pentest``/``ir``/``ctf``), written by the
+    #: solver when it builds the system prompt. The completion gate reads it so a
+    #: CTF-only rule (deepest-layer finality, see ``solver._multilayer_gate_enabled``)
+    #: cannot fire on a production run that merely uses "multi-stage"/"layered"
+    #: prose. Declared here because pydantic v2 rejects undeclared setattr.
+    task_mode: str = ""
     evidence: list[EvidenceRecord] = Field(
         default_factory=list,
         validation_alias=AliasChoices("evidence", "memories"),

@@ -9,7 +9,7 @@ are NOT grounded in evidence.
 import re
 
 from vulnclaw.agent.agent_state import AgentState
-from vulnclaw.agent.solver import _completion_gate
+from vulnclaw.agent.solver import _completion_gate, _implicit_flag_completion
 
 
 def _make_flag_state(evidence_text: str) -> AgentState:
@@ -126,6 +126,9 @@ def test_completeness_check_is_narrow():
 def _make_multilayer_state(evidence_text: str) -> AgentState:
     st = _make_flag_state(evidence_text)
     st.goal = "这是一道套娃题：每拿到一层答案都要继续，直到拆到底，最终拿到 flag"
+    # The deepest-layer rule is a CTF completion policy (see
+    # ``solver._multilayer_gate_enabled``); production runs must not trigger it.
+    st.task_mode = "ctf"
     return st
 
 
@@ -161,3 +164,137 @@ def test_multilayer_goal_still_needs_grounded_flag():
         st, "FINAL: Flag: flag{ungrounded_000} —— 这是最深层"
     )
     assert not ok
+
+
+def test_multilayer_goal_guards_the_implicit_path_too():
+    """Dropping the `FINAL:` marker must not bypass the deepest-layer rule.
+
+    The implicit path completes on any grounded flag without citing evidence, so
+    a nested goal reached its decoy there even though the explicit gate rejected
+    the very same text.
+    """
+    flag = "flag{decoy_inner_layer_123}"
+    st = _make_multilayer_state(f"GET /flag.php -> {flag}")
+
+    ok, reason, _ = _implicit_flag_completion(st, f"拿到 {flag} 了")
+
+    assert not ok
+    assert "deepest layer" in reason
+
+
+def test_multilayer_goal_implicit_path_accepts_finality_claim():
+    flag = "flag{real_last_layer_456}"
+    st = _make_multilayer_state(f"cat /flag -> {flag}")
+
+    ok, reason, evidence = _implicit_flag_completion(
+        st, f"拿到 {flag}，已确认这是最深层，没有下一层"
+    )
+
+    assert ok, reason
+    assert evidence == ["e008"]
+
+
+def test_encoding_layers_are_not_a_nested_challenge():
+    """`多层编码 / 逐层解码` describes transforms, not hidden stages.
+
+    The flag there IS the end of the task: requiring a finality claim rejected a
+    fully-grounded flag and sent the run into pointless extra digging.
+    """
+    flag = "flag{decoded_final_222}"
+    st = _make_flag_state(f"base64 -d | gzip -d -> {flag}")
+    st.goal = "这是一道多层编码题，逐层解码直到 flag"
+
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+
+    assert ok, reason
+
+
+def test_ordinary_multistage_wording_is_not_a_nested_challenge():
+    """`多阶段流程` / `layered defense` / `nested archive` are not 套娃 challenges."""
+    flag = "flag{ordinary_flow_333}"
+    for goal in (
+        "分多阶段流程完成本次资产盘点，最后拿到 flag",
+        "layered defense review, then capture the flag",
+        "unpack this nested archive to get the flag",
+    ):
+        st = _make_flag_state(f"tool output -> {flag}")
+        st.goal = goal
+        ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+        assert ok, f"{goal}: {reason}"
+
+
+# ── CTF-only scope of the deepest-layer rule ─────────────────────────────────
+# The rule protects a CTF run from a decoy flag. A production run may legitimately
+# say "multi-stage"/"layered"/"层层" without any hidden answer behind the first
+# result, so the rule must never fire there (2026-11-04 review).
+
+def test_deepest_layer_rule_does_not_fire_on_a_production_run():
+    flag = "flag{production_layered_444}"
+    st = _make_flag_state(f"review output -> {flag}")
+    st.goal = "逐层核查 layered defense，最终拿到 flag"
+    st.task_mode = "pentest"
+
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+
+    assert ok, reason
+
+
+def test_deepest_layer_rule_fires_without_a_stored_mode_when_the_goal_is_ctf():
+    """Older snapshots carry no mode: a CTF-marked goal still gets the guard."""
+    flag = "flag{decoy_without_mode_555}"
+    st = _make_flag_state(f"GET /flag.php -> {flag}")
+    st.goal = "这是一道套娃题：拿到 flag{...} 后还要继续"
+    st.task_mode = ""
+
+    ok, reason, _ = _completion_gate(st, f"FINAL: Flag: {flag} (evidence e008)")
+
+    assert not ok
+    assert "deepest layer" in reason
+
+
+# ── finality wording ────────────────────────────────────────────────────────
+# The gate asks for natural language, so the accepting vocabulary must cover the
+# synonyms a model actually writes; a miss rejects a correct answer and feeds the
+# rejection back into the run.
+
+def test_finality_synonyms_are_accepted():
+    flag = "flag{synonym_final_666}"
+    for phrasing in (
+        "已确认不存在后续层级",
+        "确认没有更深的一层",
+        "已经到达最底层",
+        "后面没有新的层",
+        "no more layers remain",
+        "confirmed as the terminal layer",
+        "nothing deeper remains",
+    ):
+        st = _make_multilayer_state(f"cat /flag -> {flag}")
+        ok, reason, _ = _completion_gate(
+            st, f"FINAL: Flag: {flag} —— {phrasing} (evidence e008)"
+        )
+        assert ok, f"{phrasing}: {reason}"
+
+
+def test_negated_finality_is_still_rejected():
+    flag = "flag{negated_final_777}"
+    for phrasing in (
+        "还不能确认没有下一层",
+        "尚未到达最深层",
+        "cannot confirm no more layers remain",
+    ):
+        st = _make_multilayer_state(f"cat /flag -> {flag}")
+        ok, reason, _ = _completion_gate(
+            st, f"FINAL: Flag: {flag} —— {phrasing} (evidence e008)"
+        )
+        assert not ok, f"{phrasing} must not count as a finality claim"
+        assert "deepest layer" in reason
+
+
+def test_structured_final_status_is_accepted():
+    """A deterministic marker must not depend on picking the right synonym."""
+    flag = "flag{structured_final_888}"
+    st = _make_multilayer_state(f"cat /flag -> {flag}")
+    ok, reason, _ = _completion_gate(
+        st, f"FINAL: Flag: {flag}\nFINAL_STATUS: deepest_layer_confirmed"
+    )
+    assert ok, reason
