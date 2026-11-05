@@ -232,6 +232,21 @@ def _format_explicit_skill_context(
         desc = primary.get("description", "").strip()
         parts.append(desc or f"(skill {selection.primary} has an empty body)")
 
+    try:
+        from vulnclaw.skills.workflow import parse_workflow
+
+        workflow = parse_workflow(primary.get("workflow"))
+    except Exception:
+        workflow = None
+    if workflow is not None and workflow.is_actionable():
+        # One part, not one part per line: the formatter joins parts with a
+        # blank line, which would split the markdown table row by row.
+        parts.append("\n".join(workflow.to_prompt_lines()))
+        if workflow.warnings:
+            parts.append(
+                "<!-- workflow warnings: " + "; ".join(workflow.warnings) + " -->"
+            )
+
     support_lines: list[str] = []
     for name in selection.supporting:
         skill = load_skill_by_name(name)

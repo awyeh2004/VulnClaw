@@ -46,6 +46,34 @@ LOCK → ANGLES → INTENT → EVIDENCE/FACT → REVIEW → HIT/MISS → FINDING
   再用 CDP/日志确认，不要直接改结论。
 - **submit_gate**：最终 finding 必须能追溯到 evidence；没有 witness 的 fact 不能作为报告依据。
 
+
+## 4.1 Skill workflow（可选阶段表）
+
+显式调用的 skill 可以在 frontmatter 声明 `workflow:`：
+
+```yaml
+workflow:
+  modes: [pentest, audit]
+  phases:
+    - id: surface
+      goal: ...
+      tools: [source_extract, blackboard_create_angle]
+      evidence: [ASAR listing]
+      exit: every surface has an ANGLE
+  gates:
+    - after: surface
+      require: [web_map_summary]
+```
+
+用法：
+
+- 每个 phase 对应一个 `blackboard_create_angle`，开始前建 ANGLE，结束用
+  `blackboard_hit_angle` / `blackboard_miss_angle` 关闭；
+- 当前 phase 未决时不要开下一个；`gates` 里的工具先跑再进入下一阶段；
+- FINAL 前所有 phase 必须关闭，confirmed finding 必须绑定 evidence；
+- workflow 只是阶段表，不替代 `blackboard_summary` / `blackboard_review`；
+- CTF 的 fail-fast 优先于 workflow 阶段表，不要因为阶段没走完而卡死。
+
 ## 5. 生产 / CTF 分离
 
 - 本地 `vulnclaw` 是 CTF/aw；生产用 prod worktree 的隔离入口，不要改全局 editable 安装。

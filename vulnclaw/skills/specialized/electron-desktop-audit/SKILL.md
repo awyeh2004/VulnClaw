@@ -18,6 +18,45 @@ routing:
 shared_references:
   - vulnclaw-mechanisms.md
 
+workflow:
+  modes: [pentest, audit]
+  phases:
+    - id: surface
+      goal: Map the Electron attack surface (main/preload/renderer/local HTTP/MCP)
+      tools: [source_extract, fetch, http_probe_batch, web_map_add, blackboard_create_angle]
+      evidence: [ASAR file list, BrowserWindow/IPC grep, local URLs]
+      exit: Every surface has an ANGLE
+    - id: ipc
+      goal: Test preload/contextBridge/IPC authorization and path validation
+      tools: [python_execute, shell_command, evidence_view, blackboard_add_fact]
+      evidence: [caller-controlled params, denied vs allowed outputs]
+      exit: Finding recorded with evidence, or ANGLE closed as miss
+    - id: renderer
+      goal: Test renderer/iframe/webview trust boundaries
+      tools: [fetch, http_probe_batch, python_execute, evidence_view]
+      evidence: [CSP/frame headers, postMessage origin checks, DOM sinks]
+      exit: XSS/iframe path confirmed or rejected
+    - id: files
+      goal: Test file read/write/download/share path handling
+      tools: [python_execute, evidence_view, blackboard_add_fact]
+      evidence: [default deny, caller allowlist bypass, write result]
+      exit: Read/write primitive confirmed or rejected
+    - id: mcp
+      goal: Test MCP Apps host bridge, permissions, and message injection
+      tools: [fetch, traffic_list, traffic_bind_evidence, blackboard_add_fact]
+      evidence: [JSON-RPC transcript, permission state, agent run log]
+      exit: Each MCP finding has bound evidence
+    - id: report
+      goal: Bind evidence and report only confirmed findings
+      tools: [traffic_list, traffic_bind_evidence, report_finding, blackboard_set_lock]
+      evidence: [bound request, reproduction log]
+      exit: report_finding accepted and completion gate passed
+  gates:
+    - after: surface
+      require: [web_map_summary]
+    - after: report
+      require: [blackboard_summary]
+
 ---
 
 # Electron / PC 客户端安全审计 Skill

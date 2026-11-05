@@ -9,6 +9,45 @@ routing:
 shared_references:
   - vulnclaw-mechanisms.md
 
+workflow:
+  modes: [pentest, audit]
+  phases:
+    - id: inventory
+      goal: Inventory LLM/agent/MCP/tools/skills/RAG/memory components and trust boundaries
+      tools: [source_extract, fetch, blackboard_create_angle]
+      evidence: [component list, tool schemas, config]
+      exit: Every component has an ANGLE
+    - id: prompt
+      goal: Test direct/indirect prompt injection and context/memory poisoning
+      tools: [fetch, python_execute, evidence_view]
+      evidence: [prompt, response delta, canary]
+      exit: Injection confirmed or rejected
+    - id: tool-abuse
+      goal: Test tool description poisoning, unauthorized tool calls, and MCP trust boundary
+      tools: [traffic_list, traffic_view, evidence_view]
+      evidence: [JSON-RPC transcript, tool call log]
+      exit: Tool abuse confirmed or rejected
+    - id: authz
+      goal: Test app/server identity, token scope, and cross-app access
+      tools: [traffic_list, http_probe_batch, evidence_view]
+      evidence: [with/without token, cross-app result]
+      exit: Authorization flaw confirmed or rejected
+    - id: data
+      goal: Test prompt/secret leakage and egress channels
+      tools: [evidence_search, traffic_list, evidence_view]
+      evidence: [leaked data, outbound request]
+      exit: Leak confirmed or rejected
+    - id: report
+      goal: Bind evidence and report only confirmed findings
+      tools: [traffic_bind_evidence, report_finding, blackboard_set_lock]
+      evidence: [bound request, reproduction log]
+      exit: report_finding accepted and completion gate passed
+  gates:
+    - after: inventory
+      require: [blackboard_summary]
+    - after: report
+      require: [blackboard_summary]
+
 ---
 
 # AI 与 MCP 安全评估 Skill

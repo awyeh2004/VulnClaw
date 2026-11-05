@@ -302,6 +302,10 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
     # Frontmatter-declared names allowed to resolve against the shared root
     # (see _SHARED_REFERENCES_DIR). Empty for every skill that does not opt in.
     shared_references: list[str] = []
+    # Optional phase table (see vulnclaw.skills.workflow). Kept raw here so the
+    # loader stays free of the pydantic workflow model; the prompt formatter
+    # parses it only for an explicit invocation.
+    workflow: dict[str, Any] = {}
     body = content
 
     if content.startswith("---"):
@@ -326,6 +330,9 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
                     shared_references = _clean_shared_reference_names(
                         frontmatter.get("shared_references")
                     )
+                    raw_workflow = frontmatter.get("workflow")
+                    if isinstance(raw_workflow, dict):
+                        workflow = raw_workflow
             except yaml.YAMLError:
                 pass
             body = parts[2].strip()
@@ -338,6 +345,7 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
         "requires_target": requires_target,
         "routing": routing,
         "shared_references": shared_references,
+        "workflow": workflow,
         "references": [],
         "references_dir": "",
         "skill_dir": str(path.parent) if path.name == "SKILL.md" else "",
