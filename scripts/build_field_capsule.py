@@ -22,7 +22,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO / "vulnclaw" / "skills"
-PLAYBOOK_DIR = Path.home() / ".vulnclaw" / "playbooks"
+
+
+def _default_playbook_dir() -> Path:
+    """Playbooks of THIS profile only.
+
+    Delegates to ``vulnclaw.agent.playbook.PLAYBOOKS_DIR`` so the capsule and the
+    auto-recall path can never disagree about which store belongs to this profile
+    (CTF: ``<config>/playbooks``, production: ``<config>/playbooks-prod``).
+    """
+    try:
+        from vulnclaw.agent.playbook import PLAYBOOKS_DIR
+
+        return Path(PLAYBOOKS_DIR)
+    except Exception:  # noqa: BLE001 - standalone use outside the package
+        return Path.home() / ".vulnclaw" / "playbooks"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.S)
 
@@ -35,6 +49,10 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.S)
 #: ``<?=`` -> ``[?=``、``<%@``/``<%`` -> ``[%@``/``[%``），函数名与括号之间加一个空格
 #: （PHP/Java 都允许这种写法，删掉空格就是原文）。``<?xml`` 声明保持原样，XXE 类
 #: 文档要能照抄。
+#:
+#: 作用域（2026-11-04 review）：只改"看起来可执行的 payload"所在的行/块，不再对整篇
+#: 笔记做全局 ``replace``。旧实现对 ``eval(``/``system(`` 一律改写，把 ``model.eval()``、
+#: ``os.system(...)``、普通模板语法都改坏了，胶囊里的示例无法直接复制运行。
 _SHELL_TAG_SUBS: tuple[tuple[str, str], ...] = (
     ("<?php", "[?php"),
     ("<?PHP", "[?PHP"),
@@ -49,13 +67,48 @@ _SHELL_TAG_SUBS: tuple[tuple[str, str], ...] = (
     ("shell_exec(", "shell_exec ("),
 )
 
+#: 以 ``<?xml`` 开头的行不是 PHP 短标签（XML 声明要照抄），``(?!xml)`` 排除它。
+_OPEN_TAG_RE = re.compile(r"<\?(?!xml)|<%@|<%", re.IGNORECASE)
+_CLOSE_TAG_RE = re.compile(r"\?>|%>")
+#: 一行里出现这些就基本可以确定是 webshell 交互代码（而非普通 API 示例）。
+_PAYLOAD_CONTEXT_RE = re.compile(
+    r"\$_(?:POST|GET|REQUEST|COOKIE|SERVER|FILES)\b|request\.getParameter|"
+    r"Runtime\.getRuntime\(\)\.exec|php://input|base64_decode\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _defang_line(line: str) -> str:
+    for old, new in _SHELL_TAG_SUBS:
+        line = line.replace(old, new)
+    return line
+
 
 def _defang_shell_payloads(text: str) -> str:
-    """Break executable webshell signatures so AV does not quarantine the capsule."""
-    for old, new in _SHELL_TAG_SUBS:
-        text = text.replace(old, new)
-    # XML 声明是正常内容（XXE 笔记要照抄），撤掉上面对它的误改
-    return text.replace("[?xml", "<?xml")
+    """Break executable webshell signatures so AV does not quarantine the capsule.
+
+    Line-scoped on purpose: a line is rewritten when it opens a server-side
+    template tag (``<?php``/``<?=``/``<%@``/``<%``), when it still sits inside such
+    a block, or when it carries a webshell interaction marker (``$_POST``,
+    ``request.getParameter``, …). Everything else -- ``model.eval()``,
+    ``os.system()``, ordinary tutorial code -- is left byte-identical.
+    """
+    if not text:
+        return text
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines(keepends=True):
+        opens = _OPEN_TAG_RE.search(line) is not None
+        if opens or in_block or _PAYLOAD_CONTEXT_RE.search(line):
+            out.append(_defang_line(line))
+        else:
+            out.append(line)
+        if opens and not _CLOSE_TAG_RE.search(line):
+            in_block = True
+        elif in_block and _CLOSE_TAG_RE.search(line):
+            in_block = False
+    # XML 声明是正常内容（XXE 笔记要照抄），撤掉任何对它的误改。
+    return "".join(out).replace("[?xml", "<?xml")
 
 
 
@@ -108,11 +161,11 @@ def _collect_skills() -> list[dict]:
     return docs
 
 
-def _collect_playbooks() -> list[dict]:
+def _collect_playbooks(playbook_dir: Path) -> list[dict]:
     docs: list[dict] = []
-    if not PLAYBOOK_DIR.is_dir():
+    if not playbook_dir.is_dir():
         return docs
-    for path in sorted(PLAYBOOK_DIR.glob("*.md")):
+    for path in sorted(playbook_dir.glob("*.md")):
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, body = _split_frontmatter(text)
         docs.append({
@@ -291,9 +344,18 @@ def _nav(docs: list[dict]) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(REPO / "field-capsule.html"))
+    ap.add_argument(
+        "--playbook-dir",
+        default="",
+        help=(
+            "Playbook directory to embed (default: <VULNCLAW_CONFIG_DIR>/playbooks, "
+            "so only the current profile's notes are included)"
+        ),
+    )
     args = ap.parse_args()
 
-    docs = _collect_playbooks() + _collect_skills()
+    playbook_dir = Path(args.playbook_dir) if args.playbook_dir else _default_playbook_dir()
+    docs = _collect_playbooks(playbook_dir) + _collect_skills()
     if not docs:
         raise SystemExit("no documents collected -- check the source paths")
 
@@ -308,7 +370,8 @@ def main() -> None:
     print(f"{out}  {out.stat().st_size/1e6:.1f} MB  "
           f"docs={len(docs)} (playbooks={sum(1 for d in docs if d['kind']=='playbook')}, "
           f"validated={validated}, skills={sum(1 for d in docs if d['kind']=='skill')}, "
-          f"references={sum(1 for d in docs if d['kind']=='reference')})")
+          f"references={sum(1 for d in docs if d['kind']=='reference')}) "
+          f"[playbooks: {playbook_dir}]")
 
 
 if __name__ == "__main__":
