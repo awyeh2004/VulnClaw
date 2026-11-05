@@ -2,7 +2,8 @@
 name: ctf-misc
 description: CTF杂项知识库 — Python Jail逃逸、Bash Jail逃逸、编码链识别与解码、QR/音频/图像隐写、音频频谱与波形分析（MP3/WAV）、游戏VM逆向、CTFd API导航、Linux提权
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
+  - ctf-mechanisms.md
 ---
 
 # CTF 杂项知识库

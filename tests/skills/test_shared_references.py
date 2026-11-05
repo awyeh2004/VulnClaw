@@ -223,3 +223,57 @@ def test_real_library_reference_lists_stay_sorted():
             )
             checked += 1
     assert checked > 50, f"expected the package skills, found {checked}"
+
+
+# ── CTF-only shared references are gated by run profile ─────────────────────
+# The CTF mechanics doc names answer sheets and platform submit verbs. A
+# production run must not receive it at all -- "the doc says don't use it" is not
+# a boundary, so the loader drops the declaration under VULNCLAW_PROFILE=prod and
+# the resolver cannot reach the file either.
+
+def _ctf_skill_dir(tmp_path):
+    shared = tmp_path / "shared-root"
+    shared.mkdir()
+    (shared / "operational-mechanisms.md").write_text("OPS", encoding="utf-8")
+    (shared / "ctf-mechanisms.md").write_text("CTF", encoding="utf-8")
+    skill_dir = tmp_path / "ctfskill"
+    (skill_dir / "references").mkdir(parents=True)
+    frontmatter = "\n".join(
+        [
+            "---",
+            "name: ctfskill",
+            "description: t",
+            "shared_references:",
+            "  - operational-mechanisms.md",
+            "  - ctf-mechanisms.md",
+            "---",
+            "body",
+            "",
+        ]
+    )
+    (skill_dir / "SKILL.md").write_text(frontmatter, encoding="utf-8")
+    return shared, skill_dir
+
+
+def test_ctf_mechanics_load_in_the_ctf_profile(tmp_path, monkeypatch):
+    shared, skill_dir = _ctf_skill_dir(tmp_path)
+    monkeypatch.setattr(loader, "_SHARED_REFERENCES_DIR", shared)
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+
+    parsed = loader._parse_skill_directory(skill_dir)
+
+    assert parsed["shared_references"] == [
+        "operational-mechanisms.md",
+        "ctf-mechanisms.md",
+    ]
+
+
+def test_ctf_mechanics_are_dropped_in_the_prod_profile(tmp_path, monkeypatch):
+    shared, skill_dir = _ctf_skill_dir(tmp_path)
+    monkeypatch.setattr(loader, "_SHARED_REFERENCES_DIR", shared)
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+
+    parsed = loader._parse_skill_directory(skill_dir)
+
+    assert parsed["shared_references"] == ["operational-mechanisms.md"]
+    assert "ctf-mechanisms.md" not in parsed["references"]

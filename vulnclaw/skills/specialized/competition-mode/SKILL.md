@@ -6,7 +6,8 @@ routing:
   task_types: [ctf, triage, audit]
   target_types: [ctf, host, web]
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
+  - ctf-mechanisms.md
 ---
 
 # 比赛模式 Skill

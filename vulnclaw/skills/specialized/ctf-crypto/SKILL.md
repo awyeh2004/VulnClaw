@@ -5,7 +5,8 @@ routing:
   target_types: [ctf, crypto]
   task_types: [ctf, crypto]
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
+  - ctf-mechanisms.md
 ---
 
 # CTF 密码学攻击知识库

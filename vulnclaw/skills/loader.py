@@ -49,6 +49,24 @@ def is_valid_skill_name(name: str) -> bool:
 # directory and its name fails is_valid_skill_name, so no scanner picks it up.
 _SHARED_REFERENCES_DIR = Path(__file__).parent / "_shared" / "references"
 
+#: Shared references that describe CTF-only mechanics (answer sheet, flag
+#: submission, competition pacing). A production run must not receive them: the
+#: text names tools and workflows a production audit should not even see, and
+#: "the doc says production should not use it" is weaker than not loading it.
+_CTF_ONLY_SHARED_REFS = frozenset({"ctf-mechanisms.md"})
+
+
+def _profile_allows_shared(name: str) -> bool:
+    """Whether the current run profile may load this shared reference."""
+    if name not in _CTF_ONLY_SHARED_REFS:
+        return True
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile() != "prod"
+    except Exception:  # noqa: BLE001 - never break skill loading on a policy check
+        return True
+
 
 def _clean_shared_reference_names(raw: Any) -> list[str]:
     """Normalize the frontmatter ``shared_references`` list to safe relative names.
@@ -323,9 +341,13 @@ def _parse_skill_file(path: Path) -> dict[str, Any]:
                     raw_routing = frontmatter.get("routing")
                     if isinstance(raw_routing, dict):
                         routing = raw_routing
-                    shared_references = _clean_shared_reference_names(
-                        frontmatter.get("shared_references")
-                    )
+                    shared_references = [
+                        ref
+                        for ref in _clean_shared_reference_names(
+                            frontmatter.get("shared_references")
+                        )
+                        if _profile_allows_shared(ref)
+                    ]
             except yaml.YAMLError:
                 pass
             body = parts[2].strip()

@@ -14,7 +14,7 @@ routing:
     - 页面性能
     - 压力测试
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
 ---
 
 # 跑分基准驱动 Skill

@@ -19,7 +19,7 @@ routing:
     - security baseline
     - baseline hardening
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
 ---
 
 # 安全加固 Skill

@@ -7,7 +7,8 @@ routing:
   technologies: [php]
   vulnerability_classes: [rce, ssti, deserialization, type_juggling, path_traversal]
 shared_references:
-  - vulnclaw-mechanisms.md
+  - operational-mechanisms.md
+  - ctf-mechanisms.md
 ---
 
 # CTF Web 攻击知识库
