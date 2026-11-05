@@ -250,7 +250,29 @@ def _fingerprint_flags(text: str) -> str:
 
     return _FLAG_UNCLOSED_RE.sub(_fp_unclosed, _FLAG_FINGERPRINT_RE.sub(_fp, text))
 
-PLAYBOOKS_DIR = CONFIG_DIR / "playbooks"
+def _playbook_dir() -> Path:
+    """Per-profile note store under ``CONFIG_DIR``.
+
+    The shared E: workspace keeps ``~/.vulnclaw`` for BOTH profiles, and notes are
+    auto-injected into the system prompt (``solver._inject_prior_playbooks``). A
+    CTF note therefore reaches a production audit, and a production note reaches a
+    CTF run, unless the store is split. CTF keeps ``playbooks/`` (no migration for
+    existing notes); production gets ``playbooks-prod/``.
+
+    ``PLAYBOOKS_DIR`` stays a module constant so tests can monkeypatch it; the
+    profile is read at import time, exactly like ``CONFIG_DIR`` itself.
+    """
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        if current_profile() == "prod":
+            return CONFIG_DIR / "playbooks-prod"
+    except Exception:  # noqa: BLE001 - never break recall on a policy read error
+        pass
+    return CONFIG_DIR / "playbooks"
+
+
+PLAYBOOKS_DIR = _playbook_dir()
 
 # Tokens that are (almost) never meaningful for challenge identity and only add
 # fingerprint noise: HTML boilerplate, generic CTF wrapper text, common words.

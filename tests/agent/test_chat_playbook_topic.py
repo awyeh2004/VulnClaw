@@ -194,3 +194,17 @@ def test_chat_tools_switch_does_not_enable_the_auto_loop(monkeypatch):
     monkeypatch.setenv("VULNCLAW_CHAT_TOOLS", "1")
     assert _copilot_pins_target() is True
     assert _chat_tools_allowed() is True
+
+
+def test_playbook_store_is_profile_scoped(monkeypatch):
+    """CTF and production notes must not be recalled into each other's prompts."""
+    from vulnclaw.agent import playbook as pb
+
+    monkeypatch.delenv("VULNCLAW_PROFILE", raising=False)
+    assert pb._playbook_dir().name == "playbooks"
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    assert pb._playbook_dir().name == "playbooks-prod"
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "CTF")
+    assert pb._playbook_dir().name == "playbooks"
