@@ -451,3 +451,109 @@ async def test_no_import_legacy_resume_does_not_create_run_copy(tmp_path, monkey
     assert agent.session_state.step_records[0].action == "probe"
     assert not (tmp_path / "runs").exists()
     assert not (tmp_path / "targets" / parse_target(raw_target).state_key / "index.json").exists()
+
+
+# ── profile stamping / cross-profile resume ─────────────────────────────────
+# The E: workspace is shared by the CTF and production profiles. A run's
+# blackboard, evidence and notes belong to exactly one of them, so the manifest
+# records the profile and a resume from the other profile is refused outright.
+
+def test_new_manifest_records_the_profile_and_roots(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="prod-run",
+    )
+
+    manifest = json.loads((ctx.run_dir / "run.json").read_text(encoding="utf-8"))
+
+    assert manifest["profile"] == "prod"
+    assert set(manifest["roots"]) == {"config_root", "work_root"}
+
+
+def test_resume_from_the_other_profile_is_refused(tmp_path, monkeypatch):
+    from vulnclaw.run_context import RunProfileMismatchError
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="ctf-run",
+    )
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    with pytest.raises(RunProfileMismatchError, match="profile=ctf"):
+        load_run_context("ctf-run", runs_dir=tmp_path / "runs")
+
+
+def _write_target_state(ctx) -> None:
+    """A run is only resumable once every manifest target has a state file."""
+    for entry in ctx.manifest["targets"]:
+        path = ctx.run_dir / entry["state_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+
+def test_resume_within_the_same_profile_still_works(tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="ctf-run-2",
+    )
+    _write_target_state(ctx)
+
+    loaded = load_run_context("ctf-run-2", runs_dir=tmp_path / "runs")
+    assert loaded.manifest["profile"] == "ctf"
+
+
+def test_a_manifest_without_profile_keeps_resuming(tmp_path, monkeypatch):
+    """Runs created before the stamp existed must not become unresumable."""
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="legacy-run",
+    )
+    _write_target_state(ctx)
+    manifest = json.loads((ctx.run_dir / "run.json").read_text(encoding="utf-8"))
+    manifest.pop("profile", None)
+    (ctx.run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    loaded = load_run_context("legacy-run", runs_dir=tmp_path / "runs")
+    assert loaded.run_name == "legacy-run"
+
+
+def test_read_only_load_from_the_other_profile_is_refused(tmp_path, monkeypatch):
+    """Distillation / report rebuild must not read the other profile's run either."""
+    from vulnclaw.run_context import RunProfileMismatchError
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="ctf-read-run",
+    )
+    _write_target_state(ctx)
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    with pytest.raises(RunProfileMismatchError):
+        load_run_context("ctf-read-run", runs_dir=tmp_path / "runs")
+
+    # validate_run_context directly (the read-only path used by tools) refuses too.
+    from vulnclaw.run_context import RunContext, validate_run_context
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+    manifest = json.loads((ctx.run_dir / "run.json").read_text(encoding="utf-8"))
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    foreign = RunContext(
+        run_dir=ctx.run_dir, manifest=manifest, runs_root=tmp_path / "runs"
+    )
+    with pytest.raises(RunProfileMismatchError):
+        validate_run_context(foreign)

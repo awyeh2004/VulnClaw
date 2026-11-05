@@ -593,7 +593,7 @@ def _resume_saved_run(
     runs_dir: Optional[str] = None,
     repair: bool = False,
 ) -> None:
-    from vulnclaw.run_context import RunCorruptError, load_run_context
+    from vulnclaw.run_context import RunContextError, load_run_context
 
     config = load_config()
     try:
@@ -603,7 +603,10 @@ def _resume_saved_run(
             config=config,
             repair=repair,
         )
-    except RunCorruptError as exc:
+    except RunContextError as exc:
+        # Covers both a corrupt run and a run owned by the other profile (CTF vs
+        # production). Both must stop here: starting a fresh run under the wrong
+        # profile is exactly what the profile stamp prevents.
         err_console.print(f"[!] {exc}")
         raise typer.Exit(1) from exc
 

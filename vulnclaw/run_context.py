@@ -37,6 +37,26 @@ class RunCorruptError(RunContextError):
         super().__init__(f"corrupt run state at {run_dir}: {check}")
 
 
+class RunProfileMismatchError(RunContextError):
+    """Raised when a run belongs to the other profile (CTF vs production).
+
+    Deliberately NOT a ``RunCorruptError``: the orchestrator turns a corrupt
+    resume into "start a fresh run" unless ``--no-resume`` was passed, and
+    silently starting a new run under the wrong profile is the cross-contamination
+    this check exists to stop. The caller gets a hard stop instead.
+    """
+
+    def __init__(self, run_dir: Path, run_profile: str, current_profile: str) -> None:
+        self.run_dir = run_dir
+        self.run_profile = run_profile
+        self.current_profile = current_profile
+        super().__init__(
+            f"run {run_dir.name} belongs to profile={run_profile}, but this process "
+            f"is profile={current_profile}; refusing to resume across profiles "
+            "(point VULNCLAW_PROFILE / VULNCLAW_CONFIG_DIR at the run's profile)"
+        )
+
+
 @dataclass
 class RunContext:
     """Loaded run directory and manifest."""
@@ -276,6 +296,13 @@ def validate_run_context(context: RunContext, *, resume_request: bool = False) -
     manifest = context.manifest
     if int(manifest.get("schema_version", -1)) != RUN_SCHEMA_VERSION:
         raise RunCorruptError(context.run_dir, "unsupported run.json schema_version")
+    # Every load is profile-checked, not just resume: a read-only path (experience
+    # distillation, report rebuild) is enough to pull the other profile's evidence
+    # into a prompt or a report. Manifests written before profiles existed carry no
+    # key and keep loading exactly as they did.
+    run_profile = str(manifest.get("profile") or "").strip().lower()
+    if run_profile and run_profile != _run_profile():
+        raise RunProfileMismatchError(context.run_dir, run_profile, _run_profile())
     targets = manifest.get("targets")
     if not isinstance(targets, list) or not targets:
         raise RunCorruptError(context.run_dir, "run.json targets[] is missing")
@@ -480,6 +507,10 @@ def _build_manifest(
         target_entries.append(entry)
     return {
         "schema_version": RUN_SCHEMA_VERSION,
+        # Which profile created this run (CTF vs production). Recorded so a run
+        # can never be resumed by the other profile; see validate_run_context.
+        "profile": _run_profile(),
+        "roots": _run_roots(),
         "run_id": str(uuid4()),
         "run_name": run_name,
         "created_at": now,
@@ -574,6 +605,28 @@ def _validate_run_name(run_name: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _run_profile() -> str:
+    """The profile creating this run; unknown environments fall back to ``ctf``."""
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile()
+    except Exception:  # noqa: BLE001 - never block run creation on a policy read
+        return "ctf"
+
+
+def _run_roots() -> dict[str, str]:
+    """Config/work roots this run was created under (leak diagnosis, not policy)."""
+    roots = {"config_root": str(CONFIG_DIR)}
+    try:
+        from vulnclaw.platforms.attachments import work_dir
+
+        roots["work_root"] = str(work_dir())
+    except Exception:  # noqa: BLE001
+        roots["work_root"] = ""
+    return roots
 
 
 def _slugify(value: str) -> str:
