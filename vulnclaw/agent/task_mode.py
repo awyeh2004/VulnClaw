@@ -152,6 +152,10 @@ def _ctf_discipline(*, platform_ref: bool) -> str:
         + (_CTF_SUBMIT_WITH_REF if platform_ref else _CTF_SUBMIT_WITHOUT_REF)
         + "- Easiest first; fail-fast: if ~8 turns pass with no progress, drop the "
         "challenge and move on.\n"
+        "- `report_finding` only records a LOCAL finding for this run; it does "
+        "not submit to any platform. Never call it \u201c已上报/上报成功\u201d. "
+        "The graded deliverable is the flag in FINAL (or the platform submit "
+        "verb only when this run carries a challenge ref).\n"
         "- Exception: a security-hardening/defense challenge (安全加固/加固) is "
         "NOT an 8-turn fail-fast target; follow the hardening workflow, timebox "
         "30-40 minutes, and keep the service alive.\n"

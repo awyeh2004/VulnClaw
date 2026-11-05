@@ -75,6 +75,18 @@ class TestModeInstruction:
         assert "安全加固" in text
         assert "30-40" in text
 
+    def test_ctf_discipline_marks_report_finding_as_local_only(self):
+        """CTF run must not describe report_finding as a platform submission.
+
+        Measured 2026-11-04 (orbital board): the model wrote "已上报 High 级漏洞"
+        after calling report_finding, which only writes session findings; the
+        actual submit verbs are ctf2_submit_flag / gcs_submit_flag /
+        platform_submit.
+        """
+        text = mode_instruction("ctf")
+        assert "LOCAL finding" in text
+        assert "已上报" in text  # explicitly forbidden wording
+
     def test_pentest_has_no_extra_discipline(self):
         assert mode_instruction("pentest") == ""
 
