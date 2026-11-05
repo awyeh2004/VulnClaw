@@ -292,8 +292,24 @@ class TestTheWorkDirectoryIsPlatformNeutral:
 
     def test_the_override_wins(self, monkeypatch):
         monkeypatch.setenv("VULNCLAW_WORK_DIR", "/tmp/somewhere")
+        monkeypatch.delenv("VULNCLAW_ATTACH_DIR", raising=False)
+        monkeypatch.delenv("VULNCLAW_PROFILE", raising=False)
         assert att.work_dir() == "/tmp/somewhere"
         assert att.attachment_dir() == os.path.join("/tmp/somewhere", "attachments")
+
+    def test_the_explicit_attachment_dir_wins(self, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_WORK_DIR", "/tmp/somewhere")
+        monkeypatch.setenv("VULNCLAW_ATTACH_DIR", "/tmp/elsewhere/attach")
+        assert att.attachment_dir() == "/tmp/elsewhere/attach"
+
+    def test_the_prod_profile_does_not_share_the_ctf_attachment_dir(self, monkeypatch):
+        """A production run must not write its files into the CTF analysis dir."""
+        monkeypatch.setenv("VULNCLAW_WORK_DIR", "/tmp/somewhere")
+        monkeypatch.delenv("VULNCLAW_ATTACH_DIR", raising=False)
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        assert att.attachment_dir() == os.path.join(
+            "/tmp/somewhere", "prod", "attachments"
+        )
 
     def test_creates_the_destination_directory(self, tmp_path):
         target = tmp_path / "nested" / "attachments"

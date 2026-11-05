@@ -59,6 +59,31 @@ python -c "import os; print(os.environ.get('VULNCLAW_WORK_DIR'))"
 
 空值不是配置错误，是当前终端没继承；换新终端再跑。
 
+### 2.1 CTF / 生产 profile 隔离（2026-11-05）
+
+同一台机器上 CTF（本仓库）与生产共用 `E:\vulnclaw`，所以运行期用
+`VULNCLAW_PROFILE` 区分，**生产入口必须显式设 `VULNCLAW_PROFILE=prod`**；
+不设就是 `ctf`（本仓库的定位）。
+
+| 行为 | ctf（默认） | prod |
+|---|---|---|
+| 附件目录 | `<work>/attachments` | `<work>/prod/attachments`（或 `VULNCLAW_ATTACH_DIR`） |
+| playbook 库 | `<config>/playbooks` | `<config>/playbooks-prod` |
+| `ctf-mechanisms.md` 共享参考 | 加载 | loader 剔除，解析不到 |
+| 平台提交动词（`*_submit_flag`） | 正常 | MCP 与 builtin 两条路由都拒绝 |
+| 多层题"最深层"完成门 | 生效 | 不触发 |
+| 跨 profile 读/恢复 run | — | 直接报错（`RunProfileMismatchError`） |
+
+自检（启动器里建议加 `--strict`，环境不完整就退出）：
+
+```bash
+python -X utf8 scripts/profile_report.py --strict
+```
+
+**还没隔离**：`runs/`、`evidence/`、`sessions/`、`targets/`、`kb/` 仍在
+`VULNCLAW_CONFIG_DIR` 下；生产要与 CTF 彻底分开，必须给它一个独立的
+`VULNCLAW_CONFIG_DIR`（脚本在 prod 用默认 `~/.vulnclaw` 时会 WARN）。
+
 ---
 
 ## 三、批量跑题时的资源坑

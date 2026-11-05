@@ -315,12 +315,29 @@ def work_dir() -> str:
 
 
 def attachment_dir() -> str:
-    """Where attachment insurance lives: ``<work>/attachments``.
+    """Where attachment insurance lives.
+
+    Resolution order (2026-11-04 review): ``VULNCLAW_ATTACH_DIR`` when set, then
+    ``<work>/attachments`` for the CTF profile and ``<work>/prod/attachments`` for
+    the production profile. The CTF path is unchanged on purpose -- existing
+    downloads and the competition-mode skill reference it -- while a production
+    run can no longer land its attachments in the CTF analysis directory.
 
     Same location the batch command uses, so a pre-downloaded file is found by the
     same analysis steps a match-start batch download would have produced.
     """
-    return os.path.join(work_dir(), "attachments")
+    override = os.environ.get("VULNCLAW_ATTACH_DIR")
+    if override:
+        return override
+    base = work_dir()
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        if current_profile() == "prod":
+            return os.path.join(base, "prod", "attachments")
+    except Exception:  # noqa: BLE001 - never break downloads on a policy check
+        pass
+    return os.path.join(base, "attachments")
 
 
 __all__ = [
