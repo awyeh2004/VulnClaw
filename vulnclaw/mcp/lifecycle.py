@@ -146,10 +146,33 @@ def _is_tls_verification_error(exc: BaseException) -> bool:
 #: competition uses.
 _SUBMISSION_TOOL_SUFFIXES = ("_submit_flag", "_submit_competition_flag")
 
+#: Submit verbs whose name does NOT end in a ``*_submit_flag`` suffix. The suffix
+#: rule alone missed ``platform_submit`` -- the platform-neutral entry point
+#: ``competition-mode`` tells the agent to use -- so the profile gate below never
+#: ran for a registered ``platform_submit`` tool while the builtin gate did. One
+#: set, kept next to the suffix rule so the two routes cannot drift apart again.
+_SUBMISSION_TOOL_NAMES = frozenset({"platform_submit"})
+
 
 def _is_submission_tool(tool_name: str) -> bool:
+    """Whether the name SENDS an answer to a scoring platform (any route)."""
     name = str(tool_name or "")
+    if name in _SUBMISSION_TOOL_NAMES:
+        return True
     return any(name.endswith(suffix) for suffix in _SUBMISSION_TOOL_SUFFIXES)
+
+
+def _is_holdable_submission_tool(tool_name: str) -> bool:
+    """Whether a submit may be DEFERRED to a scoring window.
+
+    Deliberately narrower than ``_is_submission_tool``. The hold queue decides
+    "which window does this challenge score in" from ``challenge_id``, and
+    ``platform_submit`` carries a ``ref`` instead -- deferring it would compute a
+    window for an empty challenge id and could queue an answer for the wrong
+    window. So ``platform_submit`` is gated by profile but never held; it is sent
+    the moment it is called.
+    """
+    return str(tool_name or "").endswith(_SUBMISSION_TOOL_SUFFIXES)
 
 
 def _profile_blocks_submission(tool_name: str) -> bool:
@@ -159,6 +182,11 @@ def _profile_blocks_submission(tool_name: str) -> bool:
     production finding to a CTF scoring platform is never intended, and the
     platform verbs arrive through MCP (``ctf2_submit_*``), so the check lives on
     the one funnel every MCP call passes through rather than in prompt wording.
+
+    Fails CLOSED: if the profile cannot be resolved the answer is "blocked". A
+    policy read error must not become a scoring attempt from a production host,
+    and the only cost of the stricter answer is a refusal message the operator
+    can act on.
     """
     if not _is_submission_tool(tool_name):
         return False
@@ -166,8 +194,8 @@ def _profile_blocks_submission(tool_name: str) -> bool:
         from vulnclaw.config.profile import current_profile
 
         return current_profile() == "prod"
-    except Exception:  # noqa: BLE001 - never block scoring on a policy read error
-        return False
+    except Exception:  # noqa: BLE001 - unknown profile must not permit a send
+        return True
 
 
 _submit_hold_lock = threading.Lock()
@@ -1622,11 +1650,6 @@ class MCPLifecycleManager(ProbeMixin):
         server_name = self.registry.get_server_for_tool(tool_name)
         if not server_name:
             raise ValueError(f"Unknown tool: {tool_name}")
-        self._ensure_held_scheduler()
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
         #
         # Some competitions pay DOUBLE for a solve submitted inside a defined
         # window, and the server timestamps arrival. When the operator sets
@@ -1639,15 +1662,24 @@ class MCPLifecycleManager(ProbeMixin):
         # ``ctf2_submit_competition_flag`` that never reaches our own dispatch
         # table. Anything narrower would miss exactly the route the competition
         # uses.
+        #
         # Production profile never talks to a scoring platform (see
-        # _profile_blocks_submission). Checked before the hold scheduler so a
-        # held submission cannot fire later from a prod run either.
+        # _profile_blocks_submission). The check is FIRST, before
+        # ``_ensure_held_scheduler``: that call revives a queue left by an earlier
+        # run, and a production process must not pump the CTF queue at all. This
+        # only rejects the CALL -- a scheduler fire never passes through here, so
+        # the queue filters per item by the profile stamped on the entry.
         if _profile_blocks_submission(tool_name):
             return (
                 "[profile] 当前 VULNCLAW_PROFILE=prod（生产）：比赛平台提交工具在此 "
                 "profile 下不可用。生产 finding 用 report_finding 记录，不要提交到"
                 "计分平台。"
             )
+        self._ensure_held_scheduler()
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         held = self._maybe_hold_submission(server_name, tool_name, arguments)
         if held is not None:
             return held
@@ -1692,7 +1724,9 @@ class MCPLifecycleManager(ProbeMixin):
         self, server_name: str, tool_name: str, arguments: dict[str, Any]
     ) -> Optional[dict[str, Any]]:
         """Queue a submit for its scoring window, or None to send it now."""
-        if not _is_submission_tool(tool_name):
+        # Holdable, not merely "is a submit": the window is derived from
+        # ``challenge_id``, which ``platform_submit`` does not carry.
+        if not _is_holdable_submission_tool(tool_name):
             return None
         hold = _get_submit_hold()
         if hold is None or not hold.should_hold():

@@ -8,7 +8,10 @@ exactly like one that never had proof.
 
 from __future__ import annotations
 
+import json
 import shutil
+
+import pytest
 from pathlib import Path
 
 from vulnclaw.agent.context import EvidenceRef, SessionState, VulnerabilityFinding
@@ -652,6 +655,40 @@ def test_report_from_file_reads_the_runs_evidence_not_the_sessions_dir(tmp_path,
     assert "完整性校验失败" not in text
 
 
+def test_report_from_file_rejects_a_foreign_profile_run(tmp_path, monkeypatch):
+    from vulnclaw.report.generator import generate_report_from_file
+    from vulnclaw.run_context import RunProfileMismatchError
+
+    run_dir = _run_manifest(tmp_path, run_id="foreign-rid")
+    manifest = {"run_id": "foreign-rid", "profile": "ctf"}
+    (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    session_path = _bound_session(run_dir, tmp_path, run_id="foreign-rid")
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+
+    with pytest.raises(RunProfileMismatchError, match="profile=ctf"):
+        generate_report_from_file(str(session_path))
+
+
+def test_explicit_foreign_profile_run_is_rejected_before_report_output(tmp_path, monkeypatch):
+    from vulnclaw.report.generator import generate_report_from_file
+    from vulnclaw.run_context import RunProfileMismatchError
+
+    run_dir = _run_manifest(tmp_path, run_id="foreign-explicit")
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "foreign-explicit", "profile": "ctf"}), encoding="utf-8"
+    )
+    session_path = _bound_session(run_dir, tmp_path, run_id="foreign-explicit")
+    output = tmp_path / "blocked" / "report.md"
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+
+    with pytest.raises(RunProfileMismatchError, match="profile=ctf"):
+        generate_report_from_file(str(session_path), run_dir=str(run_dir))
+
+    assert not output.exists()
+    assert not output.parent.exists()
+
+
 def test_report_from_file_honours_an_explicit_run_dir(tmp_path, monkeypatch):
     """An operator who names the run must not be overruled by the lookup."""
     from vulnclaw.report.generator import generate_report_from_file
@@ -673,6 +710,75 @@ def test_report_from_file_honours_an_explicit_run_dir(tmp_path, monkeypatch):
 
     assert "GET /user?id=1' HTTP/1.1" in text
     assert "正文不可读取" not in text
+
+
+def test_a_session_pointing_at_another_run_is_refused(tmp_path, monkeypatch):
+    """Profile isolation is not evidence ownership.
+
+    The automatic lookup matches on the manifest's own ``run_id``, so it cannot
+    disagree with the session. An explicit ``--run-dir`` can: that is the way to
+    inline a sibling run's captures (a decoy, or an unrelated engagement) with no
+    error at all, substituting one engagement's proof for another's.
+    """
+    from vulnclaw.report.generator import generate_report_from_file
+    from vulnclaw.run_context import RunOwnershipError
+
+    own_run = _run_manifest(tmp_path, run_name="own", run_id="rid-own")
+    other_run = _run_manifest(tmp_path, run_name="other", run_id="rid-other")
+    # Bind the captures into the OTHER run, then claim the session belongs to
+    # `own`: reading those captures can only mean the named directory was taken
+    # at face value.
+    session_path = _bound_session(other_run, tmp_path, run_id="rid-own")
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    with pytest.raises(RunOwnershipError, match="rid-own"):
+        generate_report_from_file(str(session_path), run_dir=str(other_run))
+
+    assert own_run.exists()
+
+
+def test_a_legacy_run_without_a_run_id_is_still_readable(tmp_path, monkeypatch):
+    """A manifest predating the run_id stamp cannot contradict the session."""
+    from vulnclaw.report.generator import generate_report_from_file
+
+    legacy = _run_manifest(tmp_path, run_name="legacy", run_id="rid-legacy")
+    (legacy / "run.json").write_text(json.dumps({"run_name": "legacy"}), encoding="utf-8")
+    session_path = _bound_session(legacy, tmp_path, run_id="rid-session")
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text = generate_report_from_file(str(session_path), run_dir=str(legacy)).read_text(
+            encoding="utf-8"
+        )
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "SQL Injection in /user" in text
+
+
+def test_a_session_without_a_run_id_is_not_ownership_checked(tmp_path, monkeypatch):
+    """Nothing to compare against -- the report still renders."""
+    from vulnclaw.report.generator import generate_report_from_file
+
+    stated = _run_manifest(tmp_path, run_name="stated", run_id="rid-stated")
+    session_path = _bound_session(stated, tmp_path, run_id="")
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr("vulnclaw.report.generator.SESSIONS_DIR", tmp_path / "sessions")
+
+    previous_lang = current_lang()
+    init_i18n(lang="zh")
+    try:
+        text = generate_report_from_file(str(session_path), run_dir=str(stated)).read_text(
+            encoding="utf-8"
+        )
+    finally:
+        init_i18n(lang=previous_lang)
+
+    assert "SQL Injection in /user" in text
 
 
 def test_find_run_dir_by_run_id_is_silent_when_it_cannot_match(tmp_path, monkeypatch):

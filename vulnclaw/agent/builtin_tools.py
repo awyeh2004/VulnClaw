@@ -933,13 +933,17 @@ def _profile_blocks_submission() -> bool:
     platform submission is never intended. This is the builtin-route half of the
     same boundary ``mcp/lifecycle.py:_profile_blocks_submission`` enforces for the
     platform passthrough verbs.
+
+    Fails CLOSED: an unresolvable profile blocks the submit rather than letting it
+    through. A policy read error must not turn into a scoring attempt from a host
+    that was meant to be production-only.
     """
     try:
         from vulnclaw.config.profile import current_profile
 
         return current_profile() == "prod"
-    except Exception:  # noqa: BLE001 - never block scoring on a policy read error
-        return False
+    except Exception:  # noqa: BLE001 - unknown profile must not permit a send
+        return True
 
 
 from vulnclaw.agent.tools._shared import _runtime_config  # noqa: F401 — re-export

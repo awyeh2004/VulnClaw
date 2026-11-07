@@ -240,8 +240,23 @@ class TestToolMatching:
         from vulnclaw.mcp.lifecycle import _is_submission_tool
 
         for name in ("ctf2_list_competition_challenges", "ctf2_get_competition_challenge",
-                     "platform_submit", "fetch"):
+                     "fetch"):
             assert not _is_submission_tool(name), name
+
+    def test_platform_submit_sends_but_is_never_held(self):
+        """Two different questions, two different answers.
+
+        ``platform_submit`` must pass the profile gate (it sends an answer to a
+        scoring platform) and must NOT enter the hold queue: the queue's window
+        is chosen from ``challenge_id``, and this verb carries a ``ref``.
+        """
+        from vulnclaw.mcp.lifecycle import _is_holdable_submission_tool, _is_submission_tool
+
+        assert _is_submission_tool("platform_submit") is True
+        assert _is_holdable_submission_tool("platform_submit") is False
+
+        for name in ("ctf2_submit_flag", "ctf2_submit_competition_flag", "gcs_submit_flag"):
+            assert _is_holdable_submission_tool(name) is True
 
 
 # ── Named windows: the 1024 sprint needs TWO departure points ─────────────────
@@ -556,3 +571,137 @@ class TestTheQueueActuallyGetsFired:
         manager = object.__new__(lifecycle.MCPLifecycleManager)
         manager._ensure_held_scheduler()
         assert started == []
+
+
+class TestTheQueueIsBoundToItsProfile:
+    """The queue file is shared; the permission to SEND is not.
+
+    ``<config>/submit_hold/queue.json`` sits under the same config root for both
+    profiles, so a production process can read a CTF run's pending flag. Firing
+    it would post to a scoring platform from a profile that must never do that,
+    and the background scheduler never passes through ``call_tool`` -- so the
+    check lives on the entry itself.
+    """
+
+    def test_an_entry_records_the_profile_that_queued_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+        q = _queue(tmp_path, hold_until=_future())
+        item = q.enqueue(
+            server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"}
+        )
+        assert item is not None
+        assert item.profile == "ctf"
+        # And it survives the round trip through disk.
+        reloaded = SubmitHoldQueue(tmp_path / "queue.json", hold_until=_future())
+        assert reloaded.pending()[0].profile == "ctf"
+
+    def test_production_does_not_fire_a_queue_left_by_ctf(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+        q = _queue(tmp_path, hold_until=_future())
+        q.enqueue(
+            server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "SECRET"}
+        )
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        sent: list = []
+        events: list = []
+
+        async def dispatch(server, tool, arguments):
+            sent.append((server, tool, arguments))
+            return '{"accepted": true}'
+
+        sched = SubmitScheduler(q, dispatch, on_event=lambda k, p: events.append((k, p)))
+        after = datetime.now() + timedelta(minutes=10)
+
+        assert sched.tick(now=after) == 0
+        assert sent == [], "a prod process must never send a CTF flag"
+
+        # The entry is still PENDING: the owning profile has to be able to fire it.
+        assert [item.status for item in q.pending()] == ["pending"]
+        assert [kind for kind, _ in events] == ["submit_hold_profile_blocked"]
+
+    def test_the_block_event_is_emitted_once_not_every_tick(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+        q = _queue(tmp_path, hold_until=_future())
+        q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        events: list = []
+
+        async def dispatch(server, tool, arguments):
+            raise AssertionError("must not be dispatched")
+
+        sched = SubmitScheduler(q, dispatch, on_event=lambda k, p: events.append(k))
+        after = datetime.now() + timedelta(minutes=10)
+        for _ in range(5):
+            sched.tick(now=after)
+
+        assert events == ["submit_hold_profile_blocked"]
+
+    def test_the_owning_profile_still_fires_it(self, tmp_path, monkeypatch):
+        """The block above must not consume the CTF run's only attempt."""
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        q = _queue(tmp_path, hold_until=_future())
+        # Written while prod is current, then handed back to ctf: the guard reads
+        # the stamp on the entry, not the process that happens to own the file.
+        q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+
+        sent: list = []
+
+        async def dispatch(server, tool, arguments):
+            sent.append(arguments)
+            return '{"accepted": true}'
+
+        sched = SubmitScheduler(q, dispatch)
+        after = datetime.now() + timedelta(minutes=10)
+        assert sched.tick(now=after) == 0  # stamped prod, not fired by ctf
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        assert sched.tick(now=after) == 1
+        assert sent == [{"flag": "x"}]
+
+    def test_an_unstamped_entry_is_treated_as_ctf(self, tmp_path, monkeypatch):
+        """Entries written before the stamp existed can only be CTF (the feature is CTF-only)."""
+        q = _queue(tmp_path, hold_until=_future())
+        q.enqueue(server="ctf2", tool="ctf2_submit_competition_flag", arguments={"flag": "x"})
+        # Strip the stamp, as an older queue.json would not have it.
+        raw = json.loads((tmp_path / "queue.json").read_text(encoding="utf-8"))
+        for entry in raw["items"]:
+            entry.pop("profile", None)
+        (tmp_path / "queue.json").write_text(json.dumps(raw), encoding="utf-8")
+
+        reloaded = SubmitHoldQueue(tmp_path / "queue.json", hold_until=_future())
+        sent: list = []
+
+        async def dispatch(server, tool, arguments):
+            sent.append(arguments)
+            return '{"accepted": true}'
+
+        sched = SubmitScheduler(reloaded, dispatch)
+        after = datetime.now() + timedelta(minutes=10)
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+        assert sched.tick(now=after) == 0
+        assert sent == []
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+        assert sched.tick(now=after) == 1
+        assert sent == [{"flag": "x"}]
+
+    def test_an_unresolvable_profile_never_sends(self, monkeypatch):
+        from vulnclaw.ctf_platform.submit_hold import submission_belongs_to_current_profile
+
+        monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+        assert submission_belongs_to_current_profile("ctf") is True
+        assert submission_belongs_to_current_profile("prod") is False
+
+        import vulnclaw.config.profile as profile_mod
+
+        def _boom():
+            raise RuntimeError("profile policy unreadable")
+
+        monkeypatch.setattr(profile_mod, "current_profile", _boom)
+        # Unknown profile matches nothing -- no silent send.
+        assert submission_belongs_to_current_profile("ctf") is False
+        assert submission_belongs_to_current_profile("") is False

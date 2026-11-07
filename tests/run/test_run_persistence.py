@@ -497,6 +497,44 @@ def _write_target_state(ctx) -> None:
         path.write_text("{}", encoding="utf-8")
 
 
+def test_repair_from_the_other_profile_is_refused_before_writes(tmp_path, monkeypatch):
+    from vulnclaw.run_context import RunProfileMismatchError
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+    ctx = create_run_context(
+        command="run",
+        targets=[parse_target("https://example.com")],
+        runs_dir=tmp_path / "runs",
+        run_name="ctf-repair-run",
+    )
+    target = ctx.manifest["targets"][0]
+    state_dir = ctx.run_dir / "targets" / target["target_id"] / "state"
+    (state_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+    (state_dir / "current.json").write_text('{"current": true}', encoding="utf-8")
+    (state_dir / "snapshots" / "snapshot.json").write_text(
+        '{"snapshot": true}', encoding="utf-8"
+    )
+    run_before = (ctx.run_dir / "run.json").read_bytes()
+    events_before = (ctx.run_dir / "events" / "events.jsonl").read_bytes()
+    current_before = (state_dir / "current.json").read_bytes()
+
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+    # A rejected repair must not even create the config tree.
+    empty_config = tmp_path / "prod-config"
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(empty_config))
+    monkeypatch.setattr("vulnclaw.config.settings.CONFIG_DIR", empty_config)
+    monkeypatch.setattr("vulnclaw.run_context.CONFIG_DIR", empty_config)
+
+    with pytest.raises(RunProfileMismatchError, match="profile=ctf"):
+        load_run_context("ctf-repair-run", runs_dir=tmp_path / "runs", repair=True)
+
+    assert not empty_config.exists(), "refusal created the default config tree"
+
+    assert (ctx.run_dir / "run.json").read_bytes() == run_before
+    assert (ctx.run_dir / "events" / "events.jsonl").read_bytes() == events_before
+    assert (state_dir / "current.json").read_bytes() == current_before
+
+
 def test_resume_within_the_same_profile_still_works(tmp_path, monkeypatch):
     monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
     ctx = create_run_context(

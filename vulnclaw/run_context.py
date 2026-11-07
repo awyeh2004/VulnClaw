@@ -57,6 +57,29 @@ class RunProfileMismatchError(RunContextError):
         )
 
 
+class RunOwnershipError(RunContextError):
+    """Raised when a run directory does not belong to the session asking for it.
+
+    Profile isolation says "this process may read this profile's runs"; it says
+    nothing about WHICH run. A report built from a session file reads the run's
+    evidence, so a session whose ``run_id`` was repointed at another run of the
+    same profile used to inline that run's captures with no error. This makes the
+    mismatch loud instead.
+
+    Deliberately NOT a ``RunCorruptError``: the run is fine, the pointer is wrong.
+    """
+
+    def __init__(self, run_dir: Path | str, session_run_id: str) -> None:
+        self.run_dir = run_dir
+        self.session_run_id = session_run_id
+        name = Path(run_dir).name
+        super().__init__(
+            f"session run_id={session_run_id} does not match run "
+            f"{name}; refusing to read another run's evidence "
+            "(point the session at its own run, or pass the matching --run-dir)"
+        )
+
+
 @dataclass
 class RunContext:
     """Loaded run directory and manifest."""
@@ -192,8 +215,20 @@ class RunContext:
         )
 
 
-def resolve_runs_root(runs_dir: str | Path | None = None, config: Any | None = None) -> Path:
-    ensure_dirs()
+def resolve_runs_root(
+    runs_dir: str | Path | None = None,
+    config: Any | None = None,
+    *,
+    ensure: bool = True,
+) -> Path:
+    """Resolve the runs root.
+
+    ``ensure=False`` is for read-only paths (resume, repair, report lookup): the
+    profile check has to be able to reject a foreign run *without* creating the
+    default config tree first, so a rejected request leaves no trace on disk.
+    """
+    if ensure:
+        ensure_dirs()
     if runs_dir:
         return Path(runs_dir).expanduser()
     if env_value := os.environ.get("VULNCLAW_RUNS_DIR"):
@@ -219,10 +254,15 @@ def find_run_dir_by_run_id(
     id all return ``None`` rather than raising, because callers use this to
     *improve* a default (the report's evidence root) and not to validate a run.
     Silence is right here: the caller's fallback already handles "no run".
+
+    The one deliberate exception is a run stamped with the *other* profile: that
+    raises ``RunProfileMismatchError`` instead of being treated as "no run", so a
+    misconfigured profile surfaces as an error rather than a quietly empty report.
     """
     if not run_id:
         return None
-    root = resolve_runs_root(runs_dir, config)
+    # Read-only lookup: never create the config tree just to answer "no run".
+    root = resolve_runs_root(runs_dir, config, ensure=False)
     if not root.is_dir():
         return None
     for candidate in sorted(root.iterdir()):
@@ -234,6 +274,7 @@ def find_run_dir_by_run_id(
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(manifest, dict) and str(manifest.get("run_id") or "") == str(run_id):
+            validate_run_profile_dir(candidate)
             return candidate
     return None
 
@@ -282,7 +323,8 @@ def load_run_context(
     repair: bool = False,
 ) -> RunContext:
     _validate_run_name(run_name)
-    runs_root = resolve_runs_root(runs_dir, config)
+    # A load only reads; the caller creates directories when it starts a run.
+    runs_root = resolve_runs_root(runs_dir, config, ensure=False)
     run_dir = runs_root / run_name
     if repair:
         return repair_run_context(run_name, runs_dir=runs_dir, config=config)
@@ -292,17 +334,66 @@ def load_run_context(
     return context
 
 
+def validate_run_profile(context: RunContext) -> None:
+    """Reject an explicitly stamped run from the other profile without I/O."""
+    run_profile = str(context.manifest.get("profile") or "").strip().lower()
+    if run_profile and run_profile != _run_profile():
+        raise RunProfileMismatchError(context.run_dir, run_profile, _run_profile())
+
+
+def validate_run_profile_dir(run_dir: str | Path) -> None:
+    """Validate a run directory's profile before a caller reads its evidence.
+
+    Report inputs may use a lightweight/legacy run directory without a complete
+    run manifest, so absence of ``run.json`` remains compatible. An explicit
+    profile stamp, however, is authoritative and is checked before any output is
+    created.
+    """
+    path = Path(run_dir)
+    manifest_path = path / "run.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(manifest, dict):
+        validate_run_profile(RunContext(run_dir=path, manifest=manifest, runs_root=path.parent))
+
+
+def run_dir_owns_run_id(run_dir: str | Path, run_id: str) -> bool:
+    """Whether ``run_dir``'s manifest records ``run_id``.
+
+    The profile check answers "may this process read this profile's runs", not
+    "does this run belong to the session being reported". Without this second
+    question a session JSON could point at any run of the same profile (a decoy,
+    or an unrelated run) and the report would inline that run's evidence.
+
+    Returns True when the directory carries no readable manifest: the lightweight
+    run trees the report path supports have nothing to compare, and refusing them
+    would break report generation for those callers.
+    """
+    manifest_path = Path(run_dir) / "run.json"
+    if not manifest_path.is_file():
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not isinstance(manifest, dict):
+        return True
+    recorded = str(manifest.get("run_id") or "")
+    if not recorded:
+        # A manifest predating run_id stamps cannot contradict the session.
+        return True
+    return recorded == str(run_id)
+
+
 def validate_run_context(context: RunContext, *, resume_request: bool = False) -> None:
     manifest = context.manifest
     if int(manifest.get("schema_version", -1)) != RUN_SCHEMA_VERSION:
         raise RunCorruptError(context.run_dir, "unsupported run.json schema_version")
-    # Every load is profile-checked, not just resume: a read-only path (experience
-    # distillation, report rebuild) is enough to pull the other profile's evidence
-    # into a prompt or a report. Manifests written before profiles existed carry no
-    # key and keep loading exactly as they did.
-    run_profile = str(manifest.get("profile") or "").strip().lower()
-    if run_profile and run_profile != _run_profile():
-        raise RunProfileMismatchError(context.run_dir, run_profile, _run_profile())
+    validate_run_profile(context)
     targets = manifest.get("targets")
     if not isinstance(targets, list) or not targets:
         raise RunCorruptError(context.run_dir, "run.json targets[] is missing")
@@ -351,10 +442,13 @@ def repair_run_context(
     config: Any | None = None,
 ) -> RunContext:
     _validate_run_name(run_name)
-    runs_root = resolve_runs_root(runs_dir, config)
+    # Repair must be able to refuse a foreign profile before it writes anything
+    # (and before it creates the default config tree).
+    runs_root = resolve_runs_root(runs_dir, config, ensure=False)
     run_dir = runs_root / run_name
     manifest = _read_manifest(run_dir)
     context = RunContext(run_dir=run_dir, manifest=manifest, runs_root=runs_root)
+    validate_run_profile(context)
     targets = manifest.get("targets", [])
     if not isinstance(targets, list) or not targets:
         raise RunCorruptError(run_dir, "cannot repair run without targets[]")

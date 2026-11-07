@@ -423,6 +423,10 @@ def generate_report(
     anchor explicitly (the orchestrator / scan path both know it); ``output.parent``
     is only a legacy fallback for callers with no run context.
     """
+    if run_dir is not None:
+        from vulnclaw.run_context import validate_run_profile_dir
+
+        validate_run_profile_dir(run_dir)
 
     all_findings = session.findings
     verified_findings = deduplicate_report_findings(session.get_verified_findings())
@@ -571,10 +575,28 @@ def generate_report_from_file(session_path: str, run_dir: str | Path | None = No
     the bytes are still sitting in the run.
     """
     session = SessionState.load(Path(session_path))
-    if run_dir is None:
-        from vulnclaw.run_context import find_run_dir_by_run_id
+    from vulnclaw.run_context import (
+        RunOwnershipError,
+        find_run_dir_by_run_id,
+        run_dir_owns_run_id,
+        validate_run_profile_dir,
+    )
 
-        run_dir = find_run_dir_by_run_id(str(getattr(session, "run_id", "") or ""))
+    session_run_id = str(getattr(session, "run_id", "") or "")
+    if run_dir is None:
+        # Matched on the manifest's own run_id, so it cannot disagree with the
+        # session; the ownership check below still guards an explicit --run-dir.
+        run_dir = find_run_dir_by_run_id(session_run_id)
+    if run_dir is not None:
+        # Profile is checked either way: naming a directory explicitly is not
+        # consent to read the other profile's evidence.
+        validate_run_profile_dir(run_dir)
+        # Profile isolation answers "may this process read that profile's runs",
+        # not "does this run hold THIS session's evidence". An explicit --run-dir
+        # was the remaining way to inline a different run's captures (a decoy, or
+        # an unrelated engagement) with no error at all.
+        if session_run_id and not run_dir_owns_run_id(run_dir, session_run_id):
+            raise RunOwnershipError(run_dir, session_run_id)
     return generate_report(session, run_dir=run_dir)
 
 

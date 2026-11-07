@@ -92,6 +92,84 @@ def _load_builder():
     return module
 
 
+def _seed_skill_tree(skills: Path) -> None:
+    (skills / "_shared" / "references").mkdir(parents=True)
+    (skills / "_shared" / "references" / "ctf-mechanisms.md").write_text(
+        "ctf submission", encoding="utf-8"
+    )
+    (skills / "_shared" / "references" / "operational-mechanisms.md").write_text(
+        "operational", encoding="utf-8"
+    )
+    (skills / "CTF-SKILL-MECHANISM-UPDATE.md").write_text("ctf update", encoding="utf-8")
+    for name, body in (
+        ("ctf-web", "ctf web skill"),
+        ("ctf-crypto", "ctf crypto skill"),
+        ("competition-mode", "competition skill"),
+    ):
+        (skills / "specialized" / name / "references").mkdir(parents=True)
+        (skills / "specialized" / name / "SKILL.md").write_text(body, encoding="utf-8")
+        (skills / "specialized" / name / "references" / "extra.md").write_text(
+            f"{body} ref", encoding="utf-8"
+        )
+    (skills / "specialized" / "web-pentest").mkdir(parents=True)
+    (skills / "specialized" / "web-pentest" / "SKILL.md").write_text(
+        "web pentest skill", encoding="utf-8"
+    )
+
+
+def test_production_capsule_excludes_ctf_only_skill_docs(tmp_path, monkeypatch):
+    builder = _load_builder()
+    skills = tmp_path / "skills"
+    _seed_skill_tree(skills)
+    monkeypatch.setattr(builder, "SKILLS_DIR", skills)
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+
+    bodies = {doc["body"] for doc in builder._collect_skills()}
+
+    assert "ctf submission" not in bodies
+    assert "ctf update" not in bodies
+    # A whole CTF skill directory goes, references included -- not just SKILL.md.
+    for leaked in ("ctf web skill", "ctf web skill ref", "ctf crypto skill",
+                   "competition skill", "competition skill ref"):
+        assert leaked not in bodies, leaked
+
+
+def test_production_capsule_keeps_shared_use_skills(tmp_path, monkeypatch):
+    builder = _load_builder()
+    skills = tmp_path / "skills"
+    _seed_skill_tree(skills)
+    monkeypatch.setattr(builder, "SKILLS_DIR", skills)
+    monkeypatch.setenv("VULNCLAW_PROFILE", "prod")
+
+    bodies = {doc["body"] for doc in builder._collect_skills()}
+    assert "operational" in bodies
+    assert "web pentest skill" in bodies
+
+
+def test_ctf_capsule_keeps_ctf_only_skill_docs(tmp_path, monkeypatch):
+    builder = _load_builder()
+    skills = tmp_path / "skills"
+    _seed_skill_tree(skills)
+    monkeypatch.setattr(builder, "SKILLS_DIR", skills)
+    monkeypatch.setenv("VULNCLAW_PROFILE", "ctf")
+
+    bodies = {doc["body"] for doc in builder._collect_skills()}
+    assert {"ctf submission", "ctf update", "ctf web skill", "competition skill"} <= bodies
+
+
+def test_unset_profile_keeps_ctf_docs(tmp_path, monkeypatch):
+    """Only an explicit prod filters; an unset variable stays the CTF default."""
+    builder = _load_builder()
+    skills = tmp_path / "skills"
+    _seed_skill_tree(skills)
+    monkeypatch.setattr(builder, "SKILLS_DIR", skills)
+    monkeypatch.delenv("VULNCLAW_PROFILE", raising=False)
+
+    bodies = {doc["body"] for doc in builder._collect_skills()}
+    assert "ctf submission" in bodies
+    assert "ctf web skill" in bodies
+
+
 def test_ordinary_code_examples_are_not_rewritten():
     builder = _load_builder()
     text = (

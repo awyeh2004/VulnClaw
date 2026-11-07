@@ -132,10 +132,57 @@ def _split_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return meta, text[match.end():]
 
 
+_CTF_ONLY_SKILL_DOCS = frozenset({
+    "CTF-SKILL-MECHANISM-UPDATE.md",
+})
+
+#: Whole skill directories that only describe CTF competition work. The capsule
+#: reads the tree directly (``rglob``), so it never passes through the runtime
+#: loader's profile gate and needs its own list. Mixed-use skills are deliberately
+#: absent: ``security-hardening`` and ``secknowledge-skill`` also serve audits, and
+#: ``urh-radio-analysis`` serves authorized SDR testing outside CTF.
+_CTF_ONLY_SKILL_DIRS = frozenset({
+    "benchmark-driving",
+    "competition-mode",
+    "ctf-ai",
+    "ctf-crypto",
+    "ctf-misc",
+    "ctf-pwn",
+    "ctf-web",
+    "ctf2-platform",
+    "knowledge-quiz",
+})
+
+
+def _is_ctf_only_doc(rel: str) -> bool:
+    """Whether a skill-tree path is CTF-only (relative, POSIX separators)."""
+    if rel in _CTF_ONLY_SKILL_DOCS:
+        return True
+    if rel == "_shared/references/ctf-mechanisms.md":
+        return True
+    # Match on any parent directory, so the skill's SKILL.md and every reference
+    # underneath it are excluded together.
+    return any(part in _CTF_ONLY_SKILL_DIRS for part in rel.split("/")[:-1])
+
+
+def _profile_is_prod() -> bool:
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile() == "prod"
+    except Exception:  # noqa: BLE001 - standalone builder defaults to CTF
+        return False
+
+
 def _collect_skills() -> list[dict]:
     docs: list[dict] = []
+    prod = _profile_is_prod()
     for path in sorted(SKILLS_DIR.rglob("*.md")):
         rel = path.relative_to(SKILLS_DIR).as_posix()
+        # Keep the offline capsule consistent with the runtime loader: production
+        # must not carry CTF-only competition material.
+        if prod and _is_ctf_only_doc(rel):
+            continue
         if "/references/" in rel:
             skill = rel.split("/references/")[0].split("/")[-1]
             kind = "reference"

@@ -75,6 +75,38 @@ def _now() -> datetime:
     return datetime.now()
 
 
+def _current_profile_name() -> str:
+    """The profile this process runs as, or ``""`` when it cannot be resolved."""
+    try:
+        from vulnclaw.config.profile import current_profile
+
+        return current_profile()
+    except Exception:  # noqa: BLE001 - callers treat "" as "unknown"
+        return ""
+
+
+def submission_belongs_to_current_profile(item_profile: str) -> bool:
+    """Whether a queued submission may be SENT by this process.
+
+    The queue lives under the shared config dir, so a production process can see
+    a CTF run's pending flag. Sending it would post to a scoring platform from a
+    profile that must never do that, so eligibility is decided here, immediately
+    before the send -- not only at ``call_tool`` entry, which a background
+    scheduler never passes through.
+
+    Unstamped entries (written before profiles were recorded) can only have come
+    from the CTF workflow, because the hold feature is CTF-only; production
+    therefore does not fire them either. An unresolvable current profile matches
+    nothing: the answer is false rather than a silent send.
+    """
+    current = _current_profile_name()
+    if not current:
+        return False
+    if not item_profile:
+        return current == "ctf"
+    return item_profile == current
+
+
 def parse_local_deadline(text: str) -> Optional[datetime]:
     """Parse an ISO-8601 local timestamp; ``None`` for empty or malformed input.
 
@@ -173,6 +205,9 @@ class HeldSubmit:
     result: str = ""
     error: str = ""
     fired_at: str = ""
+    #: The profile that queued this submission. Checked before every send so a
+    #: production process cannot fire a CTF flag left in the shared queue.
+    profile: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +224,7 @@ class HeldSubmit:
             "result": self.result,
             "error": self.error,
             "fired_at": self.fired_at,
+            "profile": self.profile,
         }
 
     @classmethod
@@ -207,6 +243,7 @@ class HeldSubmit:
             result=str(data.get("result", "")),
             error=str(data.get("error", "")),
             fired_at=str(data.get("fired_at", "")),
+            profile=str(data.get("profile", "") or ""),
         )
 
 
@@ -382,6 +419,7 @@ class SubmitHoldQueue:
                 created_at=_now().isoformat(timespec="seconds"),
                 window=window_name,
                 close_at=close_at.isoformat(timespec="seconds") if close_at else "",
+                profile=_current_profile_name(),
             )
             self._items[identity] = item
             try:
@@ -595,6 +633,9 @@ class SubmitScheduler:
         self._idle_grace_ticks = max(1, int(idle_grace_ticks))
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        #: Keys already reported as belonging to another profile, so a skipped
+        #: entry does not re-emit an event on every 50ms tick.
+        self._profile_blocked_seen: set[str] = set()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -652,6 +693,24 @@ class SubmitScheduler:
         global_end = self._queue.window_end
         fired = 0
         for item in self._queue.pending():
+            # A pending entry may have been queued by the OTHER profile (the queue
+            # lives in the shared config dir). This check comes FIRST, before the
+            # close-window drop and the claim: a production process must neither
+            # send a CTF flag nor silently retire the owning run's entry. Report
+            # once per key so a 50ms tick does not spam the event stream.
+            if not submission_belongs_to_current_profile(item.profile):
+                if item.key not in self._profile_blocked_seen:
+                    self._profile_blocked_seen.add(item.key)
+                    self._emit(
+                        "submit_hold_profile_blocked",
+                        {
+                            "key": item.key,
+                            "tool": item.tool,
+                            "item_profile": item.profile or "unstamped",
+                            "current_profile": _current_profile_name(),
+                        },
+                    )
+                continue
             target = parse_local_deadline(item.fire_at)
             if target is None:
                 self._queue.drop(item.key, "unparseable fire_at")
@@ -700,12 +759,44 @@ class SubmitScheduler:
         return 0.0
 
     def _fire(self, item: HeldSubmit) -> int:
+        # Second line of defence, next to the claim: ``tick`` already filters by
+        # profile, but ``_fire`` is also reachable directly and the claimed object
+        # is re-read from disk (another process may have written it). Check the
+        # post-claim object rather than the caller's copy.
+        if not submission_belongs_to_current_profile(item.profile):
+            self._emit(
+                "submit_hold_profile_blocked",
+                {
+                    "key": item.key,
+                    "tool": item.tool,
+                    "item_profile": item.profile or "unstamped",
+                    "current_profile": _current_profile_name(),
+                },
+            )
+            return 0
         try:
             claimed = self._queue.claim(item.key)
         except SubmitHoldPersistenceError as exc:
             self._emit("submit_hold_persistence_failed", {"key": item.key, "error": repr(exc)})
             return 0
         if claimed is None:
+            return 0
+        if not submission_belongs_to_current_profile(claimed.profile):
+            # The on-disk entry differs from the caller's copy; it belongs to the
+            # other profile. Release it so the owner can still fire it.
+            try:
+                self._queue.release_claim(claimed.key, "queued by another profile")
+            except OSError:
+                pass
+            self._emit(
+                "submit_hold_profile_blocked",
+                {
+                    "key": claimed.key,
+                    "tool": claimed.tool,
+                    "item_profile": claimed.profile or "unstamped",
+                    "current_profile": _current_profile_name(),
+                },
+            )
             return 0
         try:
             result = self._dispatch_on_loop(claimed)
