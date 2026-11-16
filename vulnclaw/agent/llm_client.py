@@ -386,6 +386,25 @@ def _message_from_stream(full_text: str, tool_calls: list[Any]) -> Any:
     return SimpleNamespace(content=full_text, tool_calls=tool_calls)
 
 
+def _stamp_finish_reason(message: Any, choice: Any) -> None:
+    """Copy the provider's stop reason onto the message for the tool layer.
+
+    The tool layer only sees the assembled message, and ``finish_reason`` lives
+    on the enclosing choice. SDK message objects are pydantic models that reject
+    unknown-field assignment in strict mode, so a failed stamp is not fatal: the
+    tool layer treats a missing flag as "not truncated", which is the same
+    behaviour as before this check existed.
+    """
+
+    reason = getattr(choice, "finish_reason", None)
+    if not reason:
+        return
+    try:
+        message.finish_reason = str(reason)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+
 async def _stream_chat_completion_message(
     agent: AgentContext,
     messages: list[dict[str, Any]],
@@ -401,6 +420,7 @@ async def _stream_chat_completion_message(
     full_text = ""
     reasoning_buffer = ""
     tool_calls_chunks: list[dict] = []
+    stream_finish_reason = ""
     repetition_count = 0
     last_rep_check = 0
     stream = _ensure_async_iter(response)
@@ -412,7 +432,14 @@ async def _stream_chat_completion_message(
     async for chunk in stream:
         if not chunk.choices:
             continue
-        delta = chunk.choices[0].delta
+        choice_chunk = chunk.choices[0]
+        # The provider reports why generation stopped on the chunk that closes
+        # the choice, not on a field of the assembled message. Without capturing
+        # it here, a response cut at the output limit is indistinguishable from a
+        # complete one, and a half-written tool call would be executed.
+        if getattr(choice_chunk, "finish_reason", None):
+            stream_finish_reason = str(choice_chunk.finish_reason)
+        delta = choice_chunk.delta
         reasoning = getattr(delta, "reasoning_content", None) or ""
         if reasoning:
             reasoning_buffer += reasoning
@@ -470,6 +497,7 @@ async def _stream_chat_completion_message(
     except Exception:
         pass
     message = _message_from_stream(full_text, _assemble_tool_calls(tool_calls_chunks))
+    message.finish_reason = stream_finish_reason
     if repetition_count:
         message.repetition_count = repetition_count
     return message
@@ -1072,6 +1100,7 @@ async def call_llm(
     if choice.message.tool_calls:
         for tc in choice.message.tool_calls:
             _sink_emit(original_sink, "on_tool_call", tc.function.name, (tc.function.arguments or "")[:200])
+        _stamp_finish_reason(choice.message, choice)
         result = _prepend_retry_notice(
             await handle_tool_calls(agent, choice.message), retry_attempts
         )
@@ -1244,6 +1273,8 @@ async def _call_llm_auto_nonstream(
             _sink_emit(stream_sink, "on_content_token", round_text)
         for tc in tool_calls:
             _sink_emit(stream_sink, "on_tool_call", tc.function.name, (tc.function.arguments or "")[:200])
+
+        _stamp_finish_reason(choice.message, choice)
 
         tool_results, skipped_info = await handle_tool_calls_with_results(agent, choice.message)
         for item in tool_results:
@@ -1473,6 +1504,7 @@ async def call_llm_stream(
         full_text = ""
         reasoning_buffer = ""
         tool_calls_chunks: list[dict] = []
+        stream_finish_reason = ""
 
         # 自动适配 sync/async Stream（sync Stream 用 _AsyncIterWrapper 包装）
         _stream = _ensure_async_iter(response)
@@ -1482,6 +1514,8 @@ async def call_llm_stream(
         _stream = _ChunkWatchdog(_stream, wd_first_s, wd_inter_s)
         async for chunk in _stream:
             if chunk.choices and len(chunk.choices) > 0:
+                if getattr(chunk.choices[0], "finish_reason", None):
+                    stream_finish_reason = str(chunk.choices[0].finish_reason)
                 delta = chunk.choices[0].delta
 
                 # Handle reasoning_content (DeepSeek R1, etc.)
@@ -1515,6 +1549,7 @@ async def call_llm_stream(
                 dummy_msg = type("obj", (object,), {
                     "content": full_text,
                     "tool_calls": tool_calls,
+                    "finish_reason": stream_finish_reason,
                 })()
                 for tc in tool_calls:
                     stream_sink.on_tool_call(tc.function.name, tc.function.arguments[:200])

@@ -454,7 +454,15 @@ def _is_meaningful_path(path: str) -> bool:
 def _extract_pinned_facts(raw: str) -> list[str]:
     text = str(raw or "")
     facts: list[str] = []
+    # Same placeholder filter _extract_progress applies. It was missing here, so
+    # on the 2026-10-31 CMB runs eight binary-noise tokens (`x06Jw2{E\xbb...}`)
+    # became pinned facts while the progress line silently dropped them — the
+    # weaker copy was the one that fed the blackboard.
+    from vulnclaw.agent.agent_state import is_placeholder_flag
+
     for flag in extract_flags(text)[:3]:
+        if is_placeholder_flag(flag):
+            continue
         facts.append(f"Observed flag-like token: {flag}")
 
     facts.extend(_extract_sql_facts(text))

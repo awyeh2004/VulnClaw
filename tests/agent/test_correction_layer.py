@@ -441,3 +441,55 @@ def test_argument_decline_does_not_count_against_tool_health():
     )
 
     assert signal.ok is True
+
+
+def test_binary_noise_flag_shapes_never_become_pinned_facts():
+    """A hexdump that happens to contain `name{...}` is not flag evidence.
+
+    Measured 2026-10-31 on the CMB challenge: eight tokens like
+    ``x06Jw2{E\xbb\xca7...}`` landed in pinned_facts, so the model had
+    "observed" a flag that never existed and kept steering toward it. The
+    progress extractor already filtered these; the pinned-fact extractor did
+    not, and the weaker copy is the one that feeds the blackboard.
+    """
+    agent = _agent()
+    raw = (
+        "raw bytes around offset 0x1c40:\n"
+        "x06Jw2{E\xbb\xca7\x98\xb9\xfe\xbf\xb1\xa2\xbe\xc63\xd9\xf8}\n"
+        "xdf{\x95\x97\r}\n"
+        "LEN{0}\n"
+    )
+    record = _record(agent, raw)
+
+    signal = after_tool_call(
+        agent,
+        tool="python_execute",
+        arguments={"code": "open(p,'rb').read()[0x1c40:0x1d00]"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    facts = [item.text for item in agent.context.state.agent_state.pinned_facts]
+    assert not any("flag-like token" in item for item in facts), facts
+    assert not any("x06Jw2" in item for item in facts), facts
+    assert "flag-like token observed" not in signal.model_hint()
+
+
+def test_real_flag_in_tool_output_is_still_pinned():
+    """The filter must not cost us a genuine flag."""
+    agent = _agent()
+    raw = "<pre>flag{f19f2a19-df50-4542-b447-ef1bbae5a885}</pre>\n"
+    record = _record(agent, raw)
+
+    after_tool_call(
+        agent,
+        tool="fetch",
+        arguments={"url": "https://target/flag"},
+        raw_output=raw,
+        duration_ms=10,
+        evidence=record,
+    )
+
+    facts = [item.text for item in agent.context.state.agent_state.pinned_facts]
+    assert any("flag-like token" in item and "f19f2a19" in item for item in facts), facts

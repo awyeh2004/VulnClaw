@@ -19,6 +19,12 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from vulnclaw.utils.redaction import redact_credentials
 
 DEFAULT_EVIDENCE_PREVIEW_CHARS = 3500
+#: Share of the head/tail preview budget given to the head when a tool call
+#: failed. Failed output carries its diagnosis at the end (traceback's last
+#: frame, shell exit status, HTTP error body), so the tail gets most of the
+#: budget. Kept as a named constant so the asymmetry is intentional and greppable
+#: rather than a magic number inside clip_text.
+_FAILED_PREVIEW_HEAD_RATIO = 0.25
 #: Default evidence_view window. This used to be 0 = "no limit", which let one
 #: call pull a whole multi-megabyte attachment into the prompt (measured
 #: 2026-10-21, audit item G: 6.03M tokens burned on a 2.3 MB attachment while
@@ -66,20 +72,42 @@ OBSERVATION_ONLY_TOOLS = frozenset({"evidence_list", "evidence_view", "evidence_
 # ``_is_code_shaped_body``) and the prefix must start a word, not end one.
 _FLAG_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]{1,20}\{[^{}\n]{1,200}\}")
 _STATUS_RE = re.compile(r"(?:Status|HTTP/\d(?:\.\d)?)\s*:?\s*(\d{3})", re.IGNORECASE)
+#: A literal backslash-escape run (`\xbb`, `\xca7`) — the signature of a byte
+#: repr pasted from a hexdump rather than text read out of a page.
+_BYTE_ESCAPE_RE = re.compile(r"\\x[0-9A-Fa-f]{2}")
 
 
-def clip_text(value: str, limit: int, *, marker: str = "...[truncated]...") -> str:
+def clip_text(
+    value: str,
+    limit: int,
+    *,
+    marker: str = "...[truncated]...",
+    head_ratio: float = 0.5,
+) -> str:
     """Return a deterministic head/tail preview for oversized text.
 
     A non-positive limit means "unlimited" so callers can opt out of clipping
     without needing a separate code path.
+
+    ``head_ratio`` splits the budget between the head and the tail. The default
+    is symmetric, which is right for command output where the invocation and the
+    final status both matter. Callers that know the decisive bytes live at one
+    end pass 0.0 (tail only) or 1.0 (head only); a failing tool result is the
+    first case, because the error reason is written last and clipping it away
+    leaves the model unable to correct the call.
     """
 
     text = str(value or "")
     if limit <= 0 or len(text) <= limit:
         return text
-    head = max(1, limit // 2)
-    tail = max(1, limit - head - len(marker) - 2)
+    ratio = min(1.0, max(0.0, float(head_ratio)))
+    budget = max(0, limit - len(marker) - 2)
+    head = max(0, int(budget * ratio))
+    tail = max(0, budget - head)
+    if head == 0:
+        return f"{marker}\n{text[-tail:].lstrip()}"
+    if tail == 0:
+        return f"{text[:head].rstrip()}\n{marker}"
     return f"{text[:head].rstrip()}\n{marker}\n{text[-tail:].lstrip()}"
 
 
@@ -208,6 +236,25 @@ def is_placeholder_flag(flag: str) -> bool:
         return True
     if re.search(r"[;()]", body):
         return True
+    # Binary dumps read as a byte repr carry literal ``\xNN`` escapes. The flag
+    # regex happily matches ``x06Jw2{E\xbb\xca7...}`` out of a hexdump, and on
+    # the 2026-10-31 CMB runs eight such tokens became pinned facts — the model
+    # then "had" evidence of a flag shape that was never a flag. A real flag
+    # body is printable text; it would never survive quoting with backslash
+    # escapes embedded.
+    if _BYTE_ESCAPE_RE.search(body):
+        return True
+    # The same hexdump can arrive two ways: as literal ``\xNN`` text, or already
+    # decoded into the latin-1 characters those bytes spell. The decoded form is
+    # what survived the redaction pass on the CMB run, so check it too: a flag
+    # body is ASCII, and a run of high-byte characters is binary noise.
+    high_bytes = sum(1 for ch in body if ord(ch) > 0x7E or (ord(ch) < 0x20 and ch not in "\t\n\r"))
+    if high_bytes and high_bytes * 3 >= len(body):
+        return True
+    # A body with no letter at all (`LEN{0}`, `{0}`, `x{42}`) is a length or an
+    # index, not a flag. Every real flag body mixes letters with whatever else.
+    if not re.search(r"[A-Za-z]", body):
+        return True
     return False
 
 
@@ -271,13 +318,23 @@ def _important_lines(text: str, limit: int = 18) -> list[str]:
     return selected
 
 
-def make_evidence_preview(content: str, limit: int = DEFAULT_EVIDENCE_PREVIEW_CHARS) -> str:
+def make_evidence_preview(
+    content: str,
+    limit: int = DEFAULT_EVIDENCE_PREVIEW_CHARS,
+    *,
+    ok: bool = True,
+) -> str:
     """Build bounded prompt-facing evidence while preserving raw content separately.
 
     The preview is an active-context working set, not the evidence source of
     truth. Large raw outputs stay available through evidence_view/evidence_search;
     this function keeps the model from repeatedly carrying entire HTML bodies,
     command logs or response blobs in every subsequent LLM request.
+
+    ``ok=False`` shifts the head/tail split toward the tail. A failing tool
+    writes its reason last -- a Python traceback names the failing frame at the
+    bottom, a shell error puts the exit status at the bottom -- so a symmetric
+    cut can drop the one line the model needs to correct the call.
     """
 
     text = str(content or "")
@@ -285,6 +342,7 @@ def make_evidence_preview(content: str, limit: int = DEFAULT_EVIDENCE_PREVIEW_CH
         return text
     if len(text) <= limit:
         return text
+    head_ratio = 0.5 if ok else _FAILED_PREVIEW_HEAD_RATIO
     lines = _important_lines(text, limit=36)
     header = (
         "[active-context high-signal preview]\n"
@@ -292,8 +350,18 @@ def make_evidence_preview(content: str, limit: int = DEFAULT_EVIDENCE_PREVIEW_CH
         "use evidence_view/evidence_search if a missing byte or wider span matters."
     )
     marker = "...[raw omitted from active context; inspect saved evidence for full body]..."
+    # Both branches below assemble a header plus a clip of the body, so each has
+    # to clamp the *assembled* string. Clipping only the body (as this used to)
+    # let the header push the result past ``limit`` -- measured 2026-11-13: a
+    # 1500-char limit produced a 1695-char preview whenever no signal line
+    # matched, which is also the case where nothing else keeps the size honest.
     if not lines:
-        return "\n".join([header, "", "[head/tail context]", clip_text(text, limit, marker=marker)])
+        return clip_text(
+            "\n".join([header, "", "[head/tail context]", clip_text(text, limit, marker=marker, head_ratio=head_ratio)]),
+            limit,
+            marker="...[preview clipped; inspect saved evidence]...",
+            head_ratio=head_ratio,
+        )
 
     signal_block = "\n".join(["[signal lines]", *lines])
     remaining = max(1000, limit - len(header) - len(signal_block) - 80)
@@ -304,10 +372,15 @@ def make_evidence_preview(content: str, limit: int = DEFAULT_EVIDENCE_PREVIEW_CH
             signal_block,
             "",
             "[head/tail context]",
-            clip_text(text, remaining, marker=marker),
+            clip_text(text, remaining, marker=marker, head_ratio=head_ratio),
         ]
     )
-    return clip_text(preview, limit, marker="...[preview clipped; inspect saved evidence]...")
+    return clip_text(
+        preview,
+        limit,
+        marker="...[preview clipped; inspect saved evidence]...",
+        head_ratio=head_ratio,
+    )
 
 
 class EvidenceRecord(BaseModel):
@@ -621,6 +694,7 @@ class AgentState(BaseModel):
         output: Any,
         status: int = 0,
         preview_chars: int = DEFAULT_EVIDENCE_PREVIEW_CHARS,
+        ok: bool = True,
     ) -> EvidenceRecord:
         raw = redact_credentials(str(output or ""))
         args = dict(arguments or {})
@@ -643,7 +717,7 @@ class AgentState(BaseModel):
                 "original evidence id if exact bytes are needed."
             )
         else:
-            preview = make_evidence_preview(raw, preview_chars)
+            preview = make_evidence_preview(raw, preview_chars, ok=ok)
         record = EvidenceRecord(
             id=f"e{self.evidence_seq:03d}",
             tool=tool,

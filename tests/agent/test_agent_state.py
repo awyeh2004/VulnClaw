@@ -215,6 +215,27 @@ class TestPlaceholderFlag:
         for token in ("flag{...}", "{uuid}", "<flag>", "flag{}", "flag{your_flag_here}"):
             assert is_placeholder_flag(token) is True, token
 
+    def test_byte_dump_bodies_are_placeholders(self):
+        """Binary noise read off a hexdump must not count as a flag shape.
+
+        Measured 2026-10-31 on the CMB challenge: eight tokens like
+        ``x06Jw2{E\\xbb\\xca7...}`` became pinned facts, giving the model
+        "evidence" of a flag that was never there. The flag regex matches them
+        because a byte repr is still printable text.
+        """
+        for token in (
+            r"x06Jw2{E\xbb\xca7\x98\xb9\xfe\xbf}",
+            r"xdf{\x95\x97\r}",
+            r"x92o{\n\xd6Z\xd9M^}",
+            r"x9d_L{\xb9}",
+        ):
+            assert is_placeholder_flag(token) is True, token
+
+    def test_letterless_bodies_are_placeholders(self):
+        """A length or index is not a flag body."""
+        for token in ("LEN{0}", "x{42}", "{12345678}"):
+            assert is_placeholder_flag(token) is True, token
+
 
 class TestFlagsWithSpacesAreExtracted:
     """A solved challenge must not be reported as unsolved because of its flag's shape.

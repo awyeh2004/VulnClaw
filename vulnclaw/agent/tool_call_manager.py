@@ -40,6 +40,22 @@ logger = logging.getLogger(__name__)
 # Default concurrency cap used when the agent config does not specify one.
 DEFAULT_TOOL_MAX_CONCURRENT = 5
 
+#: ``finish_reason`` values that mean the provider stopped generating at the
+#: output-token limit rather than completing its answer. A response cut this way
+#: can still contain a syntactically valid tool call -- the JSON closed before
+#: the cut -- while its arguments are semantically incomplete (a list truncated
+#: mid-way, a command missing its trailing arguments). Executing it would run
+#: half an operation against a live target, so the whole batch is refused and
+#: the model is asked to reissue. Mirrors the same check in aiscan's loop.
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+TRUNCATED_TOOL_CALL_MESSAGE = (
+    "[tool calls not executed] The model response was cut off by the output-token "
+    "limit (finish_reason=length), so every tool call in that response is treated "
+    "as incomplete. Reissue the calls you still need, one or two per turn, with "
+    "complete arguments."
+)
+
 # Cross-round repetition suppression: when the same tool is called against the
 # same target endpoint more than this many times *in a row with an identical
 # result*, later calls are short-circuited with the most recent result instead
@@ -272,6 +288,14 @@ def _remember_target_result(
 
 async def handle_tool_calls(agent: AgentContext, message: Any) -> str:
     """Handle tool calls from the LLM response (legacy single-turn)."""
+    if response_was_output_truncated(message):
+        logger.warning(
+            "refusing %d tool call(s): response truncated at the output limit (finish_reason=%r)",
+            len(getattr(message, "tool_calls", None) or []),
+            getattr(message, "finish_reason", ""),
+        )
+        rejected = _reject_truncated_batch(agent, message)
+        return "\n".join(str(item.get("content", "")) for item in rejected)
     results: list[str] = []
     # [修改] 2026-06-10 Nyaecho - 修复 tool_calls 属性访问问题，使用 getattr 防止 AttributeError
     for tool_call in (getattr(message, "tool_calls", None) or []):
@@ -336,11 +360,71 @@ async def handle_tool_calls(agent: AgentContext, message: Any) -> str:
     return "\n".join(results)
 
 
+def response_was_output_truncated(message: Any) -> bool:
+    """True when the provider stopped at the output-token limit.
+
+    The flag rides on the message because the stream assembler and the
+    non-streaming path both have it at hand, while the tool layer only ever sees
+    the assembled message. A missing attribute means "not truncated", which
+    keeps hand-built messages in tests and subagents working unchanged.
+    """
+
+    reason = getattr(message, "finish_reason", None)
+    if not isinstance(reason, str):
+        return False
+    return reason.strip().lower() in _TRUNCATED_FINISH_REASONS
+
+
+def _reject_truncated_batch(
+    agent: AgentContext, message: Any
+) -> list[dict[str, Any]]:
+    """Return one refusal per tool call in a truncated response, executing none.
+
+    Every call still gets an id-matched response: OpenAI-style tool calling
+    requires a ``role=tool`` message for each requested id, and dropping them
+    would make the next request malformed rather than merely unhelpful.
+    """
+
+    results: list[dict[str, Any]] = []
+    for tool_call in getattr(message, "tool_calls", None) or []:
+        func_name = str(getattr(getattr(tool_call, "function", None), "name", "") or "")
+        func_args = safe_parse_tool_args(getattr(tool_call.function, "arguments", "") or "")
+        _record_tool_call_without_new_evidence(
+            agent,
+            func_name,
+            func_args,
+            TRUNCATED_TOOL_CALL_MESSAGE,
+            duration_ms=0,
+            ok=False,
+            error_type="truncated_response",
+        )
+        results.append(
+            {
+                "tool_call": tool_call,
+                "tool_call_id": getattr(tool_call, "id", ""),
+                "content": f"[tool:{func_name}] {TRUNCATED_TOOL_CALL_MESSAGE}",
+                "structured_content": None,
+                "duration_ms": 0,
+                "correction": TRUNCATED_TOOL_CALL_MESSAGE,
+                "correction_signal": None,
+            }
+        )
+    return results
+
+
 async def handle_tool_calls_with_results(
     agent: AgentContext, message: Any
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Handle tool calls with deduplication and rate limiting."""
     max_calls_per_round = 10
+
+    if response_was_output_truncated(message):
+        logger.warning(
+            "refusing %d tool call(s): response truncated at the output limit (finish_reason=%r)",
+            len(getattr(message, "tool_calls", None) or []),
+            getattr(message, "finish_reason", ""),
+        )
+        return _reject_truncated_batch(agent, message), [TRUNCATED_TOOL_CALL_MESSAGE]
 
     seen: dict[str, dict[str, Any]] = {}
     # [修改] 2026-06-10 Nyaecho - 修复 tool_calls 属性访问问题，使用 getattr 防止 AttributeError
@@ -775,6 +859,7 @@ def _record_tool_result_with_record(
         arguments=func_args,
         output=raw,
         status=parse_status_code(raw),
+        ok=ok,
     )
     agent_state.record_tool_call(
         tool=func_name,
