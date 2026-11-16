@@ -563,6 +563,19 @@ def solve(
     solve_constraints = _solve_task_constraints(task_prompt, additional_targets)
     console.print(f"[*] Target: [bold]{target}[/] | Goal: [bold]{resolved_goal}[/]")
 
+    # Surface a goal that closes a path, before the run starts treating that
+    # closure as fact. Advisory only: the operator owns the goal, and a
+    # prohibition may rest on evidence the run cannot see. See
+    # ``input_analysis.goal_wording_warning`` for the measured failure.
+    try:
+        from vulnclaw.agent.input_analysis import goal_wording_warning
+
+        warning = goal_wording_warning(resolved_goal)
+        if warning:
+            err_console.print(warning)
+    except Exception:  # noqa: BLE001 - a cosmetic check must never break a solve
+        pass
+
     holder: dict = {}
     stream_out = sys.stdout if stream else None
 

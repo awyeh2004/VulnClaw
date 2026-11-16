@@ -32,6 +32,7 @@ shared_references:
 | Web 加密 session cookie 伪造 | `encrypted-session-cookie-forgery.md` | ECB/CBC cut-and-paste 拼块伪造 admin，无需解 key |
 | ECC 攻击 | `ecc-attacks-cheatsheet.md` | 小子群/invalid curve/Smart/Pohlig-Hellman |
 | PRNG/流密码攻击 | `prng-and-stream-cipher-attacks.md` | MT19937/LCG/LFSR/RC4 |
+| **numpy/torch 生成型附件**（`.npz`/`.pt`/`.npy`，统计均匀、大量精确重复行） | `prng-and-stream-cipher-attacks.md` §从数据反推生成参数与种子 | 提 std 猜简洁 sigma → 搜 seed（小整数 / YYYYMMDD / 时间戳）→ 单锚点筛选 → 重建读排列 |
 | 古典密码 | `classic-cipher-attacks.md` | Vigenere/XOR频率分析/OTP重用 |
 | 格攻击 | `lattice-and-lwe-attacks.md` | LLL/BKZ/HNP/LWE embedding |
 

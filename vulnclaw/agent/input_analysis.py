@@ -676,3 +676,116 @@ def get_payload_examples(found_vulns: list[str], target: str) -> str:
 def build_user_vuln_directive(user_input: str) -> str:
     """Backward-compatible alias for explicit vulnerability hint extraction."""
     return extract_user_vuln_hint(user_input)
+
+
+# ── Goal-wording hazards ────────────────────────────────────────────────────
+#
+# A goal is an instruction, not evidence. When it asserts that some path is
+# closed, the model treats that as an established fact and stops probing there —
+# even when the assertion is wrong.
+#
+# Measured 2026-10-31 on ezphp. The first run solved it in 8 minutes by reading
+# `/flag.php`'s source and using the unfiltered `gopher` scheme. The platform
+# rejected the value, so the next goal said:
+#
+#     "The previously obtained flag{...} is a known decoy and was rejected;
+#      never report or submit it. Do not spend time revalidating /flag.php
+#      gopher output."
+#
+# The real solution WAS the gopher path — the decoy was a different file, reachable
+# only *through* that path. The prohibition removed the only road, and the run
+# spent 165 tool calls building an unrelated Nextcloud-crypto attack.
+#
+# This does not rewrite the goal. An operator who writes a prohibition may have
+# evidence the run cannot see, so the only honest move is to surface the cost and
+# let them decide.
+
+#: Phrases that forbid a line of investigation. Deliberately narrow: "don't
+#: forget", "don't guess" and similar are guidance, not closure.
+_PROHIBITION_PATTERNS = (
+    r"\bdo not (?:spend time |bother )?(?:revalidat|re-?test|recheck|retry|re-?try|revisit)",
+    r"\b(?:never|do not|don't|must not) (?:report|submit|try|attempt|test|pursue|explore|use)\b",
+    r"\b(?:skip|avoid|ignore|disregard) (?:the )?[\w/.:-]* ?(?:path|approach|route|vector|surface|endpoint)",
+    r"\bis a (?:known )?(?:decoy|dead end|rabbit hole|false positive)\b",
+    r"\b(?:不要|禁止|严禁|别再|不要再)(?:重复|重试|测试|尝试|提交|上报|走|试)",
+    r"(?:已经|已被)?(?:证实|确认|证明)(?:是)?(?:无效|错误|失败的|诱饵|假)",
+)
+
+#: Phrases that attribute the closure to a check the operator ran. When present
+#: the prohibition is at least testable and gets a weaker warning.
+_PROHIBITION_BECAUSE = (
+    r"\bbecause\b",
+    r"\b(?:verified|confirmed|proven|checked|tested)\b",
+    r"\b(?:平台|platform) (?:rejected|refused|denied|判错|拒绝)",
+    r"\b(?:returned|gave|reported) (?:a |an )?(?:403|404|error|invalid|wrong)",
+)
+
+_PROHIBITION_RE = re.compile("|".join(_PROHIBITION_PATTERNS), re.IGNORECASE)
+_PROHIBITION_BECAUSE_RE = re.compile("|".join(_PROHIBITION_BECAUSE), re.IGNORECASE)
+
+#: Sentence boundary. A bare ``.`` is deliberately NOT one: goals are full of
+#: paths and hostnames (`/flag.php`, `Nextcloud 34.0.3.2`, `10.0.0.1`), and
+#: splitting on every period tore "Do not spend time revalidating /flag.php
+#: gopher output" into "/flag." during testing, losing the part that names what
+#: was forbidden. A period only ends a sentence before whitespace plus a capital
+#: or Chinese character, which covers prose without breaking dotted identifiers.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[!?;。！？；])\s*|(?<=\.)\s+(?=[A-Z\u4e00-\u9fff])")
+
+#: A goal sentence is checked only when it is short enough to *be* one instruction.
+#: A pasted writeup would otherwise light this up for every line.
+_PROHIBITION_MAX_SENTENCE = 600
+
+
+def extract_goal_prohibitions(goal: str) -> list[str]:
+    """Sentences in ``goal`` that forbid a line of investigation.
+
+    Returned verbatim so the operator can see exactly which wording they wrote.
+    An empty list means the goal states conditions without closing paths.
+    """
+    text = str(goal or "")
+    if not text.strip():
+        return []
+    found: list[str] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        stripped = (sentence or "").strip()
+        if not stripped or len(stripped) > _PROHIBITION_MAX_SENTENCE:
+            continue
+        if _PROHIBITION_RE.search(stripped):
+            found.append(stripped)
+    return found
+
+
+def goal_wording_warning(goal: str) -> str:
+    """An operator-facing warning when ``goal`` asserts a path is closed.
+
+    Empty string when the goal is clean, so callers can print unconditionally.
+
+    The warning is deliberately *not* a refusal: the operator owns the goal. It
+    exists because the failure mode is invisible otherwise — the run looks busy
+    and productive while systematically avoiding the one path the goal forbade.
+    """
+    prohibitions = extract_goal_prohibitions(goal)
+    if not prohibitions:
+        return ""
+
+    lines = [
+        "[!] This goal forbids a line of investigation. A prohibition is not evidence:",
+        "    the run will treat it as established fact and stop probing there.",
+    ]
+    for sentence in prohibitions[:4]:
+        lines.append(f"    - {sentence[:240]}")
+    if len(prohibitions) > 4:
+        lines.append(f"    - ... and {len(prohibitions) - 4} more")
+
+    unsupported = [s for s in prohibitions if not _PROHIBITION_BECAUSE_RE.search(s)]
+    if unsupported:
+        lines.append(
+            "    None of these cite a check that was run, so a wrong premise here "
+            "removes the only working path (measured 2026-10-31: `Do not spend time "
+            "revalidating /flag.php gopher output` forbade the actual solution)."
+        )
+    lines.append(
+        "    If the exclusion is deliberate, keep it — otherwise drop the "
+        "prohibition and let the run re-check."
+    )
+    return "\n".join(lines)
