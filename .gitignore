@@ -115,7 +115,15 @@ CLAUDE.md
 /.routercode/
 
 # Local docs / local-only artifacts
-docs/
+# 注意：`docs/` 整条忽略太宽，会连带挡掉项目自己的 docs/ci、docs/mcp-deployment.md
+# 等正常文档。这里改成只挡真实挖洞记录与本地草稿。
+docs/research/
+docs/**/HANDOFF-*.md
+docs/**/real-vuln-cases.md
+docs/**/session-*.md
+docs/**/action-plan-*.md
+docs/**/*-src.md
+docs/**/playbook-*.md
 .test-tmp/
 版本号文件.png
 

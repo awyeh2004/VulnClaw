@@ -1,4 +1,4 @@
-"""GCS (West Lake Sword / 西湖论剑) adapter.
+"""GCS (西湖论剑) adapter.
 
 Wraps :mod:`vulnclaw.gcs_platform.client`; it does not replace it. That client
 owns the platform's envelope handling (``{"code": "00000", "data": ...}``) and the
