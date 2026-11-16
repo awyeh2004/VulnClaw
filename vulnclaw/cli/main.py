@@ -201,11 +201,18 @@ from vulnclaw.cli.commands_platform import (  # noqa: F401 — re-export
     competition,
     ctf2,
     gcs,
+    solve_all,
+    where,
 )
 
 app.command("ctf2")(ctf2)
 app.command("gcs")(gcs)
 app.command("competition")(competition)
+# Standalone rather than a `competition` sub-mode: this one has real options
+# (--concurrency/--limit/--dry-run), and `competition` dispatches on a positional
+# mode string, so a sub-mode would bury them behind a sentinel-passing call.
+app.command("solve-all")(solve_all)
+app.command("where")(where)
 
 
 # go/persistent/recon/scan/network-scan/exploit/report —— 在平台三件套之后注册

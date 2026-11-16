@@ -319,8 +319,15 @@ def competition(
             raise typer.Exit(1)
         _from_main("_competition_solve")(cfg, str(ref))
         return
+    if mode == "solve-all":
+        err_console.print(
+            "[!] 'solve-all' is its own command, not a competition mode — run "
+            "`vulnclaw solve-all --help` (it takes --concurrency / --limit / --dry-run)."
+        )
+        raise typer.Exit(1)
     err_console.print(
-        f"[!] unknown competition mode: {mode} (use: latency | plan | download | solve <eid>)"
+        f"[!] unknown competition mode: {mode} (use: latency | plan | download | "
+        f"solve <eid>)"
     )
     raise typer.Exit(1)
 
@@ -749,3 +756,369 @@ def _competition_solve(cfg: Any, ref: str) -> None:
         writeup_dir=None,
         model="auto",
     )
+
+
+# ── 跨题并发（solve-all） ────────────────────────────────────────────────────
+#
+# 2026-10-31 强网杯实测：babysilent / 谍影 / CanonicoPWN / dreambound 四题**一次
+# 都没跑过**，而题解方四题全解。这不是能力缺口，是排期缺口——当时的做法是手写
+# 队列脚本一道道串行跑，前一题烧完时间就没后一题的机会。
+#
+# 单题内部已经有并行（`run_parallel_pentest` 的表面波 + `run_team_pentest` 的
+# 计划波），但对 CTF 单题扇不出多个表面：一个 URL 提不出四个 service。真正缺的
+# 并行维度是**跨题**。
+#
+# 实现上必须用子进程而不是线程/协程：`solve()` 内部是 `asyncio.run(_run())`，
+# 同一进程里再跑一次会把事件循环弄坏。锁是**按 target** 分的
+# （`solver._solve_lock_path`），不同题不冲突，所以并发是安全的。
+
+#: Upper bound on simultaneous solve processes. The real ceiling is the LLM
+#: backend, not the CPU: `competition latency` exists precisely because a slow
+#: shared endpoint gets *worse* with more workers. Kept low by default and
+#: expected to be raised only after that probe says the backend is fast.
+DEFAULT_SOLVE_ALL_CONCURRENCY = 3
+
+#: How often the supervisor re-checks child exit codes. A module constant so
+#: tests can pin it instead of sleeping for real.
+_SOLVE_ALL_POLL_SECONDS = 0.5
+
+
+def _solve_target_for(challenge: Any) -> str:
+    """The string this challenge would have been recorded under in past runs.
+
+    A run records the *actual* target it was handed — an IP, a host, or a local
+    attachment path — never the platform ref: ``run.json`` on 2026-10-31 shows
+    ``"canonical": "123.57.159.91:30728"`` for a challenge whose ref was
+    ``ctf2:practice:...``. So matching a platform challenge to local history is
+    a best-effort name lookup, not an identity check.
+
+    The challenge name is used because it is the one string that survives both
+    sides: operators name their runs after the challenge (``qwb-oldsvr``), and
+    the name appears in the goal text a run records. A wrong guess here costs an
+    unnecessary "already attempted" label that the operator can override with
+    ``--include-attempted``, so it is deliberately permissive.
+    """
+    name = str(getattr(challenge, "name", "") or "").strip()
+    if name:
+        return name
+    ref = getattr(challenge, "ref", None)
+    token = getattr(ref, "token", None)
+    if callable(token):
+        try:
+            return str(token())
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
+def solve_all(
+    limit: int = typer.Option(
+        0, "--limit", help="Only take this many challenges after ordering (0 = all)"
+    ),
+    concurrency: int = typer.Option(
+        DEFAULT_SOLVE_ALL_CONCURRENCY,
+        "--concurrency",
+        help="How many solve processes to run at once. Raise only after "
+        "`vulnclaw competition latency` reports a fast backend.",
+    ),
+    skip_solved: bool = typer.Option(
+        True, "--skip-solved/--include-solved", help="Skip challenges the platform reports SOLVED"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the launch plan and exit without starting anything"
+    ),
+    timeout_min: int = typer.Option(
+        0,
+        "--timeout-min",
+        help="Hard wall-clock cap for the whole batch, in minutes (0 = no cap). "
+        "A solve that hangs must not hold the other challenges' time.",
+    ),
+    skip_attempted: bool = typer.Option(
+        False,
+        "--skip-attempted/--include-attempted",
+        help="Skip challenges this machine has already run locally (any outcome). "
+        "Off by default: an abandoned attempt may deserve another go, so the "
+        "operator decides — see `vulnclaw where` for the effort already spent.",
+    ),
+    min_effort: int = typer.Option(
+        0,
+        "--min-effort",
+        help="With --skip-attempted, only skip challenges whose previous run used "
+        "at least this many tool calls. Lets a cheap abandoned try be retried "
+        "while the expensive ones stay parked.",
+    ),
+) -> None:
+    """Run every unsolved challenge concurrently, one subprocess per challenge.
+
+    Why this exists: a sequential run gives the *first* challenge all the time
+    and every later one none. On 2026-10-31 that pattern cost four entire
+    challenges that were later shown solvable, while the challenges actually
+    attempted consumed 1500+ tool calls. Breadth beats depth when the deadline
+    is fixed.
+
+    Every child is a normal ``vulnclaw competition solve <ref>`` invocation, so
+    this adds no new solving behaviour — it only changes what runs at the same
+    time. Output from each child is captured to its own log file so concurrent
+    runs do not interleave.
+    """
+    import subprocess
+    import sys
+    import time
+
+    cfg = _from_main("load_config")()
+    comp = cfg.competition
+
+    challenges = _from_main("_platform_challenges")()
+    if not challenges:
+        err_console.print(
+            "[!] No platform challenges available. Configure a platform, or run "
+            "`vulnclaw competition plan` to see the local fallback."
+        )
+        raise typer.Exit(1)
+
+    ordered = sorted(challenges, key=_from_main("_challenge_sort_key"), reverse=True)
+    if getattr(comp, "easy_first", True):
+        # Stable partition, not a full re-sort: within a difficulty band the
+        # score order computed above must survive.
+        ordered.sort(key=lambda row: str(row[1].difficulty).lower() != "easy")
+
+    if skip_solved:
+        solved = [row for row in ordered if getattr(row[1], "solved", False)]
+        ordered = [row for row in ordered if not getattr(row[1], "solved", False)]
+        if solved:
+            console.print(f"[*] Skipping {len(solved)} already-solved challenge(s).")
+
+    # Local attempt history. Only consulted when the operator asks, because
+    # "attempted" and "should not be retried" are different claims: an abandoned
+    # 5-call try is worth another shot, a 300-call one usually is not. The
+    # effort figure reported here is what `vulnclaw where` shows in full.
+    attempt_index = None
+    if skip_attempted:
+        from vulnclaw.attempt_index import build_index
+
+        attempt_index = build_index()
+        kept: list[Any] = []
+        parked: list[tuple[str, Any, int]] = []
+        for token, challenge in ordered:
+            spent = attempt_index.effort_for(_solve_target_for(challenge))
+            if spent >= max(0, int(min_effort or 0)) and attempt_index.was_attempted(
+                _solve_target_for(challenge)
+            ):
+                parked.append((token, challenge, spent))
+            else:
+                kept.append((token, challenge))
+        ordered = kept
+        if parked:
+            console.print(
+                f"[*] Skipping {len(parked)} already-attempted challenge(s) "
+                f"(min-effort={min_effort}):"
+            )
+            for token, challenge, spent in parked:
+                console.print(f"    {token}  {challenge.name} (previous effort: {spent} calls)")
+
+    if limit > 0:
+        ordered = ordered[:limit]
+
+    if not ordered:
+        console.print("[*] Nothing to run.")
+        return
+
+    concurrency = max(1, min(int(concurrency or 1), len(ordered)))
+    console.print(
+        f"[*] solve-all: {len(ordered)} challenge(s), {concurrency} at a time "
+        f"(easy-first={'on' if getattr(comp, 'easy_first', True) else 'off'})"
+    )
+    for token, challenge in ordered:
+        console.print(f"    {token}  {challenge.name} ({challenge.difficulty or '-'})")
+
+    if dry_run:
+        console.print("[*] --dry-run: nothing started.")
+        return
+
+    log_dir = _solve_all_log_dir()
+    console.print(f"[*] Per-challenge logs: {log_dir}")
+
+    running: list[tuple[str, subprocess.Popen, Any]] = []
+    pending = list(ordered)
+    finished: list[tuple[str, int]] = []
+
+    def _launch(token: str, challenge: Any) -> tuple[str, subprocess.Popen, Any]:
+        handle = open(log_dir / f"{_safe_log_name(token)}.log", "w", encoding="utf-8")
+        # sys.executable, not a bare "vulnclaw": the running interpreter is the
+        # one this module was imported from, so a venv or a source checkout is
+        # honoured and the child cannot silently resolve to a different install.
+        argv = [sys.executable, "-X", "utf8", "-m", "vulnclaw", "competition", "solve", token]
+        proc = subprocess.Popen(  # noqa: S603 - argv is built here, not user text
+            argv,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            cwd=os.getcwd(),
+        )
+        return token, proc, handle
+
+    try:
+        deadline = time.monotonic() + timeout_min * 60 if timeout_min > 0 else None
+        while pending or running:
+            while pending and len(running) < concurrency:
+                token, challenge = pending.pop(0)
+                try:
+                    running.append(_launch(token, challenge))
+                    console.print(f"[+] started {token}")
+                except Exception as exc:  # noqa: BLE001 - one bad launch must not stop the batch
+                    err_console.print(f"[!] failed to start {token}: {exc}")
+
+            if deadline is not None and time.monotonic() >= deadline:
+                err_console.print(
+                    f"[!] --timeout-min {timeout_min} reached — stopping "
+                    f"{len(running)} running solve(s) and {len(pending)} queued."
+                )
+                for token, proc, handle in running:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    handle.close()
+                    finished.append((token, -1))
+                running = []
+                pending = []
+                break
+
+            time.sleep(_SOLVE_ALL_POLL_SECONDS)
+            still: list[tuple[str, subprocess.Popen, Any]] = []
+            for token, proc, handle in running:
+                code = proc.poll()
+                if code is None:
+                    still.append((token, proc, handle))
+                    continue
+                handle.close()
+                finished.append((token, code))
+                status = "[green]ok[/]" if code == 0 else f"[red]exit {code}[/]"
+                console.print(f"[-] finished {token} ({status})")
+            running = still
+    except KeyboardInterrupt:
+        err_console.print("[!] interrupted — terminating running solves")
+        for token, proc, handle in running:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            handle.close()
+        raise typer.Exit(130) from None
+
+    ok = sum(1 for _, code in finished if code == 0)
+    console.print(f"[*] solve-all done: {ok}/{len(finished)} exited cleanly.")
+    # A non-zero child exit means that challenge's run failed, not that the batch
+    # did — report it, but only fail the command when nothing succeeded, so a
+    # single broken target does not make an otherwise productive match look red.
+    if finished and ok == 0:
+        raise typer.Exit(1)
+
+
+def _solve_all_log_dir() -> Any:
+    """Directory for per-challenge child logs, created on demand."""
+    from pathlib import Path
+
+    base = os.environ.get("VULNCLAW_WORK_DIR") or os.path.expanduser("~/vulnclaw/work")
+    path = Path(base) / "solve-all"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_log_name(token: str) -> str:
+    """Filesystem-safe log stem derived from a challenge ref."""
+    import re
+
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(token or "challenge")).strip("_")
+    return stem[:120] or "challenge"
+
+
+def where(
+    all_targets: bool = typer.Option(
+        False, "--all", help="Also list challenges already solved or marked attempted"
+    ),
+    top: int = typer.Option(
+        0, "--top", help="Only show this many challenges (0 = all)", min=0
+    ),
+) -> None:
+    """Show which challenges are untouched, attempted, and how much effort went in.
+
+    This is the answer to a question the platform cannot answer. On 2026-10-31
+    four challenges were never started while the ones attempted absorbed 1500+
+    tool calls — and nothing on screen made that visible until the writeups came
+    in. The platform reports *solved*; only the run history knows *tried*.
+
+    Effort is the number of tool calls the previous run spent. It is the only
+    honest way to tell "gave it a real go" from "opened it and got distracted",
+    which is exactly the decision `solve-all --skip-attempted --min-effort`
+    encodes.
+    """
+    from vulnclaw.attempt_index import build_index, summarize
+
+    cfg = _from_main("load_config")()
+    challenges = _from_main("_platform_challenges")()
+
+    index = build_index()
+    counts = summarize(index)
+    console.print(
+        f"[*] Local history: {counts['runs']} run(s), {counts['attempts']} attempt(s), "
+        f"{counts['distinct_targets']} distinct target(s)."
+    )
+
+    if not challenges:
+        console.print(
+            "[!] No platform challenges available. Local history is above; "
+            "configure a platform to map it onto a challenge list."
+        )
+        raise typer.Exit(1)
+
+    ordered = sorted(challenges, key=_from_main("_challenge_sort_key"), reverse=True)
+    rows: list[tuple[str, Any, str, int]] = []
+    for token, challenge in ordered:
+        if getattr(challenge, "solved", False):
+            state = "solved"
+        else:
+            effort = index.effort_for(_solve_target_for(challenge))
+            attempted = index.was_attempted(_solve_target_for(challenge))
+            if not attempted:
+                state = "UNTOUCHED"
+            elif effort > 0:
+                state = f"attempted ({effort} calls)"
+            else:
+                state = "attempted (no recorded effort)"
+        rows.append((token, challenge, state, index.effort_for(_solve_target_for(challenge))))
+
+    untouched = [r for r in rows if r[2] == "UNTOUCHED"]
+    attempted = [r for r in rows if r[2].startswith("attempted")]
+    solved = [r for r in rows if r[2] == "solved"]
+
+    def _show(items: list[tuple[str, Any, str, int]], heading: str) -> None:
+        if not items:
+            return
+        console.print(f"\n[bold]{heading}[/] ({len(items)})")
+        shown = items[:top] if top > 0 else items
+        for token, challenge, state, _effort in shown:
+            console.print(
+                f"    {state:26} {challenge.name} ({challenge.difficulty or '-'})  {token}"
+            )
+        if len(shown) < len(items):
+            console.print(f"    ... and {len(items) - len(shown)} more")
+
+    if all_targets:
+        _show(untouched, "Untouched — never run on this machine")
+        _show(attempted, "Attempted — a run exists")
+        _show(solved, "Solved")
+    else:
+        _show(untouched, "Untouched — never run on this machine")
+        if attempted:
+            console.print(
+                f"\n[dim]{len(attempted)} attempted, {len(solved)} solved "
+                f"(pass --all to list them)[/]"
+            )
+
+    if not untouched:
+        console.print(
+            "\n[*] Every challenge has been run at least once. Nothing is "
+            "unattempted — pick by effort spent, or revisit a solved one."
+        )

@@ -218,6 +218,20 @@ ALLOWED_SPAWN_SITES: dict[str, dict[str, object]] = {
         "count": 1,
         "purpose": "macOS open-URL launcher with fixed argv",
     },
+    "vulnclaw/cli/commands_platform.py:solve_all._launch:subprocess.Popen:402a0b29": {
+        "count": 1,
+        # operator control plane, never model-reachable: the operator runs
+        # `vulnclaw solve-all` themselves. argv is a module constant plus a
+        # challenge ref that came from the platform API, and the child is this
+        # same package (`-m vulnclaw competition solve <ref>`) — no shell, no
+        # model-authored text. Each child then runs its own tools through the
+        # normal ExecutionGate, so gating here would only add a second approval
+        # prompt for an operator who already asked for the whole batch.
+        "purpose": "supervisor launching one `vulnclaw competition solve` "
+                   "subprocess per challenge, so a fixed-deadline match runs "
+                   "challenges in parallel instead of giving the first one all "
+                   "the time (2026-10-31: four solvable challenges never started)",
+    },
     "vulnclaw/cli/wizard.py:_open_url:subprocess.Popen:8c0315af": {
         "count": 1,
         "purpose": "Linux xdg-open URL launcher with fixed argv",
