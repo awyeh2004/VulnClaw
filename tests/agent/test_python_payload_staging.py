@@ -28,9 +28,19 @@ def _agent(solve_work_root: str, run_id: str = "20260923T200000Z-solve-demo"):
     )
 
 
-def test_staging_dir_is_the_run_scratch_dir(tmp_path):
+def test_staging_dir_is_a_dedicated_subdir_of_the_run_scratch_dir(tmp_path):
+    """Staged payloads must NOT land where the model writes its own files.
+
+    Python puts the script's own directory at ``sys.path[0]``. When staging went
+    straight into the scratch dir, a helper the agent had named ``dis.py`` broke
+    every later call's ``import pprint`` (measured 2026-10-31, oldsvr).
+    """
     agent = _agent(str(tmp_path))
-    assert bt._payload_script_dir(agent) == str(tmp_path / "20260923T200000Z-solve-demo")
+    staging = bt._payload_script_dir(agent)
+    assert staging == str(
+        tmp_path / "20260923T200000Z-solve-demo" / bt.PAYLOAD_SCRIPT_SUBDIR
+    )
+    assert Path(staging).parent == tmp_path / "20260923T200000Z-solve-demo"
 
 
 def test_scratch_dir_is_created_and_named_by_run_id(tmp_path):
@@ -43,7 +53,9 @@ def test_scratch_dir_is_created_and_named_by_run_id(tmp_path):
 
 def test_no_run_id_falls_back_to_the_manual_subdir(tmp_path):
     """An empty run_id is how interactive runs land in the documented 'manual' dir."""
-    assert Path(bt._payload_script_dir(_agent(str(tmp_path), run_id=""))).name == "manual"
+    staging = Path(bt._payload_script_dir(_agent(str(tmp_path), run_id="")))
+    assert staging.parent.name == "manual"
+    assert staging.name == bt.PAYLOAD_SCRIPT_SUBDIR
 
 
 @pytest.mark.parametrize("root", ["", "   "])
@@ -102,6 +114,6 @@ async def test_python_execute_stages_into_the_scratch_dir(tmp_path, monkeypatch)
 
     out = await bt.execute_python(agent, {"code": "print(1 + 1)"})
     assert "2" in out, out
-    assert seen.get("dir") == str(tmp_path / "run-abc")
+    assert seen.get("dir") == str(tmp_path / "run-abc" / bt.PAYLOAD_SCRIPT_SUBDIR)
     assert seen.get("prefix") == "vulnclaw-payload-"
     assert seen.get("suffix") == ".py"

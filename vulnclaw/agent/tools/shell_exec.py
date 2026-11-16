@@ -13,6 +13,7 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -62,6 +63,11 @@ def _default_workdir(agent: AgentContext) -> Path:
     return scratch if scratch is not None else Path(os.getcwd()).resolve()
 
 
+#: Subdirectory of the run scratch dir that holds staged python payloads.
+#: Kept separate from the working directory on purpose — see ``_payload_script_dir``.
+PAYLOAD_SCRIPT_SUBDIR = ".vulnclaw-scripts"
+
+
 def _payload_script_dir(agent: AgentContext) -> str | None:
     """Where ``python_execute`` stages the script it is about to run.
 
@@ -73,15 +79,34 @@ def _payload_script_dir(agent: AgentContext) -> str | None:
     and execute, and the run then spent several turns diagnosing whether
     ``python_execute`` itself was broken.
 
-    Staging inside the run's scratch dir keeps payloads with the run's other
-    artifacts (auditable, cleaned up with the run) and lets an operator exclude
-    one narrow path in such a product instead of all of ``%TEMP%``.
+    The fix for that first moved staging *into the working directory*, which
+    introduced a nastier failure: Python puts the script's own directory at
+    ``sys.path[0]``, so any file in the work dir that shares a stdlib module
+    name shadows the real one for every subsequent call. Measured 2026-10-31 on
+    the oldsvr run: a helper the agent had written as ``dis.py`` made
+    ``import pprint`` fail deep inside ``inspect`` with
+
+        AttributeError: module 'dis' has no attribute 'COMPILER_FLAG_NAMES'
+
+    — an error that names neither the work dir nor the offending file, so the run
+    spent its remaining turns diagnosing a broken interpreter. Staging now goes
+    to ``<scratch>/.vulnclaw-scripts``, a directory the model does not write
+    into, so ``sys.path[0]`` holds only generated payloads.
 
     Returns None — meaning "use the system temp dir" — when no scratch root is
     configured or it cannot be created: staging must never fail a run.
     """
     scratch = _scratch_dir_if_configured(agent)
-    return str(scratch) if scratch is not None else None
+    if scratch is None:
+        return None
+    staged = scratch / PAYLOAD_SCRIPT_SUBDIR
+    try:
+        staged.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # A scratch dir we cannot subdivide still beats the system temp dir (the
+        # AV problem above), so fall back to the scratch root itself.
+        return str(scratch)
+    return str(staged)
 
 
 def _validate_command_url_scope(agent: AgentContext, command: str) -> str | None:
@@ -303,6 +328,100 @@ _EXEC_ENV_BLOCKED_EXACT = frozenset({
     "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
 })
 _EXEC_ENV_BLOCKED_PREFIXES = ("DYLD_",)
+
+
+# ── stdlib shadowing in the working directory ───────────────────────────────
+#
+# Python puts a script's own directory at ``sys.path[0]``, so a file in the
+# working directory that shares a stdlib module name replaces the real one for
+# that process. Measured 2026-10-31 (oldsvr, and 7 subagent sessions): a helper
+# the agent had written as ``dis.py`` made every later ``import pprint`` fail
+# inside ``inspect`` with
+#
+#     AttributeError: module 'dis' has no attribute 'COMPILER_FLAG_NAMES'
+#
+# — a message that names neither the work dir nor the offending file, so runs
+# spent their remaining turns diagnosing a supposedly broken interpreter.
+#
+# ``python_execute`` now stages into a private subdirectory, which removes the
+# whole class for that tool. ``shell_command`` cannot do the same — "run this in
+# that directory" is its contract — so it warns instead: the model can see what
+# is wrong and rename the file, which is a one-turn fix once named.
+_SHADOWABLE_STDLIB: frozenset[str] | None = None
+
+
+def _shadowable_stdlib() -> frozenset[str]:
+    """Stdlib module names worth scanning for, cached.
+
+    ``sys.stdlib_module_names`` is 3.10+; older interpreters fall back to a small
+    list of the ones that actually get imported by a payload preamble and would
+    break loudly.
+    """
+    global _SHADOWABLE_STDLIB
+    if _SHADOWABLE_STDLIB is None:
+        names = getattr(sys, "stdlib_module_names", None)
+        if names:
+            _SHADOWABLE_STDLIB = frozenset(names)
+        else:  # pragma: no cover - only on interpreters below 3.10
+            _SHADOWABLE_STDLIB = frozenset(
+                {
+                    "dis", "json", "random", "types", "copy", "string", "struct",
+                    "socket", "select", "code", "token", "parser", "platform",
+                    "queue", "signal", "stat", "time", "uuid", "warnings",
+                }
+            )
+    return _SHADOWABLE_STDLIB
+
+
+_IMPORT_STDLIB_RE = re.compile(
+    r"(?:^|[\s;|&(])(?:python[\d.]*|py)\s+(?:-\S+\s+)*([\w./\\:-]+\.py)\b",
+    re.IGNORECASE,
+)
+
+
+def shadowing_files(workdir: str | Path) -> list[str]:
+    """Files in ``workdir`` whose name would shadow a stdlib module.
+
+    Only the directory itself, not a recursive walk: ``sys.path[0]`` is one
+    directory deep, so a shadowing file two levels down cannot be imported by
+    bare name anyway.
+    """
+    try:
+        root = Path(workdir)
+        if not root.is_dir():
+            return []
+        wanted = _shadowable_stdlib()
+        hits: list[str] = []
+        for entry in root.iterdir():
+            if not entry.name.endswith(".py") or not entry.is_file():
+                continue
+            if entry.stem in wanted:
+                hits.append(entry.name)
+        return sorted(hits)
+    except OSError:
+        return []
+
+
+def shadowing_warning(command: str, workdir: str | Path) -> str:
+    """Warn when ``command`` runs a Python script in a shadowing directory.
+
+    Empty string when there is nothing to say, so callers can append
+    unconditionally. Only Python is affected: PHP's ``include_path`` and Node's
+    resolution do not consult the script directory the way ``sys.path[0]`` does.
+    """
+    if not _IMPORT_STDLIB_RE.search(str(command or "")):
+        return ""
+    hits = shadowing_files(workdir)
+    if not hits:
+        return ""
+    listed = ", ".join(hits[:6])
+    return (
+        f"[!] The working directory contains {listed} — the same name as "
+        f"stdlib module(s). Python puts the script's directory first on "
+        f"sys.path, so any `import` of those modules will load these files "
+        f"instead and fail inside the standard library with an error that does "
+        f"not name them. Rename or move them before running Python here."
+    )
 
 
 def sanitized_exec_env(base: dict[str, str] | None = None) -> dict[str, str]:
@@ -666,6 +785,12 @@ async def execute_shell_command(agent: AgentContext, args: dict[str, Any]) -> st
     if not output:
         output = "(no output)"
     raw_output = "\n".join(parts + [output])
+    # Append the shadowing note only when it can explain what just happened: a
+    # python run in a directory holding a stdlib-named file. It goes last so a
+    # failure traceback and this explanation travel together.
+    hint = shadowing_warning(command, workdir)
+    if hint:
+        raw_output = f"{raw_output}\n\n{hint}"
     if max_output_chars > 0 and len(raw_output) > max_output_chars:
         clip = max_output_chars // 2
         return raw_output[:clip] + "\n...[truncated by max_output_chars]...\n" + raw_output[-clip:]

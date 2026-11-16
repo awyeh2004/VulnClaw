@@ -3072,6 +3072,7 @@ from vulnclaw.agent.tools.python_exec import (  # noqa: F401 — re-export
     execute_python,
 )
 from vulnclaw.agent.tools.shell_exec import (  # noqa: F401 — re-export
+    PAYLOAD_SCRIPT_SUBDIR,
     _EXEC_ENV_BLOCKED_EXACT,
     _EXEC_ENV_BLOCKED_PREFIXES,
     _close_windows_job,

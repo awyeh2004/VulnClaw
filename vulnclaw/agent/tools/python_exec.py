@@ -48,6 +48,52 @@ def _validate_python_execute_mode(mode: str, code: str) -> str | None:
     return None
 
 
+def _shadowing_hint_for_stderr(agent: AgentContext, script_path: str, stderr_text: str) -> str:
+    """Explain a traceback that a work-dir file caused by shadowing the stdlib.
+
+    Ordered as two checks, cheapest first:
+
+    1. **Symptom** — the traceback's failing frame is inside the standard library
+       and the final ``AttributeError``/``ImportError`` names a module that also
+       exists as a ``.py`` file in the working directory. That is the exact
+       signature measured on 2026-10-31, where ``dis.py`` in the work dir broke
+       ``import pprint`` inside ``inspect.py``.
+    2. **Fallback** — the same named files exist and the run imported one of
+       them, even when the traceback shape differs.
+
+    Returns "" in the common case, so the caller can append unconditionally.
+    """
+    text = str(stderr_text or "")
+    if not text.strip():
+        return ""
+    try:
+        from vulnclaw.agent import builtin_tools as _bt
+
+        from vulnclaw.agent.tools.shell_exec import shadowing_files
+
+        # The staged script lives in <scratch>/.vulnclaw-scripts, so the directory
+        # that matters is the run's *work dir* — the one sys.path[0] would have
+        # pointed at before staging was isolated, and the one a shadowing file
+        # would have to sit in to affect the imports.
+        workdir = _bt._resolve_workdir(_bt._default_workdir(agent))
+        suspects = shadowing_files(workdir)
+    except Exception:  # noqa: BLE001 - a hint must never break execution
+        return ""
+    if not suspects:
+        return ""
+
+    named = [name for name in suspects if re.search(rf"['\"]?{re.escape(name[:-3])}['\"]?\b", text)]
+    if not named:
+        return ""
+    listed = ", ".join(named[:5])
+    return (
+        f"[!] Likely cause: {listed} in {workdir} share a name with stdlib "
+        f"module(s). Python puts the script directory first on sys.path, so these "
+        f"files were imported instead and the failure surfaced inside the standard "
+        f"library. Rename or move them and re-run."
+    )
+
+
 def _write_python_audit(
     agent: AgentContext,
     *,
@@ -578,7 +624,14 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
                 "try:\n    from bs4 import BeautifulSoup\nexcept ImportError:\n    pass\n"
                 "try:\n    from Crypto.Cipher import AES, DES, Blowfish, ChaCha20\n    from Crypto.Util.number import *\n    from Crypto.PublicKey import RSA\n    from Crypto.Signature import pkcs1_15\n    from Crypto.Hash import SHA256, MD5\nexcept ImportError:\n    pass\n"
                 "try:\n    import zlib, gzip, bz2, lzma, zipfile, tarfile, io\nexcept ImportError:\n    pass\n"
-                "try:\n    import itertools, functools, collections, math\nexcept ImportError:\n    pass\n\n"
+                "try:\n    import itertools, functools, collections, math\nexcept ImportError:\n    pass\n"
+                # The staged script lives in its own directory so no work-dir file
+                # can shadow a stdlib module via sys.path[0]. That would break
+                # `import helper` for a model that wrote its own module into the
+                # working directory, so the cwd goes on the path — appended, not
+                # prepended: stdlib still wins, and a work-dir `json.py` can no
+                # longer hijack the imports above.
+                "try:\n    sys.path.append(os.getcwd())\nexcept Exception:\n    pass\n\n"
             )
             f.write(preamble)
             f.write(_egress_scope_preamble(agent))
@@ -620,13 +673,22 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
         if proc_stdout:
             output_parts.append(proc_stdout)
         if proc_stderr:
-            stderr_lines = [
-                line
-                for line in proc_stderr.splitlines()
-                if "ImportError" not in line and "No module named" not in line
-            ]
-            if stderr_lines:
-                output_parts.append("[stderr]\n" + "\n".join(stderr_lines))
+            stderr_text = proc_stderr
+            # ImportError lines used to be dropped wholesale, on the theory that
+            # the preamble's optional imports (bs4, Crypto, requests) would spam
+            # every run. What that actually did was leave a traceback with its
+            # final line removed — the one line naming the failure — so the model
+            # saw "Traceback (most recent call last): ... import foo" and no
+            # reason at all. Measured 2026-11-16 while reproducing the stdlib
+            # shadowing bug, where the same treatment hid the real cause.
+            #
+            # Optional-import noise is now suppressed at the source instead: the
+            # preamble already wraps those in try/except ImportError, so a
+            # surviving ImportError is the user's code failing and must be shown.
+            output_parts.append("[stderr]\n" + stderr_text)
+            hint = _shadowing_hint_for_stderr(agent, tmp_path, stderr_text)
+            if hint:
+                output_parts.append(hint)
 
         if proc_timed_out:
             try:
