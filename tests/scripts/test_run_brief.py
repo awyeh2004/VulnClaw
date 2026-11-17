@@ -202,8 +202,35 @@ def test_flag_shaped_tokens_are_surfaced_without_a_verdict(brief_mod, tmp_path):
 
     brief = brief_mod.build_brief(run)
 
-    assert "flag{deadbeef1234}" in brief.flag_shaped
+    tokens = [item["token"] for item in brief.flag_shaped]
+    assert "flag{deadbeef1234}" in tokens
     assert any("unverified" in line for line in brief_mod.render_text(brief).splitlines())
+
+
+def test_template_flags_are_labelled_not_dropped(brief_mod, tmp_path):
+    """A source template and a real value must both appear, and be distinguishable.
+
+    Measured 2026-11-17 on NeuronShuffle: the brief listed ``flag{body}``,
+    ``flag{5c2aabdc...}`` and ``flag{"+body+"}`` together. Filtering by shape
+    alone would have thrown away the real one or kept the templates.
+    """
+    run = _make_run(tmp_path, flag_token='flag{body} flag{"+body+"} flag{5c2aabdc937513bde1ba502f14cc51b6}')
+
+    brief = brief_mod.build_brief(run)
+
+    by_token = {item["token"]: item["kind"] for item in brief.flag_shaped}
+    assert by_token.get("flag{body}") == "template"
+    assert by_token.get('flag{"+body+"}') == "template"
+    assert by_token.get("flag{5c2aabdc937513bde1ba502f14cc51b6}") == "value"
+
+
+def test_rendered_lines_carry_the_label(brief_mod, tmp_path):
+    run = _make_run(tmp_path, flag_token="flag{body} flag{c0ffee1234}")
+
+    text = brief_mod.render_text(brief_mod.build_brief(run))
+
+    assert "[template]" in text
+    assert "[value   ]" in text
 
 
 def test_log_signals_are_counted(brief_mod, tmp_path):
@@ -299,3 +326,110 @@ def test_cli_rejects_a_missing_directory(brief_mod, tmp_path):
 def test_cli_requires_a_target(brief_mod, capsys):
     with pytest.raises(SystemExit):
         brief_mod.main([])
+
+# ── --latest must find runs wherever they actually live ─────────────────────
+#
+# Measured 2026-11-17: a run that had just finished was reported "not found",
+# because `--latest` only looked at ~/.vulnclaw/runs while `session.solve_work_root`
+# had moved runs to E:\vulnclaw\work\runs. Re-implementing the config precedence
+# here would drift; scanning both is cheaper and stays correct.
+
+
+def test_latest_scans_the_solve_work_root(brief_mod, tmp_path, monkeypatch):
+    work_root = tmp_path / "work"
+    (work_root / "runs").mkdir(parents=True)
+    run = _make_run(work_root / "runs", name="20261117T120000Z-solve-work-root")
+
+    monkeypatch.setattr(brief_mod, "_solve_work_root", lambda: work_root)
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("VULNCLAW_RUNS_DIR", raising=False)
+
+    found = brief_mod._latest_anywhere("", "")
+
+    assert found == run
+
+
+def test_latest_picks_the_globally_newest_across_roots(brief_mod, tmp_path, monkeypatch):
+    work_root = tmp_path / "work"
+    (work_root / "runs").mkdir(parents=True)
+    (tmp_path / "cfg" / "runs").mkdir(parents=True)
+    _make_run(tmp_path / "cfg" / "runs", name="20261117T100000Z-solve-old")
+    newer = _make_run(work_root / "runs", name="20261117T130000Z-solve-new")
+
+    monkeypatch.setattr(brief_mod, "_solve_work_root", lambda: work_root)
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("VULNCLAW_RUNS_DIR", raising=False)
+
+    assert brief_mod._latest_anywhere("", "") == newer
+
+
+def test_latest_orders_by_recorded_start_time_not_name(brief_mod, tmp_path, monkeypatch):
+    """Directory names are truncated; `started_at` is not.
+
+    Two runs of the same target in the same second collide in name space, so the
+    ordering has to come from the recorded timestamp when it is present.
+    """
+    root = tmp_path / "runs"
+    (root).mkdir(parents=True)
+    older = _make_run(root, name="20261117T120000Z-solve-a")
+    newer = _make_run(root, name="20261117T110000Z-solve-b")
+    # Rewrite run.json so the *timestamps* order opposite to the names.
+    (older / "run.json").write_text(
+        json.dumps({"run_name": older.name, "started_at": "2026-11-17T09:00:00Z",
+                    "targets": [{"canonical": "x"}]}), encoding="utf-8")
+    (newer / "run.json").write_text(
+        json.dumps({"run_name": newer.name, "started_at": "2026-11-17T19:00:00Z",
+                    "targets": [{"canonical": "x"}]}), encoding="utf-8")
+
+    monkeypatch.setattr(brief_mod, "_solve_work_root", lambda: root.parent)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(root))
+    monkeypatch.delenv("VULNCLAW_CONFIG_DIR", raising=False)
+
+    assert brief_mod._latest_anywhere("", "") == newer
+
+
+def test_candidate_roots_are_deduplicated(brief_mod, tmp_path, monkeypatch):
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path / "same"))
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(brief_mod, "_solve_work_root", lambda: tmp_path)
+
+    roots = brief_mod._candidate_roots("")
+
+    assert len(roots) == len({str(p).lower() for p in roots})
+
+
+def test_missing_config_does_not_break_latest(brief_mod, tmp_path, monkeypatch):
+    """`-I` runs against arbitrary directories: config is a convenience."""
+    def _boom():
+        raise RuntimeError("no config here")
+
+    monkeypatch.setattr(brief_mod, "_solve_work_root", brief_mod._solve_work_root)
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "nonexistent"))
+    monkeypatch.delenv("VULNCLAW_RUNS_DIR", raising=False)
+
+    # Must not raise even though nothing is configured.
+    roots = brief_mod._candidate_roots("")
+    assert roots
+
+
+def test_log_signals_count_both_chinese_and_english_markers(brief_mod, tmp_path):
+    """TeeStreamSink writes Chinese; the runner's diagnostics are English.
+
+    Counting only one means the tool under-reports depending on which sink
+    produced the log — the 2026-11-17 NeuronShuffle transcript scored zero tool
+    calls until both spellings matched.
+    """
+    run = _make_run(tmp_path)
+    log = tmp_path / "solve.log"
+    log.write_text(
+        "→ 调用工具: python_execute {}\n"
+        "→ 调用工具: shell_command {}\n"
+        "→ tool: fetch {}\n"
+        "→ 工具结果:\n[+] ok\n",
+        encoding="utf-8",
+    )
+
+    brief = brief_mod.build_brief(run, log)
+
+    assert brief.log_signals["tool_call"] == 3
+    assert brief.log_signals["tool_result"] == 1

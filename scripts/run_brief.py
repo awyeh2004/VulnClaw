@@ -76,7 +76,8 @@ class RunBrief:
 
     tools: list[ToolStat] = field(default_factory=list)
     distinct_targets_probed: list[str] = field(default_factory=list)
-    flag_shaped: list[str] = field(default_factory=list)
+    #: ``[{"token": ..., "kind": "value"|"template"}]`` — labelled, never filtered.
+    flag_shaped: list[dict[str, str]] = field(default_factory=list)
     final_answer: str = ""
     compact_summary: str = ""
 
@@ -146,22 +147,67 @@ def _targets_probed(tool_calls: list[dict[str, Any]]) -> list[str]:
     return seen[:20]
 
 
-def _flag_shaped(evidence: list[dict[str, Any]]) -> list[str]:
-    """Flag-shaped tokens that appear in recorded evidence.
+#: Words that appear in a challenge's own source as a placeholder, never in a
+#: recovered value. Matched as the WHOLE body: a bare `flag{body}` is a template,
+#: but `flag{body_of_the_flag}` is still just a word and the classifier must not
+#: guess further.
+_PLACEHOLDER_BODIES = frozenset(
+    "body flag answer value result placeholder xx xxx xxx... todo fill me here "
+    "your_flag yourflag insert".split()
+)
+
+
+def _classify_flag_token(token: str) -> str:
+    """``"template"`` when the body is code/prose rather than a value.
+
+    Deliberately coarse, and biased toward "value": mislabelling a real flag as a
+    template would make a reviewer skip it, while mislabelling a template costs one
+    glance. An earlier version called any single-word body a template and got
+    ``flag{deadbeef1234}`` and ``flag{c0ffee1234}`` wrong — hex happens to be a
+    legal identifier, so "looks like a word" does not mean "is a placeholder".
+
+    Signals used, in order:
+      1. the body is a known placeholder word,
+      2. the body carries code syntax (`+`, `${`, `{{`, `%s`, `<%`, a call),
+      3. the body is empty.
+    """
+    match = _FLAG_SHAPE_RE.match(token) or _FLAG_SHAPE_RE.search(token)
+    body = ""
+    if match:
+        start = match.group(0).find("{")
+        body = match.group(0)[start + 1 : -1] if start >= 0 else ""
+    stripped = body.strip().strip("\"'`").strip()
+    if not stripped:
+        return "template"
+    if stripped.lower() in _PLACEHOLDER_BODIES:
+        return "template"
+    if re.search(r"[+*]|\$\{|\{\{|%[sd]|<%|\w+\s*\(", stripped):
+        return "template"
+    return "value"
+
+
+def _flag_shaped(evidence: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Flag-shaped tokens that appear in recorded evidence, each labelled.
 
     Reported as-is, with no claim about whether they are real. Deduplicated and
     capped: on the 2026-10-31 CMB runs a byte dump produced eight of these and
     every one was noise, so the reviewer must be able to see them and dismiss them
     rather than have them silently filtered.
+
+    ``kind`` separates a template read out of the challenge source from a token
+    that looks like an actual value. Both are listed; only the label differs.
     """
-    found: list[str] = []
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
     for record in evidence:
         if not isinstance(record, dict):
             continue
         text = str(record.get("content") or record.get("summary") or "")
         for match in _FLAG_SHAPE_RE.findall(text):
-            if match not in found:
-                found.append(match)
+            if match in seen:
+                continue
+            seen.add(match)
+            found.append({"token": match, "kind": _classify_flag_token(match)})
         if len(found) >= 12:
             break
     return found[:12]
@@ -186,6 +232,13 @@ def _scan_log(path: Path) -> tuple[dict[str, int], str]:
         "complete_rejected": r"complete_rejected|completion rejected",
         "ask_user": r"等待用户|waiting for user",
         "shadowing": r"COMPILER_FLAG_NAMES|no attribute 'dis'",
+        # ``TeeStreamSink`` writes Chinese markers while the runner's own
+        # diagnostics are English. Counting only one of the two makes the tool
+        # silently under-report depending on which sink produced the log — the
+        # 2026-11-17 NeuronShuffle transcript had 44 tool calls and scored zero
+        # until both spellings were matched.
+        "tool_call": r"→ 调用工具:|→ tool:",
+        "tool_result": r"→ 工具结果:|→ result:",
     }
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -326,8 +379,9 @@ def render_text(brief: RunBrief) -> str:
 
     if brief.flag_shaped:
         lines += ["", "FLAG-SHAPED TOKENS IN EVIDENCE (unverified — not a claim)"]
-        for token in brief.flag_shaped:
-            lines.append(f"  {token[:100]}")
+        for item in brief.flag_shaped:
+            label = "template" if item.get("kind") == "template" else "value"
+            lines.append(f"  [{label:8}] {str(item.get('token', ''))[:100]}")
 
     if brief.log_signals:
         lines += ["", "LOG SIGNALS"]
@@ -387,13 +441,82 @@ def _latest_run(runs_root: Path, needle: str = "") -> Path | None:
         dirs = [p for p in dirs if needle.lower() in p.name.lower()]
     if not dirs:
         return None
-    return max(dirs, key=lambda p: p.name)
+    # Sort by the recorded start time when available, else by directory name.
+    # Directory names carry a UTC timestamp but are truncated to fit a path
+    # component, so two runs of the same target on the same second can collide
+    # in name space while `started_at` still orders them correctly.
+    def _key(path: Path) -> tuple[str, str]:
+        meta = _load_json(path / "run.json") or {}
+        started = str(meta.get("started_at") or "") if isinstance(meta, dict) else ""
+        return (started, path.name)
+
+    return max(dirs, key=_key)
 
 
-def _default_runs_root() -> Path:
+def _candidate_roots(explicit: str = "") -> list[Path]:
+    """Every place a run directory may live, most-specific first.
+
+    Runs do **not** live next to the config: when ``session.solve_work_root`` is
+    set, ``_run_context_kwargs`` puts them under ``<solve_work_root>/runs``. On
+    this machine that is ``E:\\vulnclaw\\work\\runs`` while the default root is
+    ``~/.vulnclaw/runs`` — measured 2026-11-17, ``--latest`` reported
+    "run directory not found" for a run that had just finished, because it only
+    looked at the default. Scanning both is cheaper and more durable than
+    re-implementing the config precedence here.
+    """
+    if explicit:
+        return [Path(explicit)]
+    roots: list[Path] = []
+    env_runs = os.environ.get("VULNCLAW_RUNS_DIR")
+    if env_runs:
+        roots.append(Path(env_runs))
     config_dir = os.environ.get("VULNCLAW_CONFIG_DIR")
     base = Path(config_dir) if config_dir else Path.home() / ".vulnclaw"
-    return base / "runs"
+    roots.append(base / "runs")
+    work_root = _solve_work_root()
+    if work_root is not None:
+        roots.append(work_root / "runs")
+    # De-duplicate while keeping order.
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def _solve_work_root() -> Path | None:
+    """``session.solve_work_root`` from the loaded config, or None.
+
+    Imported lazily and defensively: this script is also run with ``-I`` against
+    arbitrary run directories, and a config that fails to load must not make the
+    tool unusable.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        value = getattr(load_config().session, "solve_work_root", "") or ""
+        return Path(value).expanduser() if value else None
+    except Exception:  # noqa: BLE001 - config is a convenience, not a requirement
+        return None
+
+
+def _latest_anywhere(needle: str = "", explicit_root: str = "") -> Path | None:
+    """Newest run across every candidate root."""
+    best: Path | None = None
+    best_key: tuple[str, str] = ("", "")
+    for root in _candidate_roots(explicit_root):
+        candidate = _latest_run(root, needle)
+        if candidate is None:
+            continue
+        meta = _load_json(candidate / "run.json") or {}
+        started = str(meta.get("started_at") or "") if isinstance(meta, dict) else ""
+        key = (started, candidate.name)
+        if best is None or key > best_key:
+            best, best_key = candidate, key
+    return best
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -412,14 +535,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_dir:
         run_dir = Path(args.run_dir)
     elif args.latest:
-        root = Path(args.runs_root) if args.runs_root else _default_runs_root()
-        run_dir = _latest_run(root, args.match)
+        run_dir = _latest_anywhere(args.match, args.runs_root)
     else:
         parser.error("give a run directory or --latest")
         return 2
 
     if run_dir is None or not run_dir.is_dir():
-        print(f"run directory not found: {run_dir}", file=sys.stderr)
+        searched = ", ".join(str(p) for p in _candidate_roots(args.runs_root))
+        print(
+            f"no run found (searched: {searched})"
+            f"{f' matching {args.match!r}' if args.match else ''}",
+            file=sys.stderr,
+        )
         return 2
 
     log_path = Path(args.log) if args.log else None
