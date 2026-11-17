@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from rich.console import Console
@@ -182,6 +183,136 @@ def _emit_tui_solve_event(
     target_console: Console, kind: str, payload: dict[str, Any]
 ) -> None:
     _emit_tui_event(target_console, kind, payload, os.environ)
+
+
+class TeeStreamSink:
+    """Forward every sink event to another sink, and also append it to a file.
+
+    Why a file at all: the interesting part of a failed run — the model's own
+    narration — never reaches the blackboard, and the terminal renderer drops it
+    unless the operator turned thinking display on. Measured 2026-11-17 on the
+    oldsvr run: the run's central mistake ("the operator knows the password, so
+    the goal implies it") existed only in that text. ``run_brief.py`` reads the
+    last thinking block; without this sink there is nothing for it to read unless
+    the operator happened to redirect stdout themselves.
+
+    Two deliberate choices:
+
+    * **Thinking is always written**, regardless of ``show_thinking`` on the
+      wrapped sink. The terminal honours a display preference; the audit trail
+      should not.
+    * **The file is line-buffered and flushed per event**, so a run killed by a
+      timeout or a budget still leaves a usable tail. That is exactly the case
+      worth reviewing.
+
+    Failure to write is swallowed: an audit convenience must never take a solve
+    down. The stream just behaves like the wrapped sink.
+    """
+
+    def __init__(self, inner: Any, path: str | Path, *, include_thinking: bool = True) -> None:
+        self._inner = inner
+        self._path = Path(path)
+        self._include_thinking = include_thinking
+        self._handle: Any = None
+        self._thinking_buffer = ""
+        self._content_buffer = ""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._handle = self._path.open("w", encoding="utf-8", errors="replace")
+        except OSError:
+            self._handle = None
+
+    # ── file side ───────────────────────────────────────────────────────
+    def _write(self, text: str) -> None:
+        if self._handle is None or not text:
+            return
+        try:
+            self._handle.write(text)
+            self._handle.flush()
+        except (OSError, ValueError):
+            self._handle = None
+
+    def _flush_thinking(self) -> None:
+        if self._thinking_buffer:
+            self._write(f"<thinking>\n{self._thinking_buffer}\n</thinking>\n")
+            self._thinking_buffer = ""
+
+    def _flush_content(self) -> None:
+        if self._content_buffer:
+            self._write(self._content_buffer + "\n")
+            self._content_buffer = ""
+
+    def _flush_all(self) -> None:
+        self._flush_thinking()
+        self._flush_content()
+
+    def close(self) -> None:
+        self._flush_all()
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
+
+    # ── sink protocol: forward, and record ─────────────────────────────
+    def on_status(self, message: str) -> None:
+        self._flush_all()
+        self._write(f"[status] {message}\n")
+        _forward(self._inner, "on_status", message)
+
+    def on_thinking_token(self, token: str) -> None:
+        if token:
+            # Recorded whether or not the wrapped sink displays it.
+            if self._include_thinking:
+                self._flush_content()
+                self._thinking_buffer += str(token)
+        _forward(self._inner, "on_thinking_token", token)
+
+    def on_content_token(self, token: str) -> None:
+        if token:
+            self._flush_thinking()
+            self._content_buffer += str(token)
+        _forward(self._inner, "on_content_token", token)
+
+    def on_tool_call(self, tool_name: str, args: str) -> None:
+        self._flush_all()
+        self._write(f"→ 调用工具: {tool_name} {str(args or '')[:400]}\n")
+        _forward(self._inner, "on_tool_call", tool_name, args)
+
+    def on_tool_result(self, result_summary: str) -> None:
+        self._flush_all()
+        body = str(result_summary or "")
+        self._write(f"→ 工具结果:\n{body}\n")
+        _forward(self._inner, "on_tool_result", result_summary)
+
+    def on_notice(self, message: str) -> None:
+        self._flush_all()
+        self._write(f"[notice] {message}\n")
+        _forward(self._inner, "on_notice", message)
+
+    def on_stream_end(self) -> None:
+        self._flush_all()
+        _forward(self._inner, "on_stream_end")
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate anything the protocol grows later to the wrapped sink."""
+        return getattr(self._inner, name)
+
+
+def _forward(sink: Any, method: str, *args: Any) -> None:
+    """Call ``sink.method`` if it exists, swallowing display errors.
+
+    A broken renderer must never destroy an answer we already hold; the same
+    tolerance ``_sink_emit`` applies at the LLM boundary applies here.
+    """
+    fn = getattr(sink, method, None)
+    if fn is None:
+        return
+    try:
+        fn(*args)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class TerminalStreamSink:

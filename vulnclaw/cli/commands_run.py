@@ -551,6 +551,13 @@ def solve(
         help="Operator hint injected into the run (repeatable). Steers a stuck run "
         "without taking the solve over.",
     ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Also write the full run transcript (thinking, tool calls, results) to "
+        "this path. Pass it to `scripts/run_brief.py --log` for review. Thinking is "
+        "recorded even when it is not displayed on the terminal.",
+    ),
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = _from_main("load_config")()
@@ -598,20 +605,38 @@ def solve(
             else:
                 sink = TerminalStreamSink(console, shared_config.session.show_thinking)
                 on_event = None
-            result = await agent.solve(
-                task_prompt,
-                target=target,
-                goal=resolved_goal,
-                max_steps=max_steps,
-                max_tool_rounds=max_tool_rounds,
-                stream_sink=sink,
-                on_event=on_event,
-                task_constraints=solve_constraints,
-                hints=list(hint or []),
-            )
-            holder["agent_state"] = agent.context.state.agent_state.get_summary()
-            holder["agent"] = agent
-            return result
+            # The transcript file exists for review, not for display: it records
+            # the model's own narration whether or not `show_thinking` is on,
+            # because a misread premise appears only there and never reaches the
+            # blackboard. See TeeStreamSink for the measured case.
+            if log_file:
+                from vulnclaw.cli._helpers import TeeStreamSink
+
+                sink = TeeStreamSink(sink, log_file)
+            try:
+                result = await agent.solve(
+                    task_prompt,
+                    target=target,
+                    goal=resolved_goal,
+                    max_steps=max_steps,
+                    max_tool_rounds=max_tool_rounds,
+                    stream_sink=sink,
+                    on_event=on_event,
+                    task_constraints=solve_constraints,
+                    hints=list(hint or []),
+                )
+                holder["agent_state"] = agent.context.state.agent_state.get_summary()
+                holder["agent"] = agent
+                return result
+            finally:
+                # Flush on every exit path — a run killed by a budget, a timeout
+                # or a Ctrl-C is precisely the one worth reviewing, and an
+                # unflushed tail would lose the narration that explains it.
+                if log_file and hasattr(sink, "close"):
+                    try:
+                        sink.close()
+                    except Exception:  # noqa: BLE001 - never mask the real outcome
+                        pass
 
         return await _from_main("_run_cli_orchestrated_task")(
             command="solve",
