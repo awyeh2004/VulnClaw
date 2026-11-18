@@ -159,6 +159,11 @@ def _name_key(value: str) -> str:
 
 
 def _runs_root(runs_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Preferred runs root, or the config's ``~/.vulnclaw`` default.
+
+    Kept for callers that pass an explicit path. Anything that has to *find* runs
+    should use :func:`_candidate_roots` instead — see the note there.
+    """
     if runs_dir:
         return Path(runs_dir)
     env = os.environ.get("VULNCLAW_RUNS_DIR")
@@ -167,6 +172,55 @@ def _runs_root(runs_dir: str | os.PathLike[str] | None = None) -> Path:
     config_dir = os.environ.get("VULNCLAW_CONFIG_DIR")
     base = Path(config_dir) if config_dir else Path.home() / ".vulnclaw"
     return base / "runs"
+
+
+def _solve_work_root() -> Path | None:
+    """``session.solve_work_root`` from the loaded config, or None.
+
+    Imported defensively: this module is also used by tools that run with ``-I``
+    against arbitrary directories, where the package may not be importable.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        value = getattr(load_config().session, "solve_work_root", "") or ""
+        return Path(value).expanduser() if value else None
+    except Exception:  # noqa: BLE001 - config is a convenience, not a requirement
+        return None
+
+
+def _candidate_roots(runs_dir: str | os.PathLike[str] | None = None) -> list[Path]:
+    """Every directory that may hold runs, most specific first.
+
+    Runs do **not** live next to the config once ``session.solve_work_root`` is
+    set: the runner puts them under ``<solve_work_root>/runs``. Measured
+    2026-11-17: on this machine that is ``E:\\vulnclaw\\work\\runs`` while the
+    default root is ``~/.vulnclaw/runs``, so ``where`` and
+    ``solve-all --skip-attempted`` reported every challenge as never attempted —
+    the index was silently empty. ``run_brief`` had the same defect and was fixed
+    the same way; re-implementing the config precedence in each tool would only
+    drift, so both scan the candidates instead.
+    """
+    if runs_dir:
+        return [Path(runs_dir)]
+    roots: list[Path] = []
+    env_runs = os.environ.get("VULNCLAW_RUNS_DIR")
+    if env_runs:
+        roots.append(Path(env_runs))
+    config_dir = os.environ.get("VULNCLAW_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".vulnclaw"
+    roots.append(base / "runs")
+    work_root = _solve_work_root()
+    if work_root is not None:
+        roots.append(work_root / "runs")
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
 
 
 def _target_stats(run_dir: Path, state_key: str) -> tuple[int, int]:
@@ -224,16 +278,22 @@ def build_index(
     ``limit_runs`` caps how many (newest-first) run directories are read, for
     callers that want a fast answer on a machine with thousands of runs.
     """
-    root = _runs_root(runs_dir)
     index = AttemptIndex()
-    if not root.is_dir():
+    # Scan every candidate root; the first existing one used to be assumed to be
+    # the only one, which made the index silently empty on machines where
+    # `session.solve_work_root` had moved runs elsewhere.
+    run_dirs: list[Path] = []
+    for candidate in _candidate_roots(runs_dir):
+        if not candidate.is_dir():
+            continue
+        run_dirs.extend(
+            p for p in candidate.iterdir() if p.is_dir() and (p / "run.json").is_file()
+        )
+    if not run_dirs:
         return index
-
-    run_dirs = sorted(
-        (p for p in root.iterdir() if p.is_dir() and (p / "run.json").is_file()),
-        key=lambda p: p.name,
-        reverse=True,
-    )
+    # Newest first by directory name (which carries a UTC timestamp); duplicates
+    # across roots cannot occur because a run has exactly one home.
+    run_dirs = sorted(set(run_dirs), key=lambda p: p.name, reverse=True)
     if limit_runs > 0:
         run_dirs = run_dirs[:limit_runs]
 

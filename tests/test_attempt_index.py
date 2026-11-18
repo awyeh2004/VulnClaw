@@ -221,3 +221,83 @@ def test_empty_index_is_safe_to_query():
 
     assert not index.was_attempted("anything")
     assert index.effort_for("anything") == 0
+
+# ── Roots: runs do not live next to the config ──────────────────────────────
+#
+# Measured 2026-11-17: with `session.solve_work_root` set, runs land under
+# `<solve_work_root>/runs` while the default root is `~/.vulnclaw/runs`. Scanning
+# only the default made the index silently empty, so `vulnclaw where` and
+# `solve-all --skip-attempted` reported every challenge as never attempted.
+# `run_brief` had the same defect; both now scan candidates.
+
+
+def test_index_scans_the_solve_work_root(tmp_path, monkeypatch):
+    work_root = tmp_path / "work"
+    (work_root / "runs").mkdir(parents=True)
+    _make_run(work_root / "runs", "run1", canonical="in-work-root.example", calls=7)
+
+    monkeypatch.setattr("vulnclaw.attempt_index._solve_work_root", lambda: work_root)
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("VULNCLAW_RUNS_DIR", raising=False)
+
+    index = build_index()
+
+    assert index.was_attempted("in-work-root.example")
+    assert index.effort_for("in-work-root.example") == 7
+
+
+def test_index_merges_both_roots(tmp_path, monkeypatch):
+    work_root = tmp_path / "work"
+    (work_root / "runs").mkdir(parents=True)
+    (tmp_path / "cfg" / "runs").mkdir(parents=True)
+    _make_run(tmp_path / "cfg" / "runs", "20260101T000000Z-a", canonical="from-cfg.example", calls=1)
+    _make_run(work_root / "runs", "20260102T000000Z-b", canonical="from-work.example", calls=2)
+
+    monkeypatch.setattr("vulnclaw.attempt_index._solve_work_root", lambda: work_root)
+    monkeypatch.setenv("VULNCLAW_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("VULNCLAW_RUNS_DIR", raising=False)
+
+    index = build_index()
+
+    assert index.was_attempted("from-cfg.example")
+    assert index.was_attempted("from-work.example")
+
+
+def test_missing_config_does_not_break_the_index(tmp_path, monkeypatch):
+    """`-I` runs against arbitrary dirs: config is a convenience."""
+    monkeypatch.setattr("vulnclaw.attempt_index._solve_work_root", lambda: None)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path))
+    monkeypatch.delenv("VULNCLAW_CONFIG_DIR", raising=False)
+    _make_run(tmp_path, "run1", canonical="only.example", calls=1)
+
+    index = build_index()
+
+    assert index.was_attempted("only.example")
+
+
+def test_real_challenge_names_match_precisely(tmp_path, monkeypatch):
+    """A real challenge name must not spill onto unrelated runs."""
+    _make_run(tmp_path, "20260101T000000Z-a", canonical="1.1.1.1:80", goal="solve ezphp", calls=5)
+    _make_run(tmp_path, "20260102T000000Z-b", canonical="2.2.2.2:80", goal="solve oldsvr", calls=9)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path))
+    monkeypatch.setattr("vulnclaw.attempt_index._solve_work_root", lambda: None)
+    monkeypatch.delenv("VULNCLAW_CONFIG_DIR", raising=False)
+
+    index = build_index()
+
+    assert index.effort_for("ezphp") == 5
+    assert index.effort_for("oldsvr") == 9
+    assert index.effort_for("a-challenge-nobody-ran") == 0
+
+
+def test_generic_words_do_not_match_everything(tmp_path, monkeypatch):
+    """Stop words keep a generic goal from making every challenge look tried."""
+    _make_run(tmp_path, "run1", canonical="h.example", goal="Solve the authorized CTF target", calls=1)
+    monkeypatch.setenv("VULNCLAW_RUNS_DIR", str(tmp_path))
+    monkeypatch.setattr("vulnclaw.attempt_index._solve_work_root", lambda: None)
+    monkeypatch.delenv("VULNCLAW_CONFIG_DIR", raising=False)
+
+    index = build_index()
+
+    for word in ("a", "x", "test", "flag", "solve"):
+        assert index.for_target(word) == [], word
