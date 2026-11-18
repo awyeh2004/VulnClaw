@@ -48,6 +48,38 @@ from typing import Any
 _NO_CONCLUSION_TOOLS = 50  # above this, "no claims" is a real signal not a short run
 
 
+#: Bumped when a field changes meaning or a required field is removed. Adding a new
+#: optional field does not bump it. A consumer that cannot find its version must
+#: refuse rather than guess — this brief feeds decisions about whether to keep
+#: spending time on a challenge.
+SCHEMA_VERSION = 1
+
+#: Severity ladder for :class:`Signal`. Chosen so a consumer can sort without
+#: knowing any particular signal: "high" alone is a reason to look, "info" never is.
+SEVERITY_HIGH = "high"
+SEVERITY_MEDIUM = "medium"
+SEVERITY_INFO = "info"
+
+
+@dataclass(frozen=True)
+class Signal:
+    """One machine-readable observation about a run.
+
+    The text form (``message``) exists for humans; ``id`` and ``counts`` exist so a
+    different reviewer — another model, a script, a harness — can act without
+    parsing prose. Measured 2026-11-17: the reviewer's whole contribution on oldsvr
+    was noticing ``0 claims after 162 calls`` and telling the next round to switch
+    from dictionary search to a prefix-constraint search. That observation has to
+    survive as a field, not as a sentence.
+    """
+
+    id: str
+    severity: str
+    message: str
+    counts: dict[str, int] = field(default_factory=dict)
+    evidence_ids: list[str] = field(default_factory=list)
+
+
 @dataclass
 class ToolStat:
     name: str
@@ -88,6 +120,8 @@ class RunBrief:
 
     #: Derived, still non-interpretive: they describe the run's own bookkeeping.
     health: list[str] = field(default_factory=list)
+    #: The same observations as ``health`` but typed, for machine consumers.
+    signals: list[Signal] = field(default_factory=list)
     empty_blackboard: bool = False
     spent_budget: bool = False
 
@@ -267,7 +301,14 @@ def build_brief(run_dir: Path, log_path: Path | None = None) -> RunBrief:
 
     state = _load_json(_find_state_file(run_dir)) if _find_state_file(run_dir) else None
     if not isinstance(state, dict):
-        brief.health.append("no target state found — nothing to review")
+        brief.signals.append(
+            Signal(
+                id="no_state",
+                severity=SEVERITY_HIGH,
+                message="no target state found — nothing to review",
+            )
+        )
+        brief.health = [s.message for s in brief.signals]
         _attach_log(brief, log_path)
         return brief
 
@@ -311,31 +352,82 @@ def build_brief(run_dir: Path, log_path: Path | None = None) -> RunBrief:
     brief.spent_budget = "token budget exhausted" in brief.complete_reason.lower()
     _attach_log(brief, log_path)
 
-    # ── Derived health notes: describe, do not conclude ──────────────────
+    # ── Derived signals: typed observations, describe but do not conclude ──
+    #
+    # Every note here is a count or a quoted fact. None says "this run failed" or
+    # "try X next" — that judgement belongs to the reviewer, and a tool that made
+    # it would launder its guess into the review material.
     if brief.empty_blackboard and brief.tool_calls >= _NO_CONCLUSION_TOOLS:
-        brief.health.append(
-            f"{brief.tool_calls} tool calls produced 0 verified claims and 0 pinned "
-            f"facts — nothing the run learned was written down"
+        brief.signals.append(
+            Signal(
+                id="no_conclusions",
+                severity=SEVERITY_HIGH,
+                message=(
+                    f"{brief.tool_calls} tool calls produced 0 verified claims and "
+                    f"0 pinned facts — nothing the run learned was written down"
+                ),
+                counts={
+                    "tool_calls": brief.tool_calls,
+                    "verified_claims": brief.verified_claims,
+                    "pinned_facts": brief.pinned_facts,
+                    "angles": brief.blackboard_angles,
+                },
+            )
         )
     if brief.spent_budget:
-        brief.health.append("ended on the token budget, not on a decision")
+        brief.signals.append(
+            Signal(
+                id="budget_exhausted",
+                severity=SEVERITY_HIGH,
+                message="ended on the token budget, not on a decision",
+                counts={"tool_calls": brief.tool_calls},
+            )
+        )
     if not brief.completed and not brief.spent_budget:
-        brief.health.append(f"not completed; reason: {brief.complete_reason or '(none recorded)'}")
+        brief.signals.append(
+            Signal(
+                id="incomplete",
+                severity=SEVERITY_MEDIUM,
+                message=f"not completed; reason: {brief.complete_reason or '(none recorded)'}",
+            )
+        )
     if brief.log_signals.get("path_stall"):
-        brief.health.append(
-            f"{brief.log_signals['path_stall']} path-stall diagnostics in the log"
+        brief.signals.append(
+            Signal(
+                id="path_stall",
+                severity=SEVERITY_MEDIUM,
+                message=f"{brief.log_signals['path_stall']} path-stall diagnostics in the log",
+                counts={"path_stall": int(brief.log_signals["path_stall"])},
+            )
         )
     if brief.log_signals.get("shadowing"):
-        brief.health.append(
-            "log contains the stdlib-shadowing error — check whether the staging "
-            "fix was active for this run"
+        brief.signals.append(
+            Signal(
+                id="stdlib_shadowing",
+                severity=SEVERITY_HIGH,
+                message=(
+                    "log contains the stdlib-shadowing error — check whether the "
+                    "staging fix was active for this run"
+                ),
+                counts={"occurrences": int(brief.log_signals["shadowing"])},
+            )
         )
     per_call = brief.evidence / brief.tool_calls if brief.tool_calls else 0
     if brief.tool_calls and per_call > 2.5:
-        brief.health.append(
-            f"{per_call:.1f} evidence records per tool call — duplicate or "
-            f"re-listed evidence inflates the board"
+        brief.signals.append(
+            Signal(
+                id="evidence_inflation",
+                severity=SEVERITY_INFO,
+                message=(
+                    f"{per_call:.1f} evidence records per tool call — duplicate or "
+                    f"re-listed evidence inflates the board"
+                ),
+                counts={"evidence": brief.evidence, "tool_calls": brief.tool_calls},
+            )
         )
+    # ``health`` is derived from ``signals`` rather than built in parallel: two
+    # hand-maintained lists drift, and the text form is what a human reads.
+    brief.health = [signal.message for signal in brief.signals]
     return brief
 
 
@@ -392,10 +484,13 @@ def render_text(brief: RunBrief) -> str:
         for chunk in [brief.last_thinking[i:i + 110] for i in range(0, min(700, len(brief.last_thinking)), 110)]:
             lines.append(f"  {chunk}")
 
-    if brief.health:
-        lines += ["", "HEALTH (counts, not conclusions)"]
-        for note in brief.health:
-            lines.append(f"  - {note}")
+    if brief.signals:
+        lines += ["", "SIGNALS (counts, not conclusions)"]
+        order = {SEVERITY_HIGH: 0, SEVERITY_MEDIUM: 1, SEVERITY_INFO: 2}
+        for signal in sorted(brief.signals, key=lambda s: order.get(s.severity, 3)):
+            counts = " ".join(f"{k}={v}" for k, v in sorted(signal.counts.items()))
+            suffix = f"  [{counts}]" if counts else ""
+            lines.append(f"  - ({signal.severity}) {signal.message}{suffix}")
 
     if brief.final_answer:
         lines += ["", "FINAL ANSWER", f"  {brief.final_answer[:400]}"]
@@ -407,7 +502,15 @@ def render_text(brief: RunBrief) -> str:
 
 
 def brief_to_dict(brief: RunBrief) -> dict[str, Any]:
+    """Machine-readable form. ``schema_version`` is part of the contract.
+
+    Field rules, so a different reviewer can rely on this: existing keys keep their
+    name and meaning; new keys are additive and optional; ``schema_version`` bumps
+    only when a key changes meaning or disappears. A consumer finding a version it
+    does not know should refuse rather than guess.
+    """
     return {
+        "schema_version": SCHEMA_VERSION,
         "run_dir": brief.run_dir,
         "run_name": brief.run_name,
         "target": brief.target,
@@ -427,6 +530,18 @@ def brief_to_dict(brief: RunBrief) -> dict[str, Any]:
         "flag_shaped": brief.flag_shaped,
         "log": {"path": brief.log_path, "lines": brief.log_lines, "signals": brief.log_signals},
         "last_thinking": brief.last_thinking,
+        "signals": [
+            {
+                "id": s.id,
+                "severity": s.severity,
+                "message": s.message,
+                "counts": s.counts,
+                "evidence_ids": s.evidence_ids,
+            }
+            for s in brief.signals
+        ],
+        # Kept for consumers written against version 1's predecessor: same strings
+        # as `signals[].message`. New code should read `signals`.
         "health": brief.health,
         "final_answer": brief.final_answer,
         "compact_summary": brief.compact_summary,

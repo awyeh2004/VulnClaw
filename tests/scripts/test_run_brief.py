@@ -433,3 +433,110 @@ def test_log_signals_count_both_chinese_and_english_markers(brief_mod, tmp_path)
 
     assert brief.log_signals["tool_call"] == 3
     assert brief.log_signals["tool_result"] == 1
+
+
+# ── Structured signals: the machine-readable half of the contract ────────────
+#
+# The review step's whole contribution on oldsvr was noticing "0 claims after 162
+# calls" and telling the next round to switch from dictionary search to a prefix
+# constraint search. That observation must survive as a field, not a sentence —
+# otherwise a different reviewer (another model, a harness, a script) has to parse
+# prose to find it.
+
+
+def test_json_carries_a_schema_version(brief_mod, tmp_path):
+    run = _make_run(tmp_path, tool_calls=5, evidence=5)
+
+    payload = brief_mod.brief_to_dict(brief_mod.build_brief(run))
+
+    assert payload["schema_version"] == brief_mod.SCHEMA_VERSION
+    assert payload["schema_version"] >= 1
+
+
+def test_no_conclusions_signal_is_structured(brief_mod, tmp_path):
+    run = _make_run(tmp_path, tool_calls=162, evidence=148, claims=0, pinned=0)
+
+    brief = brief_mod.build_brief(run)
+
+    signal = next(s for s in brief.signals if s.id == "no_conclusions")
+    assert signal.severity == brief_mod.SEVERITY_HIGH
+    assert signal.counts["tool_calls"] == 162
+    assert signal.counts["verified_claims"] == 0
+
+
+def test_budget_exhaustion_is_its_own_signal(brief_mod, tmp_path):
+    run = _make_run(tmp_path, complete_reason="token budget exhausted: over", completed=False)
+
+    brief = brief_mod.build_brief(run)
+
+    ids = [s.id for s in brief.signals]
+    assert "budget_exhausted" in ids
+
+
+def test_a_clean_successful_run_emits_no_signals(brief_mod, tmp_path):
+    """Nothing to look at is the correct output for a run that worked."""
+    run = _make_run(
+        tmp_path,
+        tool_calls=44,
+        evidence=44,
+        claims=1,
+        pinned=3,
+        completed=True,
+        complete_reason="verified flag from recorded evidence: flag{x}",
+    )
+
+    payload = brief_mod.brief_to_dict(brief_mod.build_brief(run))
+
+    assert payload["signals"] == []
+
+
+def test_signals_are_sorted_by_severity_in_text(brief_mod, tmp_path):
+    run = _make_run(tmp_path, tool_calls=162, evidence=148, complete_reason="token budget exhausted")
+
+    text = brief_mod.render_text(brief_mod.build_brief(run))
+    section = text[text.index("SIGNALS"):]
+
+    high = section.index("(high)")
+    medium_idx = section.find("(medium)")
+    if medium_idx != -1:
+        assert high < medium_idx
+
+
+def test_health_mirrors_signal_messages(brief_mod, tmp_path):
+    """The text field is derived, so the two can never disagree."""
+    run = _make_run(tmp_path, tool_calls=162, evidence=148, complete_reason="token budget exhausted")
+
+    brief = brief_mod.build_brief(run)
+
+    assert brief.health == [s.message for s in brief.signals]
+
+
+def test_each_signal_has_an_id_and_severity(brief_mod, tmp_path):
+    run = _make_run(tmp_path, tool_calls=162, evidence=148, complete_reason="token budget exhausted")
+
+    for signal in brief_mod.build_brief(run).signals:
+        assert signal.id
+        assert signal.severity in {
+            brief_mod.SEVERITY_HIGH,
+            brief_mod.SEVERITY_MEDIUM,
+            brief_mod.SEVERITY_INFO,
+        }
+
+
+def test_json_round_trips_through_serialisation(brief_mod, tmp_path):
+    run = _make_run(tmp_path, tool_calls=162, evidence=148, complete_reason="token budget exhausted")
+
+    payload = brief_mod.brief_to_dict(brief_mod.build_brief(run))
+    restored = json.loads(json.dumps(payload))
+
+    assert restored["signals"][0]["counts"]["tool_calls"] == 162
+
+
+def test_no_state_signal_is_reported_not_silent(brief_mod, tmp_path):
+    run = tmp_path / "empty"
+    (run / "targets").mkdir(parents=True)
+    (run / "run.json").write_text("{}", encoding="utf-8")
+
+    brief = brief_mod.build_brief(run)
+
+    assert any(s.id == "no_state" for s in brief.signals)
