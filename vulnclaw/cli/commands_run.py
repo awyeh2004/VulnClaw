@@ -473,6 +473,45 @@ def run(
     console.print(_("cli.report_generated", path=report_path))
 
 
+def _case_state_hints(directory: str, target: str) -> list[str]:
+    """Hints from ``case_state.json``, or an empty list on any problem.
+
+    Loaded through :mod:`importlib` rather than a package import: ``scripts/`` is a
+    collection of standalone tools, not an importable package, and promoting one of
+    them into ``vulnclaw/`` would drag the reviewer's CLI into the runtime just so
+    the runner can read three strings.
+
+    Failing quiet is deliberate. A missing, malformed or newer-schema file must
+    not stop a solve — the operator can always pass ``--hint`` explicitly, and a
+    challenge with no carried hints is still a challenge worth running.
+    """
+    try:
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[2] / "scripts" / "case_state.py"
+        if not script.is_file():
+            return []
+        spec = importlib.util.spec_from_file_location("_vulnclaw_case_state", script)
+        if spec is None or spec.loader is None:
+            return []
+        module = importlib.util.module_from_spec(spec)
+        # Register before executing: `@dataclass` resolves its annotations through
+        # ``sys.modules[cls.__module__]``, so a module that is never registered
+        # fails with a bare ``AttributeError: 'NoneType' object has no attribute
+        # '__dict__'`` — which the surrounding ``except`` then swallowed, making
+        # the feature look like "no hints recorded" instead of a bug.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop(spec.name, None)
+        return list(module.load(directory).hints_for(target))
+    except Exception:  # noqa: BLE001 - carrying hints must never break a solve
+        return []
+
+
 def _solve_task_constraints(
     prompt: str, additional_targets: Optional[list[str]]
 ) -> Optional[TaskConstraints]:
@@ -558,6 +597,14 @@ def solve(
         "this path. Pass it to `scripts/run_brief.py --log` for review. Thinking is "
         "recorded even when it is not displayed on the terminal.",
     ),
+    case_state: Optional[str] = typer.Option(
+        None,
+        "--case-state",
+        help="Directory holding case_state.json. Its latest review verdict is "
+        "injected as operator hints (blocked-at / ruled-out / next-hint), which is "
+        "how one round hands a direction to the next. Verdicts recorded against a "
+        "different target are ignored.",
+    ),
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = _from_main("load_config")()
@@ -568,6 +615,20 @@ def solve(
     resolved_goal = goal or _("cli.default_goal")
     task_prompt = prompt or _("cli.task_prompt", target=target, goal=resolved_goal)
     solve_constraints = _solve_task_constraints(task_prompt, additional_targets)
+
+    # Pull the previous round's review verdict in as operator hints. This is how a
+    # review hands a direction forward: on 2026-11-17 the whole difference between
+    # a run that burned its budget and one that found the bug was "stop
+    # dictionary-searching the md5 prefix, enumerate the 24-bit constraint".
+    # Hints reach the model as operator text, never as confirmed facts, so the
+    # evidence gate is untouched.
+    if case_state:
+        for hint_text in _case_state_hints(case_state, target):
+            if hint_text not in (hint or []):
+                hint = [*(hint or []), hint_text]
+        if hint:
+            console.print(f"[*] Case state: {len(hint)} hint(s) carried from the previous round")
+
     console.print(f"[*] Target: [bold]{target}[/] | Goal: [bold]{resolved_goal}[/]")
 
     # Surface a goal that closes a path, before the run starts treating that
