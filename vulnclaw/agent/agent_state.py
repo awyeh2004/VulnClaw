@@ -251,9 +251,15 @@ def is_placeholder_flag(flag: str) -> bool:
     high_bytes = sum(1 for ch in body if ord(ch) > 0x7E or (ord(ch) < 0x20 and ch not in "\t\n\r"))
     if high_bytes and high_bytes * 3 >= len(body):
         return True
-    # A body with no letter at all (`LEN{0}`, `{0}`, `x{42}`) is a length or an
-    # index, not a flag. Every real flag body mixes letters with whatever else.
-    if not re.search(r"[A-Za-z]", body):
+    # A body with no letter AND almost no content (`LEN{0}`, `x{42}`) is a length or
+    # an index, not a flag. The length bound is what makes this safe: real flags
+    # are sometimes digit-only — five such tokens appear in this machine's own
+    # session history (`flag{125631357777427553}`, `flag{053700357621}`, ...) —
+    # and a letter test alone would have made `_flag_token_grounded` reject them,
+    # which is an unrecoverable failure: the completion gate has no bounded-retry
+    # escape the way `submit_gate` does. Short *and* letterless is the shape that
+    # only ever comes from a template; long digit-only is a real answer.
+    if not re.search(r"[A-Za-z]", body) and len(body.strip()) <= 3:
         return True
     return False
 

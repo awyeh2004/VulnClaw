@@ -232,9 +232,26 @@ class TestPlaceholderFlag:
             assert is_placeholder_flag(token) is True, token
 
     def test_letterless_bodies_are_placeholders(self):
-        """A length or index is not a flag body."""
-        for token in ("LEN{0}", "x{42}", "{12345678}"):
+        """A length or index is not a flag body — but only when it is also short.
+
+        The length bound is load-bearing. Real flags are sometimes digit-only:
+        this machine's own session history contains
+        ``flag{125631357777427553}`` and ``flag{053700357621}``. A letter test
+        alone would make ``_flag_token_grounded`` reject them, and unlike
+        ``submit_gate`` the completion gate has no bounded-retry escape — the
+        challenge would be unsolvable by construction.
+        """
+        for token in ("LEN{0}", "x{42}"):
             assert is_placeholder_flag(token) is True, token
+
+    def test_long_digit_only_flags_survive(self):
+        for token in (
+            "flag{125631357777427553}",
+            "flag{053700357621}",
+            "flag{3617656}",
+            "flag{222441144222}",
+        ):
+            assert is_placeholder_flag(token) is False, token
 
 
 class TestFlagsWithSpacesAreExtracted:
@@ -455,3 +472,33 @@ class TestEvidenceViewBudget:
         assert state.evidence_view_spend[record.id] == 100
         state.reset_for_goal(origin="http://t2", goal="g2")
         assert state.evidence_view_spend == {}
+
+
+class TestNumericFlagsReachTheCompletionGate:
+    """A digit-only flag must be able to finish a run.
+
+    Regression guard for a change that shipped without this check: adding a
+    "no letters means placeholder" rule to ``is_placeholder_flag`` made
+    ``_flag_token_grounded`` return False unconditionally, and the completion
+    gate has no bounded-retry escape the way ``submit_gate`` does. Five
+    digit-only flags appear in this machine's recorded sessions, so the rule
+    would have made those challenges unsolvable.
+    """
+
+    def test_numeric_flag_is_grounded_when_evidence_contains_it(self):
+        from vulnclaw.agent.solver import _flag_token_grounded
+
+        flag = "flag{125631357777427553}"
+        evidence_text = f"...dump... {flag} ..."
+
+        assert _flag_token_grounded(flag, evidence_text, [flag]) is True
+
+    def test_numeric_flag_is_still_refused_without_evidence(self):
+        from vulnclaw.agent.solver import _flag_token_grounded
+
+        assert _flag_token_grounded("flag{125631357777427553}", "nothing here", []) is False
+
+    def test_template_still_cannot_ground_itself(self):
+        from vulnclaw.agent.solver import _flag_token_grounded
+
+        assert _flag_token_grounded("LEN{0}", "LEN{0}", ["LEN{0}"]) is False
