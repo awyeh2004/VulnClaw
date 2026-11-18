@@ -48,7 +48,7 @@ def _validate_python_execute_mode(mode: str, code: str) -> str | None:
     return None
 
 
-def _shadowing_hint_for_stderr(agent: AgentContext, script_path: str, stderr_text: str) -> str:
+def _shadowing_hint_for_stderr(agent: AgentContext, stderr_text: str) -> str:
     """Explain a traceback that a work-dir file caused by shadowing the stdlib.
 
     Ordered as two checks, cheapest first:
@@ -686,7 +686,7 @@ async def execute_python(agent: AgentContext, args: dict[str, Any]) -> str:
             # preamble already wraps those in try/except ImportError, so a
             # surviving ImportError is the user's code failing and must be shown.
             output_parts.append("[stderr]\n" + stderr_text)
-            hint = _shadowing_hint_for_stderr(agent, tmp_path, stderr_text)
+            hint = _shadowing_hint_for_stderr(agent, stderr_text)
             if hint:
                 output_parts.append(hint)
 

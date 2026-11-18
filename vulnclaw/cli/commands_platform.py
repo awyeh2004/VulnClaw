@@ -1027,11 +1027,25 @@ def _solve_all_log_dir() -> Any:
 
 
 def _safe_log_name(token: str) -> str:
-    """Filesystem-safe log stem derived from a challenge ref."""
+    """Collision-free, filesystem-safe log stem derived from a challenge ref.
+
+    The sanitiser maps every non-alphanumeric run to ``_``, so two different refs
+    can collapse to one name: ``ctf2:practice:p1:c1`` and ``ctf2/practice/p1/c1``
+    both become ``ctf2_practice_p1_c1``. Platform refs happen to use a single
+    separator today, which is why this has not bitten — but in ``solve-all`` a
+    collision means two children append to one log, and the reviewer then reads a
+    merged transcript that belongs to neither challenge.
+
+    A short digest of the *original* token makes the name unique without making it
+    unreadable.
+    """
+    import hashlib
     import re
 
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(token or "challenge")).strip("_")
-    return stem[:120] or "challenge"
+    text = str(token or "challenge")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")[:100] or "challenge"
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"{stem}-{digest}"
 
 
 def where(

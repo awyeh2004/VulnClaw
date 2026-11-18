@@ -302,7 +302,29 @@ def test_log_name_is_filesystem_safe():
     assert "/" not in stem and ":" not in stem and "?" not in stem
     assert stem
     assert len(commands_platform._safe_log_name("x" * 500)) <= 120
-    assert commands_platform._safe_log_name("") == "challenge"
+    assert commands_platform._safe_log_name("").startswith("challenge")
+
+
+def test_log_names_do_not_collide_across_separators():
+    """The sanitiser maps every separator to ``_``, so distinct refs can collapse.
+
+    Two children writing one log means the reviewer reads a merged transcript
+    that belongs to neither challenge. A digest of the original token keeps
+    them apart.
+    """
+    a = commands_platform._safe_log_name("ctf2:practice:p1:c1")
+    b = commands_platform._safe_log_name("ctf2/practice/p1/c1")
+    c = commands_platform._safe_log_name("ctf2 practice p1 c1")
+
+    assert len({a, b, c}) == 3, (a, b, c)
+
+
+def test_log_name_stays_readable(tmp_path):
+    stem = commands_platform._safe_log_name("ctf2:practice:p1:c1")
+
+    # The challenge part survives; only a short digest is appended.
+    assert stem.startswith("ctf2_practice_p1_c1")
+    assert len(stem) <= 120
 
 # ── --skip-attempted ────────────────────────────────────────────────────────
 #

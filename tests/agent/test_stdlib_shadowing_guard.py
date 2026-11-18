@@ -163,7 +163,7 @@ def test_shadowing_hint_names_the_file_and_the_directory(tmp_path):
     ), patch(
         "vulnclaw.agent.builtin_tools._resolve_workdir", return_value=tmp_path
     ):
-        hint = _shadowing_hint_for_stderr(object(), "staged.py", stderr_text)
+        hint = _shadowing_hint_for_stderr(object(), stderr_text)
 
     assert hint.startswith("[!]")
     assert "dis.py" in hint
@@ -183,7 +183,7 @@ def test_shadowing_hint_silent_when_the_traceback_blames_something_else(tmp_path
     ), patch(
         "vulnclaw.agent.builtin_tools._resolve_workdir", return_value=tmp_path
     ):
-        assert _shadowing_hint_for_stderr(object(), "staged.py", stderr_text) == ""
+        assert _shadowing_hint_for_stderr(object(), stderr_text) == ""
 
 
 def test_shadowing_hint_silent_when_directory_is_clean(tmp_path):
@@ -198,10 +198,10 @@ def test_shadowing_hint_silent_when_directory_is_clean(tmp_path):
     ), patch(
         "vulnclaw.agent.builtin_tools._resolve_workdir", return_value=tmp_path
     ):
-        assert _shadowing_hint_for_stderr(object(), "staged.py", stderr_text) == ""
+        assert _shadowing_hint_for_stderr(object(), stderr_text) == ""
 
 
 def test_empty_stderr_yields_no_hint(tmp_path):
     from vulnclaw.agent.tools.python_exec import _shadowing_hint_for_stderr
 
-    assert _shadowing_hint_for_stderr(object(), "staged.py", "") == ""
+    assert _shadowing_hint_for_stderr(object(), "") == ""
