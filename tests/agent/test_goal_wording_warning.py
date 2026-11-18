@@ -40,8 +40,27 @@ def test_finds_the_prohibition_that_cost_the_ezphp_run():
     sentences = extract_goal_prohibitions(_EZPHP_GOAL)
 
     joined = " ".join(sentences)
+    # The sentence that closed the search direction — this is the one that mattered.
     assert "revalidating /flag.php gopher output" in joined
-    assert "never report or submit" in joined
+    # "never report or submit it" is deliberately NOT matched: it is output
+    # hygiene, not a closed path. See test_submit_hygiene_is_not_a_prohibition.
+    assert "never report or submit" not in joined
+
+
+def test_submit_hygiene_is_not_a_prohibition():
+    """"Do not submit X" is a standing discipline clause, not a closed path.
+
+    Measured over 322 recorded goals: matching it fired on "do not submit probe or
+    placeholder flags" — a rule about output hygiene that appears in almost every
+    competition goal. A warning that fires there every time gets ignored exactly
+    when a real prohibition appears.
+    """
+    for goal in (
+        "do not submit probe or placeholder flags.",
+        "Never submit a flag you cannot source.",
+        "不要提交猜测的 flag。",
+    ):
+        assert extract_goal_prohibitions(goal) == [], goal
 
 
 def test_keeps_dotted_paths_intact():
@@ -80,7 +99,7 @@ def test_empty_goal_is_silent():
 def test_english_prohibitions_are_recognised():
     for goal in (
         "Do not retry the upload vector.",
-        "Never submit a flag you cannot source.",
+        "Do not attempt the stego decoding itself.",
         "Skip the SSRF approach.",
     ):
         assert extract_goal_prohibitions(goal), goal

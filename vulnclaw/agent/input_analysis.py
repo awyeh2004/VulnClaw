@@ -702,12 +702,18 @@ def build_user_vuln_directive(user_input: str) -> str:
 
 #: Phrases that forbid a line of investigation. Deliberately narrow: "don't
 #: forget", "don't guess" and similar are guidance, not closure.
+#:
+#: "Do not submit/report X" is deliberately NOT here. Measured over 322 recorded
+#: goals: it fired on "do not submit probe or placeholder flags", a standing
+#: discipline clause about output hygiene, not about which paths to explore.
+#: A warning that fires on that line every match would be ignored exactly when it
+#: matters. Only prohibitions that close a *search direction* belong here.
 _PROHIBITION_PATTERNS = (
     r"\bdo not (?:spend time |bother )?(?:revalidat|re-?test|recheck|retry|re-?try|revisit)",
-    r"\b(?:never|do not|don't|must not) (?:report|submit|try|attempt|test|pursue|explore|use)\b",
+    r"\b(?:never|do not|don't|must not) (?:try|attempt|pursue|explore)\b",
     r"\b(?:skip|avoid|ignore|disregard) (?:the )?[\w/.:-]* ?(?:path|approach|route|vector|surface|endpoint)",
     r"\bis a (?:known )?(?:decoy|dead end|rabbit hole|false positive)\b",
-    r"\b(?:不要|禁止|严禁|别再|不要再)(?:重复|重试|测试|尝试|提交|上报|走|试)",
+    r"\b(?:不要|禁止|严禁|别再|不要再)(?:重复|重试|测试|尝试|走|试)",
     r"(?:已经|已被)?(?:证实|确认|证明)(?:是)?(?:无效|错误|失败的|诱饵|假)",
 )
 
