@@ -37,6 +37,20 @@ _BIDI_RANGES = (
 _ZERO_WIDTH = {0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF}
 
 
+def mask_for_approval(display: str, detail: str = "") -> tuple[str, str]:
+    """Mask credential-shaped text on the operator-facing prompt.
+
+    Re-exported from ``vulnclaw.utils.sanitize_display`` so the two ApprovalView
+    construction sites (async channel, sync hook) read the same call, and so a
+    test can patch one name. Imported lazily: ``utils.redaction`` reads config,
+    and this module is imported early by the tool layer.
+    """
+
+    from vulnclaw.utils.sanitize_display import mask_for_approval as _mask
+
+    return _mask(display, detail)
+
+
 def visualize_for_display(text: str) -> str:
     """Render untrusted text safely: control/bidi/zero-width chars escaped."""
     out: list[str] = []
@@ -374,12 +388,19 @@ class ExecutionGate:
                         ),
                     )
 
+                # Mask credentials BEFORE escaping: the operator must be able to
+                # judge the command, and the prompt must not be the place a live
+                # password gets pasted from. Evidence keeps the raw text -- see
+                # utils/sanitize_display.py for why the two scopes differ.
+                display_masked, detail_masked = mask_for_approval(
+                    request.display, request.detail
+                )
                 view = ApprovalView(
                     request_hash=request_hash,
                     kind=request.kind,
-                    display_escaped=visualize_for_display(request.display),
+                    display_escaped=visualize_for_display(display_masked),
                     cwd=visualize_single_line_for_display(request.cwd),
-                    detail=visualize_for_display(request.detail),
+                    detail=visualize_for_display(detail_masked),
                     expires_at=(
                         datetime.now(timezone.utc) + timedelta(seconds=self.timeout_seconds)
                     ).isoformat(timespec="seconds"),
@@ -460,12 +481,15 @@ class ExecutionGate:
         hook = self.sync_confirm_hook
         if hook is None:
             return False
+        display_masked, detail_masked = mask_for_approval(
+            request.display, request.detail
+        )
         view = ApprovalView(
             request_hash=request.request_hash(),
             kind=request.kind,
-            display_escaped=visualize_for_display(request.display),
+            display_escaped=visualize_for_display(display_masked),
             cwd=visualize_single_line_for_display(request.cwd),
-            detail=visualize_for_display(request.detail),
+            detail=visualize_for_display(detail_masked),
             expires_at="(sync)",
             expires_in_seconds=self.timeout_seconds,
             risk="Executes with current user privileges; not sandboxed.",
