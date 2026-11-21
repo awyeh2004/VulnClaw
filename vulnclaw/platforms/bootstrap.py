@@ -19,6 +19,21 @@ from vulnclaw.platforms.base import PlatformAdapter
 _BUILTINS_REGISTERED = False
 
 
+def _load_config() -> object | None:
+    """Runtime config, or None when it cannot be read.
+
+    Adapters that take connection details (CTFd) need it; the ones that read
+    their own credential files (CTF2, GCS) ignore it. A failure here is not fatal:
+    an adapter built without config simply reports itself as not configured.
+    """
+    try:
+        from vulnclaw.config.settings import load_config
+
+        return load_config()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def ensure_adapters(force: bool = False) -> dict[str, PlatformAdapter]:
     """Register the built-in adapters once and return them all."""
     global _BUILTINS_REGISTERED
@@ -26,6 +41,7 @@ def ensure_adapters(force: bool = False) -> dict[str, PlatformAdapter]:
         return registry.all_adapters()
 
     from vulnclaw.platforms.ctf2 import CTF2Adapter
+    from vulnclaw.platforms.ctfd import build_adapter as build_ctfd
     from vulnclaw.platforms.gcs import GCSAdapter
 
     registry.register_adapter(CTF2Adapter())
@@ -33,6 +49,9 @@ def ensure_adapters(force: bool = False) -> dict[str, PlatformAdapter]:
     # GCS integration is legacy, so it must be switched on deliberately. Being
     # registered is what lets `platforms.gcs.enabled = true` work later.
     registry.register_adapter(GCSAdapter())
+    # CTFd reads its URL and token from `platforms.ctfd`; also off by default so
+    # the tool face never offers a platform nobody configured.
+    registry.register_adapter(build_ctfd(_load_config()))
     _BUILTINS_REGISTERED = True
     return registry.all_adapters()
 
