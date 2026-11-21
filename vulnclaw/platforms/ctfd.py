@@ -95,8 +95,23 @@ class CTFdAdapter:
         self._timeout_s = timeout_s
 
     # ── config ──────────────────────────────────────────────────────────
+    @property
+    def base_url(self) -> str:
+        """Public base URL; ``attachments.resolve_url`` reads this for relative paths."""
+        return self._base_url
+
     def is_configured(self) -> bool:
         return bool(self._base_url and self._token)
+
+    def download_headers(self) -> dict[str, str]:
+        """Auth headers for artifact downloads.
+
+        CTFd serves ``/files/<hash>/<name>`` only to a session that is allowed to
+        read the challenge, so a bare ``httpx.Client()`` gets a login redirect and
+        every attachment lands as 0 bytes or an HTML page. The shared downloader
+        therefore asks the adapter for headers instead of assuming none are needed.
+        """
+        return {"Authorization": f"Token {self._token}"}
 
     def make_ref(self, *, kind: str, id: str, group: str = "") -> ChallengeRef:
         if kind not in KINDS:

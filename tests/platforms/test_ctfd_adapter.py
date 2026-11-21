@@ -404,3 +404,92 @@ def test_config_token_wins_over_the_environment(monkeypatch):
     adapter = build_adapter(_Config())
 
     assert adapter.is_configured() is True
+
+
+# ── artifact downloads need the token too ───────────────────────────────────
+
+
+def test_adapter_supplies_download_headers():
+    """CTFd serves /files/... only to an authorized session.
+
+    The shared downloader used to build a bare httpx client with no headers, so
+    every CTFd attachment would have landed as a login redirect's HTML.
+    """
+    adapter = _adapter()
+
+    assert adapter.download_headers() == {"Authorization": "Token tok"}
+
+
+def test_adapter_exposes_base_url_for_relative_attachment_paths():
+    """`resolve_url` reads `adapter.base_url` to absolutize a root-relative URL."""
+    adapter = _adapter()
+
+    assert adapter.base_url == "https://ctf.example"
+
+
+def test_download_forwards_headers_to_the_client(tmp_path):
+    from vulnclaw.platforms import base as platform_base
+    from vulnclaw.platforms.attachments import download_attachment
+
+    seen: dict = {}
+
+    class _Response:
+        status_code = 200
+
+        def iter_bytes(self, _chunk):
+            yield b"payload"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Client:
+        def stream(self, method, url, **kwargs):
+            seen["method"] = method
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers")
+            return _Response()
+
+    attachment = platform_base.Attachment(name="a.bin", url="/files/x/a.bin")
+    adapter = _adapter()
+
+    result = download_attachment(
+        _Client(), attachment, str(tmp_path), challenge_name="c", adapter=adapter
+    )
+
+    assert result.error == ""
+    assert seen["url"] == "https://ctf.example/files/x/a.bin"
+    assert seen["headers"] == {"Authorization": "Token tok"}
+
+
+def test_download_without_adapter_headers_still_works(tmp_path):
+    """An adapter that publishes no headers must not break the downloader."""
+    from vulnclaw.platforms import base as platform_base
+    from vulnclaw.platforms.attachments import download_attachment
+
+    seen: dict = {}
+
+    class _Response:
+        status_code = 200
+
+        def iter_bytes(self, _chunk):
+            yield b"ok"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Client:
+        def stream(self, method, url, **kwargs):
+            seen["headers"] = kwargs.get("headers")
+            return _Response()
+
+    attachment = platform_base.Attachment(name="b.bin", url="https://x/b.bin")
+
+    download_attachment(_Client(), attachment, str(tmp_path))
+
+    assert seen["headers"] is None

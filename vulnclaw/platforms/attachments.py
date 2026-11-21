@@ -31,6 +31,7 @@ import hashlib
 import os
 import ssl
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,7 +94,15 @@ def resolve_url(attachment: base.Attachment, adapter: object | None = None) -> s
     if not url.startswith("/"):
         return url
     base_url = getattr(adapter, "base_url", None)
-    base_url = base_url() if callable(base_url) else ""
+    # Accept both a method and a plain attribute. The original form called it when
+    # callable and otherwise threw the value away, so an adapter exposing
+    # `base_url` as a property (which is the natural spelling) silently lost every
+    # root-relative attachment URL and reported "platform exposes no base URL".
+    if callable(base_url):
+        try:
+            base_url = base_url()
+        except Exception:  # noqa: BLE001
+            base_url = ""
     if not base_url:
         return ""
     return f"{str(base_url).rstrip('/')}{url}"
@@ -202,12 +211,28 @@ def download_attachment(
         )
     declared_md5 = str(getattr(attachment, "md5", "") or "").strip().lower()
 
+    # Platform-specific download auth. The caller owns the client and therefore the
+    # TLS policy, but only the adapter knows whether the artifact URL needs a token
+    # — CTFd serves /files/... only to an authorized session, so a bare client gets
+    # a login redirect and the bytes on disk are an HTML page.
+    request_headers = {}
+    header_source = getattr(adapter, "download_headers", None)
+    if callable(header_source):
+        try:
+            produced = header_source()
+        except Exception:  # noqa: BLE001 - headers are an optimisation, not a gate
+            produced = None
+        if isinstance(produced, Mapping):
+            request_headers = {str(k): str(v) for k, v in produced.items()}
+
     sha256 = hashlib.sha256()
     md5 = hashlib.md5()
     written = 0
     over_cap = False
     try:
-        with client.stream("GET", url, follow_redirects=True) as response:  # type: ignore[attr-defined]
+        with client.stream(  # type: ignore[attr-defined]
+            "GET", url, follow_redirects=True, headers=request_headers or None
+        ) as response:
             if response.status_code != 200:
                 return AttachmentDownload(
                     name=label, url=url, error=f"HTTP {response.status_code}"
