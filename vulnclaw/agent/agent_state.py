@@ -486,6 +486,22 @@ class ContextDigest(BaseModel):
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+class SideEffectRecord(BaseModel):
+    """One tool invocation's declared effect, recorded before it runs.
+
+    Declared rather than measured (KubeTrail's ``CollectorPlan`` makes the same
+    choice): a tool that times out or crashes still changed something, and those
+    are exactly the runs whose effects matter most. ``count`` collapses repeats
+    so 400 brute-force calls are one row with a number, not 400 rows.
+    """
+
+    tool: str
+    effects: list[str] = Field(default_factory=list)
+    touches_target: bool = False
+    count: int = 1
+    note: str = ""
+
+
 class ContextCompactionEvent(BaseModel):
     """Metadata-only record for one context compaction operation."""
 
@@ -553,6 +569,11 @@ class AgentState(BaseModel):
     completion_rejections: list[str] = Field(default_factory=list)
     completed: bool = False
     complete_reason: str = ""
+    #: Declared side effects, keyed by tool name (see ``agent/tool_effects.py``).
+    #: Recorded before dispatch so a crashed/timed-out call still counts. The
+    #: report renders this as "what this run actually did to the target" --
+    #: a column the findings list cannot provide.
+    side_effects: list[SideEffectRecord] = Field(default_factory=list)
     #: Machine-readable termination cause (a ``config.domain_models.StopReason``
     #: value). ``complete_reason`` stays the operator-facing sentence; this one
     #: is what scripts and the CLI status line branch on, so a termination whose
@@ -660,6 +681,7 @@ class AgentState(BaseModel):
         self.completed = False
         self.complete_reason = ""
         self.stop_reason = ""
+        self.side_effects = []
         self.final_answer = ""
         self.llm_usage_prompt_tokens = 0
         self.llm_usage_completion_tokens = 0
@@ -892,6 +914,34 @@ class AgentState(BaseModel):
         if len(self.progress_signals) > MAX_STORED_PROGRESS_SIGNALS:
             del self.progress_signals[: MAX_STORED_PROGRESS_SIGNALS // 2]
         return signal
+
+    def record_side_effect(self, tool: str) -> "SideEffectRecord":
+        """Count one invocation's declared effects (recorded before it runs).
+
+        Repeats collapse into one row with a count: the report wants "400 auth
+        attempts", not 400 lines. Import is local because ``tool_effects``
+        imports back into this package's schema builders.
+        """
+        from vulnclaw.agent.tool_effects import effects_for
+
+        desired = effects_for(tool)
+        for record in self.side_effects:
+            if record.tool == tool:
+                record.count += 1
+                return record
+        record = SideEffectRecord(
+            tool=tool,
+            effects=list(desired.effects),
+            touches_target=desired.touches_target,
+            note=desired.note,
+        )
+        self.side_effects.append(record)
+        return record
+
+    def target_touching_effects(self) -> list["SideEffectRecord"]:
+        """Only the effects that outlive this run on the target."""
+
+        return [item for item in self.side_effects if item.touches_target]
 
     def pin_fact(self, text: str, *, evidence_id: str = "") -> PinnedFact | None:
         fact_text = one_line(text, 260)
@@ -1253,4 +1303,8 @@ class AgentState(BaseModel):
             "pending_questions": len(self.pending_questions),
             "complete_reason": self.complete_reason,
             "stop_reason": self.stop_reason,
+            "side_effects": [
+                {"tool": item.tool, "count": item.count, "touches_target": item.touches_target}
+                for item in self.side_effects
+            ],
         }

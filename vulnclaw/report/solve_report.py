@@ -169,6 +169,11 @@ def render_solve_report(state: AgentState) -> str:
     lines.extend(["", _("report.solve.step1")])
     lines.extend(_render_solution_chain(state, sql_facts, key_requests, flags))
 
+    # What the run actually did to the target. The findings list answers "what
+    # was concluded"; this answers "what was done" -- the question an operator
+    # asks when deciding whether a run needs cleanup or a scope conversation.
+    lines.extend(_render_side_effects(state))
+
     lines.extend(["", _("report.solve.step2")])
     if pinned:
         for fact in pinned[:24]:
@@ -361,6 +366,39 @@ def _rank_reproduction_requests(
     ranked = sorted(requests, key=score, reverse=True)
     positive = [item for item in ranked if score(item)[0] >= 30]
     return (positive or ranked)[:5]
+
+
+def _render_side_effects(state: AgentState) -> list[str]:
+    """The run's declared effects on the world, split by whether they outlive it.
+
+    Reads ``AgentState.side_effects`` (populated at dispatch, before the tool
+    runs). Two groups, because they answer different operator questions:
+    "what must be cleaned up / reported as traffic" versus "what stayed local".
+    """
+
+    records = list(getattr(state, "side_effects", None) or [])
+    if not records:
+        return []
+
+    target = [item for item in records if item.touches_target]
+    local = [item for item in records if not item.touches_target]
+    lines = ["", "#### 本次运行的实际动作（按工具声明的副作用）"]
+    if target:
+        lines.append("")
+        lines.append("对目标有影响：")
+        for item in sorted(target, key=lambda r: (-r.count, r.tool)):
+            effects = ", ".join(item.effects) or "?"
+            note = f" — {item.note}" if item.note else ""
+            lines.append(f"- `{item.tool}` ×{item.count}（{effects}）{note}")
+    else:
+        lines.append("")
+        lines.append("对目标有影响：无（全部为本地读取/记录）")
+    if local:
+        lines.append("")
+        lines.append("仅本地：")
+        for item in sorted(local, key=lambda r: (-r.count, r.tool)):
+            lines.append(f"- `{item.tool}` ×{item.count}")
+    return lines
 
 
 def _render_solution_chain(

@@ -1024,6 +1024,17 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         return escalated if escalated is not None else dangerous_refusal
 
     session = getattr(agent, "session_state", None)
+    # Declared side effects are recorded BEFORE dispatch (KubeTrail's
+    # CollectorPlan takes the same position): a call that times out or crashes
+    # still changed something on the target, and those are the runs whose
+    # effects matter most. Recorded past the role/danger gates above, so a
+    # refused call does not count as an effect.
+    try:
+        _agent_state = getattr(session, "agent_state", None)
+        if _agent_state is not None and hasattr(_agent_state, "record_side_effect"):
+            _agent_state.record_side_effect(tool_name)
+    except Exception:
+        pass
     constraints = getattr(session, "task_constraints", None)
     if constraints is not None:
         tool_violation = validate_tool_action(tool_name, args, constraints)
