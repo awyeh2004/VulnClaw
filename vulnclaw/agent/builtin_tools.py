@@ -680,6 +680,26 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
     if refused_verification:
         wants_verified = False
 
+    # Second gate, on the SAME claim: "attached something" is not the same as
+    # "this is the kind of thing that counts". The 19 rejected SRC submissions
+    # (2026-10-22..29) all had evidence attached -- they were rejected for being
+    # architecture info / version disclosure / no demonstrated impact. Say so
+    # here, while the model can still add the missing proof, instead of letting
+    # a report ship something the operator will have to reject by hand.
+    triage_note = ""
+    if wants_verified:
+        from vulnclaw.report.triage import Verdict, classify
+
+        verdict = classify(finding)
+        if verdict.verdict is Verdict.NON_FINDING:
+            wants_verified = False
+            triage_note = f"  ⚠️ verified=true 未被采纳（判据「{verdict.rule}」）：{verdict.reason}"
+        elif verdict.verdict is Verdict.NEEDS_IMPACT:
+            triage_note = (
+                f"  ℹ️ 判据「{verdict.rule}」命中，但你给出了后果，已按已验证记录——"
+                "报告里会单独标注「需人工确认」。"
+            )
+
     if wants_verified:
         finding.mark_verified(note=str(args.get("verification_note") or "").strip())
 
@@ -695,11 +715,12 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
         # gcs_submit_flag / platform_submit 的职责，也只有它们能改 submission 状态。
         note = "（本地 finding，仅写入本次运行；不是平台提交，不产生 submission、不计分。）"
         if not refused_verification or recorded_as_verified:
-            return note
+            return note + triage_note
         return (
             note
             + "  ⚠️ verified=true 未被采纳：报告里没有任何可核查的依据（evidence / vuln_type / "
             "remediation 至少给一项），已按候选记录。补上依据后再报一次即可升级。"
+            + triage_note
         )
 
     existing = _finding_for_report(session, finding, title)
@@ -2248,7 +2269,15 @@ def build_openai_tools(
                             "type": "string",
                             "description": "漏洞描述：问题与位置（what/where）",
                         },
-                        "impact": {"type": "string", "description": "影响与业务风险"},
+                        "impact": {
+                            "type": "string",
+                            "description": (
+                                "影响与业务风险——必须写可测量的后果：读到了什么数据、"
+                                "绕过了哪个认证、改变了什么状态。只写「存在风险」「可被利用」"
+                                "不构成 impact：缺安全头、版本泄露、指纹、开放端口这类"
+                                "形态会被判为不成立，除非这里给出实际造成的结果。"
+                            ),
+                        },
                         "evidence": {
                             "type": "string",
                             "description": "证明漏洞存在的关键观察（文字摘要；报文证据用 traffic_bind_evidence 绑定）",

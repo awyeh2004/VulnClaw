@@ -672,11 +672,17 @@ class TestReportRecommendationI18n:
 
         state = SessionState(target="192.168.1.100")
         state.advance_phase(PentestPhase.RECON)
+        # Deliberately NOT a banner/version disclosure. The non-finding triage
+        # (report/triage.py, 2026-11-21) classifies "version header exposed" as
+        # a non-finding, so it now leaves the findings section -- and this
+        # fixture's purpose is the localized empty-recommendation text, not the
+        # triage. A Medium finding outside the rule table keeps that purpose.
         f = VulnerabilityFinding(
-            title="Server banner",
+            title="Missing authorization on /api/orders",
             severity="Medium",
-            vuln_type="Info Leak",
-            description="Version header exposed",
+            vuln_type="IDOR",
+            description="Any authenticated user can list other users' orders",
+            evidence="GET /api/orders/1002 returned another account's order",
         )
         f.verified = True
         f.verification_status = "verified"

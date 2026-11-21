@@ -430,6 +430,29 @@ def generate_report(
 
     all_findings = session.findings
     verified_findings = deduplicate_report_findings(session.get_verified_findings())
+
+    # Non-finding triage (2026-11-21). "verified" means the evidence check
+    # passed; it does NOT mean the thing is a vulnerability. The 19 rejected
+    # SRC submissions were all evidence-complete yet were architecture info,
+    # version disclosure or unproven impact. Split them out here so the
+    # detailed section only carries findings that survive the criteria, and the
+    # excluded ones are listed WITH their reason instead of vanishing.
+    from vulnclaw.report.triage import Verdict, classify, exclusion_line
+
+    triaged: list[tuple[VulnerabilityFinding, object]] = []
+    kept: list[VulnerabilityFinding] = []
+    excluded_lines: list[str] = []
+    needs_review_lines: list[str] = []
+    for finding in verified_findings:
+        verdict = classify(finding)
+        if verdict.verdict is Verdict.NON_FINDING:
+            excluded_lines.append(exclusion_line(finding, verdict))
+            continue
+        kept.append(finding)
+        if verdict.verdict is Verdict.NEEDS_IMPACT:
+            needs_review_lines.append(exclusion_line(finding, verdict))
+    verified_findings = kept
+
     pending_findings = session.get_pending_findings()
     rejected_findings = session.get_rejected_findings()
     candidate_findings = (
@@ -529,6 +552,31 @@ def generate_report(
     index_notice = _evidence_index_notice(evidence_store)
     if index_notice:
         report_content += "\n\n" + index_notice
+    # The two triage appendices. Both render a *decision*, not a finding: an
+    # excluded row keeps its reason so a reader can argue with the rule, and a
+    # needs-impact row is flagged for the operator instead of silently counting
+    # as a confirmed vulnerability.
+    if excluded_lines:
+        report_content += "\n\n" + _rl(
+            "## 附：已排除项（不构成漏洞）",
+            "## Appendix: Excluded (not vulnerabilities)",
+        )
+        report_content += "\n\n" + _rl(
+            "以下项通过了证据检查，但命中非漏洞判据，未计入上面的详细发现。"
+            "理由列在每一条后面；若认为判错，请补上判据要求的证明后重新上报。\n",
+            "These passed the evidence check but matched a non-finding rule, so they "
+            "are not counted as findings above. Each carries its reason; if you "
+            "believe the rule is wrong here, attach the proof it asks for and "
+            "re-report.\n",
+        )
+        report_content += "\n".join(excluded_lines)
+
+    if needs_review_lines:
+        report_content += "\n\n" + _rl(
+            "## 附：需人工确认（命中非漏洞形态但给出了后果）",
+            "## Appendix: Needs Manual Review (non-finding shape, but an impact is argued)",
+        )
+        report_content += "\n\n" + "\n".join(needs_review_lines)
     if target_state_context:
         report_content += "\n\n" + _render_target_state_context(target_state_context)
 
