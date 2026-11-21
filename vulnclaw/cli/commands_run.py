@@ -46,6 +46,7 @@ from vulnclaw.cli.repl import (
     _scope_option_kwargs,
     _validate_headless_choices,
 )
+from vulnclaw.cli.status_display import format_stop_status
 from vulnclaw.config.domain_models import TaskConstraints
 from vulnclaw.config.schema import ENGINE_CHOICES
 from vulnclaw.i18n import _
@@ -463,7 +464,7 @@ def run(
             f"\n[bold]{status}[/bold] — steps={agent_state.get('steps', 0)} "
             f"evidence={agent_state.get('evidence', 0)} "
             f"tools={agent_state.get('tool_calls', 0)} "
-            f"{_('cli.reason')}: {agent_state.get('complete_reason') or _('cli.reason_not_complete')}"
+            f"{_('cli.reason')}: {format_stop_status(agent_state)}"
         )
     else:
         total_findings = orchestrated.summary["findings_count"]
@@ -747,7 +748,7 @@ def solve(
         f"\n[bold]{status}[/bold] — steps={agent_state.get('steps', 0)} "
         f"evidence={agent_state.get('evidence', 0)} "
         f"tools={agent_state.get('tool_calls', 0)} "
-        f"{_('cli.reason')}: {agent_state.get('complete_reason') or _('cli.reason_not_complete')}"
+        f"{_('cli.reason')}: {format_stop_status(agent_state)}"
     )
     if agent_state.get("completed"):
         # ``holder`` stores only the summary for status printing, so generate

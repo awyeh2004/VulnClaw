@@ -47,6 +47,7 @@ from vulnclaw.cli._helpers import (
     err_console,
     format_llm_user_error,
 )
+from vulnclaw.cli.status_display import format_stop_status
 from vulnclaw.config.token_provider import has_llm_credentials
 from vulnclaw.i18n import _
 from vulnclaw.i18n.phases import localized_phase_name
@@ -1141,7 +1142,7 @@ def _run_repl() -> None:
                                         f"steps={agent_state.get('steps', 0)} "
                                         f"evidence={agent_state.get('evidence', 0)} "
                                         f"tools={agent_state.get('tool_calls', 0)}\n"
-                                        f"{_('cli.reason')}: {agent_state.get('complete_reason') or _('cli.reason_not_complete')}",
+                                        f"{_('cli.reason')}: {format_stop_status(agent_state)}",
                                         title="Solve",
                                         border_style="green" if done else "yellow",
                                     )

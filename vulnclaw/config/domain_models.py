@@ -356,6 +356,39 @@ class RetestStatus(str, Enum):
     STOPPED = "stopped"
 
 
+class StopReason(str, Enum):
+    """Why one solve run ended — the machine-readable half of ``complete_reason``.
+
+    ``complete_reason`` carries the operator-facing sentence and is written by a
+    dozen different branches; this enum carries the *authentic* cause. The
+    2026-10-21 measurement that motivated it: a run blocked by another process's
+    solve lock printed "⊘ 未达成 … 仍未达到完成条件" with ``steps=0``, because that
+    branch set only ``SolveResult.reason`` while the CLI prints
+    ``agent_state.complete_reason``. Twice that read as "the agent did nothing"
+    and cost a manual investigation. A code that every exit must declare makes
+    that class of misreport structurally impossible to reintroduce silently.
+
+    Anything that reaches the loop's termination must set one of these; the
+    empty string means "the run is still in progress or predates this field".
+    """
+
+    COMPLETED = "completed"
+    #: Solutions' own exits.
+    TOKEN_BUDGET = "token_budget"
+    RUNAWAY = "runaway"
+    #: Refused before the loop could start.
+    LOCK_HELD = "lock_held"
+    #: Stall guards (each names the measured failure shape it caught).
+    STALL_EVIDENCE_ONLY = "stall_evidence_only"
+    STALL_NO_ACTION = "stall_no_action"
+    STALL_PATH = "stall_path"
+    #: The guard handed the decision back to the operator.
+    WAITING_USER = "waiting_user"
+    #: Something failed after the model thought it was done.
+    FINALIZE_ERROR = "finalize_error"
+    REPEATED_ERRORS = "repeated_errors"
+
+
 class RetestRecord(BaseModel):
     """一条 finding 的一次复测会话记录（A1 / ARTEX ``finding_retests`` 的文件式对应物）。
 

@@ -138,6 +138,9 @@ def render_solve_report(state: AgentState) -> str:
         f"- Goal: {state.goal or '(unset)'}",
         f"- Status: {'completed' if state.completed else 'not completed'}",
         f"- Result: {state.complete_reason or '(none)'}",
+        # The code answers what the sentence cannot: budget stop, guard
+        # hand-back, or a refusal before step 1?
+        f"- Stop reason: {getattr(state, 'stop_reason', '') or '(unset)'}",
         f"- Generated at: {datetime.now().isoformat(timespec='seconds')}",
     ]
     prompt_tokens = int(getattr(state, "llm_usage_prompt_tokens", 0) or 0)

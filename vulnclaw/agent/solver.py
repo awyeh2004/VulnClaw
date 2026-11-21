@@ -46,6 +46,7 @@ from vulnclaw.agent.subagent.solve import (
     shutdown as shutdown_subagents,
 )
 from vulnclaw.agent.think_filter import strip_think_tags
+from vulnclaw.config.domain_models import StopReason
 from vulnclaw.utils.atomic_write import replace_with_retry
 
 if TYPE_CHECKING:
@@ -3204,6 +3205,8 @@ async def solve(
         # where the operator actually looks.
         try:
             agent.context.state.agent_state.complete_reason = blocked_reason
+            # The code is what makes the cause legible without parsing prose.
+            agent.context.state.agent_state.stop_reason = StopReason.LOCK_HELD.value
         except Exception:
             pass
         return SolveResult(
@@ -3361,6 +3364,7 @@ async def _solve_impl(
                     "run notes hold the conclusions gathered so far"
                 )
                 state.complete_reason = reason
+                state.stop_reason = StopReason.TOKEN_BUDGET.value
                 emit("token_budget_exceeded", {"used": used, "budget": token_budget})
                 break
 
@@ -3626,6 +3630,7 @@ async def _solve_impl(
                 state.ask_user(question)
                 needs_user = True
                 reason = "stalled after repeated evidence-only turns"
+                state.stop_reason = StopReason.STALL_EVIDENCE_ONLY.value
                 emit("ask_user", {"question": question, "reason": reason})
                 stop_for_stall = True
         else:
@@ -3671,6 +3676,7 @@ async def _solve_impl(
                 state.ask_user(question)
                 needs_user = True
                 reason = "stalled while reasoning without acting (no tool call for 4 turns)"
+                state.stop_reason = StopReason.STALL_NO_ACTION.value
                 emit("ask_user", {"question": question, "reason": reason})
                 stop_for_stall = True
         else:
@@ -3731,6 +3737,7 @@ async def _solve_impl(
             # The reason must match what is actually known -- see
             # _stall_handback_reason, which is three-way for exactly this reason.
             reason = _stall_handback_reason(agent)
+            state.stop_reason = StopReason.STALL_PATH.value
             emit("stall_guard", {
                 "action": "ask",
                 "streak": path_stall_streak,
@@ -3786,6 +3793,7 @@ async def _solve_impl(
             state.ask_user(question)
             needs_user = True
             reason = "waiting for user input"
+            state.stop_reason = StopReason.WAITING_USER.value
             emit("ask_user", {"question": question})
             break
 
@@ -3889,13 +3897,19 @@ async def _solve_impl(
         reason = state.complete_reason
     elif needs_user and reason == "runaway safety budget reached":
         reason = "waiting for user input"
+        # A guard asked for input; the loop ran out of steps before the model
+        # replied. That is a hand-back, not a budget failure -- and the code has
+        # to say so, or the two are indistinguishable in the run record.
+        state.stop_reason = StopReason.WAITING_USER.value
     elif repeated_errors >= 5:
         reason = reason or "stopped after repeated errors"
+        state.stop_reason = state.stop_reason or StopReason.REPEATED_ERRORS.value
 
     finalization_error = await finalize_parent(agent, state)
     if finalization_error:
         state.completed = False
         state.complete_reason = finalization_error
+        state.stop_reason = StopReason.FINALIZE_ERROR.value
         reason = finalization_error
         state.add_correction_hint(finalization_error)
 
@@ -3903,6 +3917,12 @@ async def _solve_impl(
     # did not complete, instead of the generic "not complete" placeholder.
     if not state.completed and not state.complete_reason:
         state.complete_reason = reason
+    # Every exit declares a code. Anything still empty at this point fell through
+    # the loop's step budget (the initial ``reason`` is the runaway default), so
+    # the code is RUNAWAY -- never left blank, which is what let a lock-blocked
+    # run read as "still not complete".
+    if not state.completed and not state.stop_reason:
+        state.stop_reason = StopReason.RUNAWAY.value
 
     try:
         agent.context.state.save()

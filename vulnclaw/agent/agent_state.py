@@ -553,6 +553,14 @@ class AgentState(BaseModel):
     completion_rejections: list[str] = Field(default_factory=list)
     completed: bool = False
     complete_reason: str = ""
+    #: Machine-readable termination cause (a ``config.domain_models.StopReason``
+    #: value). ``complete_reason`` stays the operator-facing sentence; this one
+    #: is what scripts and the CLI status line branch on, so a termination whose
+    #: code was never set cannot masquerade as "still not complete" -- the
+    #: 2026-10-21 lock-blocked run printed exactly that with steps=0 and read as
+    #: "the agent did nothing" twice. Empty string on runs written before this
+    #: field existed.
+    stop_reason: str = ""
     final_answer: str = ""
     # One-shot nudge flags for the solve loop (declared: pydantic v2 would
     # raise on dynamic setattr of undeclared names, silently killing the
@@ -651,6 +659,7 @@ class AgentState(BaseModel):
         self.completion_rejections = []
         self.completed = False
         self.complete_reason = ""
+        self.stop_reason = ""
         self.final_answer = ""
         self.llm_usage_prompt_tokens = 0
         self.llm_usage_completion_tokens = 0
@@ -957,8 +966,11 @@ class AgentState(BaseModel):
         self.completion_rejections = self.completion_rejections[-8:]
 
     def mark_complete(self, reason: str, *, final_answer: str = "", evidence_ids: list[str] | None = None) -> None:
+        from vulnclaw.config.domain_models import StopReason
+
         self.completed = True
         self.complete_reason = reason.strip()
+        self.stop_reason = StopReason.COMPLETED.value
         self.final_answer = final_answer.strip() or reason.strip()
         if evidence_ids:
             self.record_verified_claim(reason, evidence_ids)
@@ -1240,4 +1252,5 @@ class AgentState(BaseModel):
             "correction_hints": len(self.correction_hints),
             "pending_questions": len(self.pending_questions),
             "complete_reason": self.complete_reason,
+            "stop_reason": self.stop_reason,
         }

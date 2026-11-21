@@ -679,6 +679,7 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
     refused_verification = wants_verified and is_unsubstantiated(finding)
     if refused_verification:
         wants_verified = False
+
     if wants_verified:
         finding.mark_verified(note=str(args.get("verification_note") or "").strip())
 
