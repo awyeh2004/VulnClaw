@@ -761,6 +761,29 @@ def extract_goal_prohibitions(goal: str) -> list[str]:
     return found
 
 
+def _excerpt_around_match(sentence: str, limit: int = 240) -> str:
+    """The sentence text around the phrase that fired, not its first ``limit`` chars.
+
+    A "sentence" here is punctuation-delimited, and goals are full of newlines and
+    headings with no terminal punctuation. One real goal produced a match paragraph
+    that began ``连接信息：nc challs.crate.nu 32765`` and only reached
+    ``不要重复下载/解压`` further down — truncating from the start showed the
+    operator an unrelated connection line, so the warning read as nonsense.
+    Centering the window on the match is what makes it legible.
+    """
+    flat = " ".join(sentence.split())
+    match = _PROHIBITION_RE.search(flat)
+    if match is None or len(flat) <= limit:
+        return flat[:limit]
+
+    start = match.start() - min(60, match.start())
+    end = min(len(flat), start + limit)
+    # Never cut off the phrase itself: that is the whole point of the excerpt.
+    end = max(end, min(len(flat), match.end()))
+    excerpt = flat[start:end]
+    return ("..." if start else "") + excerpt + ("..." if end < len(flat) else "")
+
+
 def goal_wording_warning(goal: str) -> str:
     """An operator-facing warning when ``goal`` asserts a path is closed.
 
@@ -779,7 +802,7 @@ def goal_wording_warning(goal: str) -> str:
         "    the run will treat it as established fact and stop probing there.",
     ]
     for sentence in prohibitions[:4]:
-        lines.append(f"    - {sentence[:240]}")
+        lines.append(f"    - {_excerpt_around_match(sentence)}")
     if len(prohibitions) > 4:
         lines.append(f"    - ... and {len(prohibitions) - 4} more")
 

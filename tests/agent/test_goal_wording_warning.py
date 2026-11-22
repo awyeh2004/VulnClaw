@@ -156,3 +156,27 @@ def test_warning_lists_at_most_four_sentences():
     warning = goal_wording_warning(goal)
 
     assert "and 5 more" in warning
+
+def test_the_quoted_excerpt_centers_on_the_phrase_that_fired():
+    """A match must be legible, not just present.
+
+    Measured 2026-11-22 on Celldelning: the env section of the goal had no
+    terminal punctuation, so "连接信息：nc challs.crate.nu 32765" and
+    "不要重复下载/解压" landed in one punctuation-delimited chunk. Truncating that
+    chunk from its start quoted the connection line and lit up the operator's
+    terminal with a prohibition that appeared to be about `nc`.
+    """
+    goal = (
+        "连接信息：nc challs.crate.nu 32765\n\n"
+        "## 环境（已就绪，不要重复下载/解压）\n\n"
+        "附件已解开在 dist/，main 是 PIE，libc 是 2.39。" + "填充" * 200
+    )
+
+    warning = goal_wording_warning(goal)
+
+    assert warning
+    assert "不要重复下载" in warning, warning
+    # The unrelated head is allowed to appear if it falls inside the window, but
+    # the quoted line must not *be* the head.
+    quoted = [ln for ln in warning.splitlines() if ln.strip().startswith("- ")]
+    assert quoted and "不要重复" in quoted[0], quoted
