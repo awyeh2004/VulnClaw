@@ -1066,6 +1066,50 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
 
 
 
+#: Phrases that mark a closure as STATIC — declared by reasoning, without a
+#: cited probe. Each one maps to a real miss that buried the actual solution:
+#:   * "nothing calls this pointer"           → missed House of Husk (Celldelning,
+#:     Crate-CTF 2026-11-22: printf's __printf_function_table/__printf_arginfo_table
+#:     ARE the indirect call sites; the largebin attack into them was the solve)
+#:   * "overflow not possible / length limit" → missed that the query bytes overflow
+#:     the bytecode_map itself (ByteDB, same CTF: the mapping table is the buffer)
+#:   * "aspect ratio mismatch"                → missed that masks need no uniform
+#:     scaling (Owls and Dragons II, same CTF)
+#: The nudge is advice, never a block (same stance as goal_wording_warning): a
+#: genuinely probed miss loses nothing to one extra line, a static closure that
+#: would have buried the solve gets one chance to name its falsifying experiment.
+_STATIC_CLOSURE_RE = re.compile(
+    r"(nothing|no code|no other code|nothing ever)\s+(ever\s+)?(calls?|invokes?|dereferences?|reads?)"
+    r"|没有(任何)?(代码)?(会)?调用|无法调用|不会?被调用|无调用点"
+    r"|(is|are)\s+(not |un)?reachable|no (way|path) (to|of) (call|reach|invoke)"
+    r"|无法(到达|调用|执行)|不可达|无从调用"
+    r"|(cannot|can't|无法|不能|no)\s+(be\s+)?(overflowed?|overflow)"
+    r"|overflow (is )?impossible|不(会|可能|能)溢出|无法溢出"
+    r"|impossible|no way to|not possible|不可能|无法实现|行不通"
+    r"|aspect.?ratio|宽高比|长宽比",
+    re.IGNORECASE,
+)
+
+_STATIC_CLOSURE_NUDGE = (
+    "\n⚠️ 此 MISS 的措辞是静态断言（无实证探测）。判死前先跑一次廉价证伪："
+    "① 长输入之后 dump 过全部状态吗（映射表/配置——ByteDB 的查询字节就悄悄覆写了 bytecode_map）？"
+    "② “没有调用”排查过间接分发表吗（printf specifiers/C++ vtable/locale/atexit——House of Husk 是 2.39 无 hook 下的标准答案）？"
+    "③ 模板/蒙版/缩放类结论试过非等比缩放吗？"
+)
+
+
+def _static_closure_nudge(description: str) -> str:
+    """A one-line falsify-first reminder for MISSes worded as static assertions.
+
+    Empty string for descriptions that cite probes or lack static-closure
+    phrasing — most misses are honest and must stay uncluttered.
+    """
+    text = str(description or "")
+    if not text or not _STATIC_CLOSURE_RE.search(text):
+        return ""
+    return _STATIC_CLOSURE_NUDGE
+
+
 def _angle_not_found(bb: "Blackboard", node_id: str) -> str:
     """Error text for hit/miss on an id that is not an angle, listing the real ones.
 
@@ -1255,7 +1299,8 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
                 f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
                 "already closed; coverage stays as recorded"
             )
-        return f"[blackboard] angle {node_id} MISS: {node.description}"
+        nudge = _static_closure_nudge(node.description)
+        return f"[blackboard] angle {node_id} MISS: {node.description}{nudge}"
 
     if tool_name == "blackboard_create_tension":
         desc = args.get("description", "")
