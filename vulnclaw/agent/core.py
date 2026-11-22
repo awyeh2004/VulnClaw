@@ -67,6 +67,28 @@ except Exception:
     RetrieverStatus = None
 
 
+def _request_timeout(config: Any) -> float | None:
+    """Per-request HTTP timeout for non-streamed LLM calls, or None for the SDK default.
+
+    With ``session.disable_streaming`` on, the first-token / inter-chunk stream
+    timeouts never arm, so a stalled gateway blocks the whole turn for the SDK's
+    own default (600 s). ``llm_turn_budget_s`` is only checked *between* retry
+    attempts, so one hung attempt still costs ten minutes before the budget can
+    fire — measured 2026-11-22: three runs froze at 5, 7 and 11 minutes after
+    their last tool result, each having already produced its answer.
+
+    Reusing the turn budget for the single request keeps the two consistent: a
+    request may not outlive the turn it belongs to. A disabled budget (0) leaves
+    the SDK default in place, which is the documented behaviour of that setting.
+    """
+    session = getattr(config, "session", None)
+    try:
+        budget = float(getattr(session, "llm_turn_budget_s", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
 def _chat_playbook_enabled() -> bool:
     """``VULNCLAW_CHAT_PLAYBOOKS=1`` -> single-turn chat also receives prior-run notes.
 
@@ -567,6 +589,7 @@ class AgentCore:
                 self._client = make_openai_client(
                     api_key=token or "placeholder",
                     base_url=base_url,
+                    timeout=_request_timeout(self.config),
                 )
             except ImportError:
                 raise RuntimeError("请安装 openai 包: pip install openai")
