@@ -531,3 +531,64 @@ class TestHardeningRouting:
     def test_explicit_hardening_still_wins_over_ir_vocabulary(self, resolver):
         s = resolver.resolve(SkillQuery(text="安全加固：清除后门并修权限"))
         assert s.primary == "security-hardening"
+
+
+# ── ctf-endgame reachability (2026-11-23) ────────────────────────────
+#
+# Measured at入库时: the skill declared `target_types:[ctf]` / `task_types:[ctf]`
+# and therefore tied with ctf-ai on typed weight (3.0 + 1.8). The tie-break is
+# alphabetical, so EVERY generic CTF query landed on ctf-ai and ctf-endgame was
+# never selected — a skill nobody can reach is not in the library. The fix was
+# four short keyword groups taken from the phrases the four buried cases were
+# actually described with (ezphp's operator wrote 差临门一脚 verbatim).
+
+
+class TestCtfEndgameIsReachable:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # ezphp 2026-10-31, the operator's own words
+            "这个 PHP2shell 已经知道是那个漏洞了，但是就是差临门一脚",
+            # Crate-CTF 2026-11-22: two rounds ended with every angle ruled out
+            "CTF 收尾，所有路径都判死了，比赛快结束",
+            "libc 泄漏已打通，卡在最后一步：没有代码调用堆指针",
+            "stuck at the last step, all paths ruled out",
+        ],
+    )
+    def test_endgame_phrasings_select_the_skill(self, resolver, text):
+        selection = resolver.resolve(
+            SkillQuery.from_input(text, target_type="ctf", task_types=["ctf"])
+        )
+        assert selection.primary == "ctf-endgame", (
+            f"{text!r} → {selection.primary}; ctf-endgame would be unreachable "
+            "for the exact phrasing it was written for"
+        )
+
+    def test_house_of_husk_routes_to_pwn(self, resolver):
+        """Celldelning's official solve: largebin attack into printf's tables."""
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "largebin attack 写 __printf_function_table", target_type="ctf",
+                task_types=["ctf"],
+            )
+        )
+        assert selection.primary == "ctf-pwn"
+
+    def test_generic_ctf_query_is_not_hijacked(self, resolver):
+        """The endgame keywords must not steal ordinary CTF goals."""
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "解这道 CTF 题，flag 格式 cratectf{...}", target_type="ctf",
+                task_types=["ctf"],
+            )
+        )
+        assert selection.primary != "ctf-endgame"
+
+    def test_parenting_a_concrete_pwn_goal_stays_on_ctf_pwn(self, resolver):
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "堆溢出 tcache double free，需要 getshell", target_type="ctf",
+                task_types=["ctf"],
+            )
+        )
+        assert selection.primary == "ctf-pwn"

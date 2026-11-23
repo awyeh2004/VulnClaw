@@ -14,7 +14,7 @@
 | `gcs_platform/` | 西湖论剑 agent API 集成（同上） | — |
 | `web/` | Web UI 后端（FastAPI），复用同一核心 | `app.py` |
 | `mcp/` | MCP 协议集成：内置 server 注册、生命周期、路由 | `lifecycle.py`(2459L) |
-| `skills/` | 知识技能库：59 个 specialized + core 方法论 7 篇 | `dispatcher.py`、`routing.py`、`loader.py` |
+| `skills/` | 知识技能库：60 个 specialized + core 方法论 7 篇 | `dispatcher.py`、`routing.py`、`loader.py` |
 | `config/` | 配置模型与加载（yaml + env） | `schema.py`(1303L)、`settings.py` |
 | `kb/` | 安全知识库（CVE/技巧/工具情报，中文感知检索） | — |
 | `intel/` | 情报模块（移植自 HackBot：CVE、OSINT、拓扑、修复规则） | `remediation_rules.py` |

@@ -133,6 +133,20 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     # 题面往往只写方向名。2026-10-30 实测："强网杯 人工智能 方向：附件 model.pth"
     # 原本落到 intranet-pentest-advanced（keywords:0.21）；补这一短组后 → ctf-ai。
     "人工智能|人工智能安全|ai方向": ["ctf-ai"],
+    # ── ctf-endgame: 收尾"差一步"检查单 (2026-11-23) ────────────────
+    # 实测（11-23）：技能建好后 `target_types:[ctf]` 让它拿到与 ctf-ai 相同的
+    # typed 分（3.0+1.8），但同分按字母序决胜，所有泛 CTF 输入都落到 ctf-ai
+    # ——ctf-endgame 一次都选不上，等于没入库。任一关键词命中给 +0.375（1/4*1.5），
+    # 足以反超同分。措辞取自四个真实案例的现场用语：ezphp 的用户原话是
+    # "差临门一脚"；Crate-CTF 三题都死于"判死/收尾"。
+    "卡在最后一步|差一步|差临门一脚|临门一脚|就差一点": ["ctf-endgame"],
+    "判死|路径判死|所有路径都试过|路径不可行|没有可行路径|无路可走": ["ctf-endgame"],
+    "收尾|比赛快结束|时间不够|来不及了|最后冲刺": ["ctf-endgame"],
+    "stuck at the last step|one more step|endgame|all paths ruled out|no viable path": ["ctf-endgame"],
+    # largebin / House of Husk（Celldelning 2026-11-22 的官方解）：ctf-pwn 原有
+    # 堆组只有 tcache/unsorted bin，命中不了这两个词，而它们正是"有堆写、
+    # 无直接劫持点"时的标准答案。
+    "largebin|large bin|house of husk|house of force|house of spirit|printf_function_table": ["ctf-pwn"],
     # ── Knowledge quiz — 竞赛理论题/知识竞赛应答 ─────────────────────
     "知识竞赛|理论题|理论考核|安全知识|选择题|单选题|多选题|判断题|问答题|知识题": ["knowledge-quiz"],
     "网络安全法|数据安全法|个人信息保护法|密码法|等级保护|关键信息基础设施": ["knowledge-quiz"],
