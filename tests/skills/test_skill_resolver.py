@@ -592,3 +592,63 @@ class TestCtfEndgameIsReachable:
             )
         )
         assert selection.primary == "ctf-pwn"
+
+
+# ── CTF subfield routing (2026-11-23) ────────────────────────────────
+#
+# Measured at入库时: every CTF KB that declares `target_types:[ctf]` +
+# `task_types:[ctf]` scored an identical 4.8 (3.0 + 1.8), and the alphabetical
+# tiebreak handed EVERY generic CTF goal to ctf-ai — a misc challenge's primary
+# reference said "CTF 人工智能安全". Two further gaps fell out of the fix: web and
+# crypto goals whose text names the language/algorithm ("PHP 反序列化",
+# "RSA 已知 n e c") hit no keyword group at all, because the groups only held
+# jargon (弱比较 / ssti注入 / rsa攻击).
+
+
+class TestCtfSubfieldRouting:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "解这道 CTF 题，flag 格式 cratectf{...}",
+            "这是一道 CTF，附件在本题录下，需要拿到 flag",
+        ],
+    )
+    def test_a_generic_ctf_goal_uses_the_declared_fallback(self, resolver, text):
+        """No subfield evidence → the target's fallback, not ctf-ai by alphabet."""
+        selection = resolver.resolve(
+            SkillQuery.from_input(text, target_type="ctf", task_types=["ctf"])
+        )
+        assert selection.primary == "ctf-misc", (
+            f"{text!r} → {selection.primary}; a typed-only tie must resolve to "
+            "the declared ctf fallback"
+        )
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("PHP 反序列化，SSTI 注入链", "ctf-web"),
+            ("SSRF 打内网，xss 回显", "ctf-web"),
+            ("RSA 已知 n e c，求解明文", "ctf-crypto"),
+            ("AES-CBC 密文异或，需要解密", "ctf-crypto"),
+            ("堆溢出 tcache double free，需要 getshell", "ctf-pwn"),
+            ("音频频谱里找 flag", "ctf-misc"),
+        ],
+    )
+    def test_challenge_text_names_the_subfield(self, resolver, text, expected):
+        selection = resolver.resolve(
+            SkillQuery.from_input(text, target_type="ctf", task_types=["ctf"])
+        )
+        assert selection.primary == expected, (
+            f"{text!r} → {selection.primary}, expected {expected}"
+        )
+
+    def test_ai_keywords_still_win_their_own_goal(self, resolver):
+        """The fallback must not swallow goals that name a specific subfield."""
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "强网杯 人工智能 方向：附件 model.pth，请在模型里找到 flag",
+                target_type="ctf",
+                task_types=["ctf"],
+            )
+        )
+        assert selection.primary == "ctf-ai"

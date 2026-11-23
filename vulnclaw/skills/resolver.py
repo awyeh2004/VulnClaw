@@ -318,7 +318,9 @@ class SkillResolver:
                 signals.append(f"alias:{token}")
 
         # Legacy keyword map (bilingual) — reproduces historical winners.
-        legacy = self._legacy_alias_score(profile, combined)
+        legacy = self._legacy_alias_score(
+            profile, combined, is_ctf=normalize_token(query.target_type or "") == "ctf"
+        )
         if legacy > 0:
             signals.append(f"keywords:{round(legacy, 2)}")
 
@@ -329,21 +331,27 @@ class SkillResolver:
             signals.append("broad")
         return _ScoreDetail(score=score, signals=signals, typed_hits=typed_hits)
 
-    def _legacy_alias_score(self, profile: SkillProfile, combined: str) -> float:
+    def _legacy_alias_score(
+        self, profile: SkillProfile, combined: str, *, is_ctf: bool = False
+    ) -> float:
         # The historical bilingual keyword map is the alias catalog: it lets the
         # resolver reproduce the old dispatcher's winners while typed metadata
         # layers on top.
-        from vulnclaw.skills.dispatcher import SKILL_INTENT_MAP
+        from vulnclaw.skills.dispatcher import CTF_INTENT_MAP, SKILL_INTENT_MAP
 
         score = 0.0
         boost = DIRECTORY_BOOST if profile.specialized else 1.0
-        for pattern, skill_names in SKILL_INTENT_MAP.items():
-            if profile.name not in skill_names:
-                continue
-            keywords = pattern.split("|")
-            match_count = sum(1 for kw in keywords if keyword_present(kw, combined))
-            if match_count:
-                score += (match_count / len(keywords)) * boost
+        maps = (SKILL_INTENT_MAP, CTF_INTENT_MAP) if is_ctf else (SKILL_INTENT_MAP,)
+        for intent_map in maps:
+            for pattern, skill_names in intent_map.items():
+                if profile.name not in skill_names:
+                    continue
+                keywords = pattern.split("|")
+                match_count = sum(
+                    1 for kw in keywords if keyword_present(kw, combined)
+                )
+                if match_count:
+                    score += (match_count / len(keywords)) * boost
         return score
 
     def _excluded(self, profile: SkillProfile, combined: str) -> bool:
@@ -363,10 +371,22 @@ class SkillResolver:
         def key(name: str) -> tuple:
             detail = scores[name]
             profile = self._catalog[name]
+            # A typed-only match (target=ctf, task=ctf and nothing else) says
+            # nothing about WHICH subfield the challenge is in: every CTF KB that
+            # declares those two signals scored 4.8, and the alphabetical
+            # tiebreak then handed every generic CTF goal to ctf-ai (measured
+            # 2026-11-23 — a misc challenge received the 人工智能 skill as its
+            # primary reference). When nobody has a specific hit, the target's
+            # declared `fallback` is the honest answer; a keyword hit always
+            # outranks this because score is compared first.
+            generic = not any(
+                s.startswith(("keywords:", "alias:")) for s in detail.signals
+            )
             return (
                 detail.score,
                 0 if not profile.routing.broad else -1,  # narrow beats broad on tie
                 detail.typed_hits,
+                1 if (generic and profile.routing.role == "fallback") else 0,
                 1 if profile.specialized else 0,
                 # Stable, deterministic final tiebreak.
                 -_alpha_rank(name),

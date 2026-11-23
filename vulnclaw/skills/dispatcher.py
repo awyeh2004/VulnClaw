@@ -199,6 +199,28 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "跨平台|用户名搜索|身份关联|github追踪|bilibili追踪": ["osint-recon"],
     # Full/deep recon — trigger osint-recon for comprehensive 4-dimension collection
     "全面侦察|深度侦察|完整信息收集|全面信息收集|深度收集|搜集基础信息": ["osint-recon"],
+    # 地理定位类（2026-11-23 实测）：CTF 的 OSINT 题写的是「这张图拍在哪」，
+    # 原有关键词一个都不命中，于是整类题掉到 ctf-misc fallback，地理定位方法
+    # （唯一性地名→工商库求交→影子定时）根本不会被载入。短组 1 次命中即 0.375。
+    "地理定位|图片定位|照片定位|拍摄地点|在哪里拍的|经纬度|坐标定位|街景识别": ["osint-recon"],
+    "osint|开源情报|地点识别|地标识别|geolocation|where was this taken": ["osint-recon"],
+}
+
+
+#: 只在 CTF 语境生效的关键词表（2026-11-23）。
+#:
+#: 为什么单独一张表：题面常用词是**语言名/算法名**（PHP、RSA、反序列化），而不是
+#: 行话（弱比较、ssti注入、rsa攻击）。把它们放进通用 SKILL_INTENT_MAP 会劫走
+#: 非 CTF 的渗透目标——实测 4 条既有用例从 web-security-advanced /
+#: secknowledge-skill 掉到 ctf-web（`sql注入xss测试`、`SRC 漏洞挖掘…SQL注入 XSS`），
+#: 以及 `PHP 代码审计，找反序列化漏洞` 这种真实 SRC 目标被误判成 CTF。
+#: 因此它们只在 resolver 判定 target_type=ctf 时参与打分。
+CTF_INTENT_MAP: dict[str, list[str]] = {
+    # 1 次命中 = 1/4*1.5 = 0.375，足以盖过 fallback 的同分
+    "反序列化|ssrf|文件上传": ["ctf-web"],
+    "php|命令注入|jwt": ["ctf-web"],
+    "rsa|aes|ecc|des": ["ctf-crypto"],
+    "cipher|密文|加密算法|密码学": ["ctf-crypto"],
 }
 
 

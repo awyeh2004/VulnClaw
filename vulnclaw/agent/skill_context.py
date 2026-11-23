@@ -111,6 +111,14 @@ def _infer_target_type(target: Optional[str], text: str) -> Optional[str]:
         return "desktop"
     if low_target.endswith(_DESKTOP_SUFFIXES):
         return "desktop"
+    # CTF is checked before the URL/IP branches: a CTF goal carries challenge
+    # files and maybe a `nc host port`, and its intent is the competition, not a
+    # pentest of that host. Measured 2026-11-23 — every CTF skill declares
+    # `target_types: [ctf]`, but this function never returned "ctf", so that
+    # metadata was dead code in production: a CTF challenge's primary reference
+    # could only ever be chosen by the keyword map.
+    if _mentions_ctf(blob):
+        return "ctf"
     if target:
         if low_target.startswith(("http://", "https://")):
             return "web"
@@ -121,6 +129,26 @@ def _infer_target_type(target: Optional[str], text: str) -> Optional[str]:
     if "http://" in blob or "https://" in blob:
         return "web"
     return None
+
+
+#: Markers that make a request a CTF one. Deliberately NOT the bare word "flag":
+#: pentest goals say "find the flag" too. These are the phrasings challenge
+#: statements actually use (Crate's "flag 格式" / "附件在本题录下"), the
+#: competition's own name, plus the flag prefix every CTFd instance embeds.
+_CTF_MARKERS = (
+    "ctf",  # ctf / cratectf{ / CTFd / ctf题
+    "夺旗",
+    "flag 格式",
+    "flag格式",
+    "flag format",
+    "题面",
+    "本题录下",
+)
+
+
+def _mentions_ctf(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _CTF_MARKERS)
 
 
 def _looks_like_ip(value: str) -> bool:
