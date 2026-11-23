@@ -652,3 +652,55 @@ class TestCtfSubfieldRouting:
             )
         )
         assert selection.primary == "ctf-ai"
+
+
+# ── CTF skills must not claim non-CTF targets (2026-11-23) ────────────
+#
+# ctf-web declared `target_types: [ctf, web]`, so on ANY web target it earned
+# the full typed weight and won: measured, the real SRC goal
+# "PHP 代码审计，找反序列化漏洞" (target https://t.example.com) resolved to
+# ctf-web instead of web-security-advanced. A CTF knowledge base is the wrong
+# primary reference for a live pentest — it teaches guess-the-flag tricks, not
+# evidence-driven testing. The `ctf` target type still covers real CTF goals
+# because _infer_target_type now detects them from the goal text.
+
+
+class TestCtfSkillsDoNotClaimLiveTargets:
+    def _resolve(self, text, target):
+        from vulnclaw.agent.skill_context import resolve_active_skill_selection
+
+        selection = resolve_active_skill_selection(text, target=target)
+        return selection.primary if selection else None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "PHP 代码审计，找反序列化漏洞",
+            "SSRF 打内网，xss 回显，需要出数据",
+            "这个接口有反序列化，帮我确认能不能 RCE",
+        ],
+    )
+    def test_a_live_web_target_keeps_its_pentest_skill(self, text):
+        primary = self._resolve(text, "https://target.example.com")
+        assert primary != "ctf-web", (
+            f"{text!r} on a live web target → {primary}; a CTF KB must not be "
+            "the primary reference for a real pentest"
+        )
+        assert primary is not None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "CTF 题，flag 格式 cratectf{...}，PHP 反序列化",
+            "题面：弱比较绕过。附件在本题录下。flag 格式 flag{...}",
+            "夺旗赛 web 方向，SSTI 注入",
+        ],
+    )
+    def test_a_ctf_goal_on_a_url_still_reaches_ctf_web(self, text):
+        """CTF intent wins over the URL: the URL is the challenge's address."""
+        primary = self._resolve(text, "https://ctf.example.com")
+        assert primary == "ctf-web", f"{text!r} → {primary}"
+
+    def test_explicit_invocation_is_unaffected(self, resolver):
+        s = resolver.resolve(SkillQuery.from_input("Use VulnClaw skill ctf-web"))
+        assert s.primary == "ctf-web"

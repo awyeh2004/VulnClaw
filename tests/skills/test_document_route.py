@@ -38,9 +38,13 @@ def test_document_goals_route_to_ctf_misc(goal: str):
 def test_a_plain_ctf_goal_does_not_get_the_document_skill():
     """The new keywords must not swallow unrelated goals.
 
-    Note: a goal containing the bare word "flag" routes to ``ctf-web`` (its
-    "常见 flag 位置" section), which predates this change -- so the negative case
-    deliberately avoids that word.
+    Historical note (kept because it explains the shape of this test): a goal
+    containing the bare word "flag" used to route to ``ctf-web`` via its
+    "常见 flag 位置" section. Since 2026-11-23 ``ctf-web`` no longer declares the
+    bare ``web`` target type (it was stealing real SRC goals such as
+    "PHP 代码审计，找反序列化漏洞"), so that fallback no longer fires and this
+    legacy dispatch path resolves to nothing. The assertion stays as-is: the
+    property under test is "not the document skill", whichever skill wins.
     """
     result = SkillDispatcher().dispatch("Solve CTF2 challenge '1.3.5 Http'")
     skill = (result or {}).get("skill") or (result or {}).get("name") or ""

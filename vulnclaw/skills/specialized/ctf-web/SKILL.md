@@ -2,7 +2,12 @@
 name: ctf-web
 description: CTF Web攻击知识库 — PHP弱比较绕过、命令注入空格绕过、eval回显技巧、SSTI注入链、反序列化利用链、PHP代码审计checklist、常见flag位置
 routing:
-  target_types: [ctf, web]
+  # 不含裸 "web"（2026-11-23）：声明 web 会让它在**非 CTF** 的 web 目标上拿满
+  # typed 分，实测真实 SRC 目标"PHP 代码审计，找反序列化漏洞"被它抢为 primary，
+  # 而正确答案是 web-security-advanced。CTF 语境由 _infer_target_type 的 CTF
+  # 分支判定（goal 带 flag 格式 / 本题录下 / ctf 等标记即 target_type=ctf），
+  # 那时 ctf-web 依然拿得到 typed 分；`/ctf-web` 显式调用也不受影响。
+  target_types: [ctf]
   task_types: [ctf]
   technologies: [php]
   vulnerability_classes: [rce, ssti, deserialization, type_juggling, path_traversal]
