@@ -101,3 +101,22 @@ async def test_miss_response_stays_clean_for_probed_wording():
     assert "MISS" in out
     assert "静态断言" not in out
     assert angle.status == NodeStatus.CHALLENGED
+
+def test_nudge_carries_a_variable_change_menu():
+    """From Claude-BugHunter's exploit-completion mechanic 3 (2026-11-26).
+
+    Their N=3 rule is only actionable because it ships a menu of what to change
+    (injection point / encoding / content-type / the skipped hop / confirmation
+    channel). Without the menu "change approach" is advice the model cannot
+    execute; with it, the next probe is one edit away.
+    """
+    nudge = _static_closure_nudge("nothing calls heap pointers")
+
+    for item in ("注入点", "编码与解析器", "content-type", "被跳过的那一跳", "确认通道", "输入长度"):
+        assert item in nudge, f"menu missing {item!r}"
+    assert "一次只改一个变量" in nudge
+
+
+def test_nudge_says_identical_resend_is_not_verification():
+    nudge = _static_closure_nudge("overflow not possible")
+    assert "原样发到第 3 次" in nudge

@@ -1095,6 +1095,10 @@ _STATIC_CLOSURE_NUDGE = (
     "① 长输入之后 dump 过全部状态吗（映射表/配置——ByteDB 的查询字节就悄悄覆写了 bytecode_map）？"
     "② “没有调用”排查过间接分发表吗（printf specifiers/C++ vtable/locale/atexit——House of Husk 是 2.39 无 hook 下的标准答案）？"
     "③ 模板/蒙版/缩放类结论试过非等比缩放吗？"
+    "\n   若要重开这条线，一次只改一个变量（照单挑，别原样重发）："
+    "注入点（header/body/query/path/cookie）·编码与解析器（双 URL/unicode/嵌套/chunked）·"
+    "content-type 与方法（json↔form、PUT/PATCH）·被跳过的那一跳（重定向/握手/解包层）·"
+    "确认通道（带内↔带外）·输入长度（2–3 倍再 10 倍）。同一请求原样发到第 3 次就不是在验证了。"
 )
 
 
