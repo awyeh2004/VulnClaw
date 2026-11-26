@@ -1,6 +1,7 @@
 ---
 name: ctf-ai
-description: CTF 人工智能安全 — 模型文件逆向（.pt/.pth/.onnx/.pkl 结构与 pickle 反序列化风险）、对抗样本（FGSM/PGD，白盒与查询式黑盒）、模型窃取、成员推断、后门检测与触发词、训练数据里找 flag、agent/prompt 注入；给出可执行的 torch/onnxruntime 判据
+description: >-
+  CTF AI 安全打法库 — 模型文件逆向（.pt/.pth/.onnx/.pkl 与 pickle 反序列化风险）、对抗样本（FGSM/PGD）、模型窃取、成员推断、后门与触发词、训练数据里找 flag、agent/prompt 注入。Use when the attachment is a model artifact or the challenge is about an LLM/agent: 有 .pth/.onnx/.pkl 文件; 题面写 AI/机器学习/模型; 目标是让模型出错或吐 flag; 存在 prompt 注入、越权工具调用、agent 沙箱逃逸。
 routing:
   target_types: [ctf]
   task_types: [ctf]

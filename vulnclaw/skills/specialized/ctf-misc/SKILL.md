@@ -4,7 +4,8 @@ routing:
   target_types: [ctf]
   task_types: [ctf]
   role: fallback
-description: CTF杂项知识库 — Python Jail逃逸、Bash Jail逃逸、编码链识别与解码、QR/音频/图像隐写、音频频谱与波形分析（MP3/WAV）、游戏VM逆向、CTFd API导航、Linux提权
+description: >-
+  CTF 杂项打法库 — Python/Bash jail 逃逸、多层编码链、QR/音频/图像隐写、频谱与波形、游戏 VM 逆向、CTFd API、Linux 提权。Use when the challenge is none of web/pwn/crypto/reverse: 附件是一张图/一段音频/一个压缩包/一个 Python 或 Bash 沙箱/一串多层编码; 题面说"misc/杂项/隐写/取证"; OCR 读不出、频谱要看、需要连 CTFd API 或平台交互; 拿到 shell 后要找 flag 文件。
 shared_references:
   - operational-mechanisms.md
   - ctf-mechanisms.md

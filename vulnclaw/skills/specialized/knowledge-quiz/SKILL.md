@@ -1,6 +1,7 @@
 ---
 name: knowledge-quiz
-description: 知识竞赛/理论题应答 — CTF 比赛知识竞赛环节的选择题、多选题、判断题、填空题：先抓题目页读完所有题目，再用模型自身安全知识直接作答并按平台格式输出选项；禁止对答题平台做扫描/注入/爆破；高频考点覆盖网安法/数安法/个保法/密码法/等保2.0/应急响应。适用于知识竞赛、理论考核、安全意识问答环节。
+description: >-
+  竞赛理论题应答 — 选择题/多选/判断/填空，先抓完所有题目再统一作答，用自身安全知识落答案。Use when the competition has a theory/knowledge round: 题目是选择题或多选题; 平台给了 A-H 之类的选项; 题面问法规/标准/概念而不是给附件; 需要批量答多道题并按平台格式提交。
 requires_target: false
 routing:
   task_types: [ctf]

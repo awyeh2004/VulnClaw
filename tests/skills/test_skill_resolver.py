@@ -704,3 +704,47 @@ class TestCtfSkillsDoNotClaimLiveTargets:
     def test_explicit_invocation_is_unaffected(self, resolver):
         s = resolver.resolve(SkillQuery.from_input("Use VulnClaw skill ctf-web"))
         assert s.primary == "ctf-web"
+
+
+# ── exploit-completion routing (2026-11-26) ──────────────────────────
+#
+# Adapted from Claude-BugHunter's exploit-completion skill. Division of labour
+# with ctf-endgame: endgame decides whether a path may be declared dead;
+# exploit-completion is the mechanics of landing ONE attempt's proof. The two
+# must not shadow each other — a goal saying "all paths ruled out" belongs to
+# endgame, a goal saying "it won't land" belongs here.
+
+
+class TestExploitCompletionRouting:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "这个 payload 打不进去，试了很多次都没回显",
+            "我在重复发送同一个请求，一直重试",
+            "怎么判断这个响应算不算成功？有没有对照组",
+        ],
+    )
+    def test_completion_phrasings_select_the_skill(self, resolver, text):
+        selection = resolver.resolve(
+            SkillQuery.from_input(text, target_type="ctf", task_types=["ctf"])
+        )
+        assert selection.primary == "exploit-completion", (
+            f"{text!r} → {selection.primary}"
+        )
+
+    def test_declaring_the_path_dead_still_goes_to_endgame(self, resolver):
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "所有路径都判死了，比赛快结束", target_type="ctf", task_types=["ctf"]
+            )
+        )
+        assert selection.primary == "ctf-endgame"
+
+    def test_a_generic_ctf_goal_still_uses_the_fallback(self, resolver):
+        selection = resolver.resolve(
+            SkillQuery.from_input(
+                "解这道 CTF 题，flag 格式 cratectf{...}", target_type="ctf",
+                task_types=["ctf"],
+            )
+        )
+        assert selection.primary == "ctf-misc"

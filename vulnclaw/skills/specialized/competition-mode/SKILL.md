@@ -1,6 +1,7 @@
 ---
 name: competition-mode
-description: "比赛模式策略 — CTF 竞赛(西湖论剑/DASCTF)下抢分策略 + 应急响应实战赛答题制策略。CTF: 赛前探 LLM 延迟决定单/多 agent、易题优先排序、fail-fast 停滞弃题换题、按平台 flag 格式提交。IR赛: 快速分型→按面排查→答案格式化→逐题提交。适用于限时多人竞赛环境，追求单位时间得分最大化。"
+description: >-
+  竞赛节奏与抢分策略 — 赛前探 LLM 延迟决定并发、按分值排优先级、卡点题的取舍、提交时间窗。Use when the session is a scored competition rather than a single target: 有多道题要排序; 需要在限定时间内决定做哪道/放弃哪道; 计分按提交时刻; 需要控制并发与 token 预算; 比赛进入收尾阶段要决定是否继续投入。
 requires_target: false
 routing:
   task_types: [ctf, triage, audit]

@@ -1,6 +1,7 @@
 ---
 name: ctf-crypto
-description: CTF密码学攻击知识库 — RSA攻击（小指数/共模/Wiener/Coppersmith）、AES攻击（Padding Oracle/ECB字节翻转/GCM nonce重用）、ECC攻击、LFSR/LCG/PRNG攻击、古典密码、LWE格攻击
+description: >-
+  CTF 密码学打法库 — RSA（小指数/共模/Wiener/Coppersmith）、AES（Padding Oracle/CBC 翻转）、ECC/离散对数、LFSR/LCG/MT 随机数预测、格攻击、古典密码。Use when the challenge ships numbers or ciphertext: 给了 n/e/c、给了密文与 IV、给了一段随机数输出要预测、题面写加密算法名或"密码/解密"; 需要从参数反推密钥或种子。
 routing:
   target_types: [ctf, crypto]
   task_types: [ctf, crypto]

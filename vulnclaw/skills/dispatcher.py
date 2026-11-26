@@ -143,6 +143,13 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "判死|路径判死|所有路径都试过|路径不可行|没有可行路径|无路可走": ["ctf-endgame"],
     "收尾|比赛快结束|时间不够|来不及了|最后冲刺": ["ctf-endgame"],
     "stuck at the last step|one more step|endgame|all paths ruled out|no viable path": ["ctf-endgame"],
+    # exploit-completion: 单次尝试的证明机制（2026-11-26，取自 Claude-BugHunter
+    # 同名技能）。与 ctf-endgame 分工：endgame 判"这条路该不该死"，本技能管
+    # "这一次怎么打到证据落地"。措辞取自实际卡点自述。
+    "打不进去|没打进去|发不进去|利用不生效|payload 不生效|没有回显": ["exploit-completion"],
+    "重复发送|一直重试|同一个请求|试了很多次|还在循环": ["exploit-completion"],
+    "预期结果|对照组|基线响应|怎么判断成功|算不算成功": ["exploit-completion"],
+    "follow the redirect|expected outcome|control response|same request again": ["exploit-completion"],
     # largebin / House of Husk（Celldelning 2026-11-22 的官方解）：ctf-pwn 原有
     # 堆组只有 tcache/unsorted bin，命中不了这两个词，而它们正是"有堆写、
     # 无直接劫持点"时的标准答案。

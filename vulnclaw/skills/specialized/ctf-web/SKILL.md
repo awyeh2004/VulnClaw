@@ -1,6 +1,7 @@
 ---
 name: ctf-web
-description: CTF Web攻击知识库 — PHP弱比较绕过、命令注入空格绕过、eval回显技巧、SSTI注入链、反序列化利用链、PHP代码审计checklist、常见flag位置
+description: >-
+  CTF Web 打法库 — PHP 弱比较/类型混淆、命令注入绕过、eval 回显、SSTI 链、反序列化链、代码审计 checklist、常见 flag 位置。Use when the target is an HTTP service or a web source tree inside a CTF: 有 URL、有表单、有 PHP/Node/Java 源码; 题面提到弱比较/绕过/注入/上传/SSRF/XSS/反序列化; 需要在源码里找入口或 flag。
 routing:
   # 不含裸 "web"（2026-11-23）：声明 web 会让它在**非 CTF** 的 web 目标上拿满
   # typed 分，实测真实 SRC 目标"PHP 代码审计，找反序列化漏洞"被它抢为 primary，
