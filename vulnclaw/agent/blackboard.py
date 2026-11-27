@@ -1081,13 +1081,23 @@ def _tool_record_answer(agent: "AgentContext", bb: "Blackboard", args: dict) -> 
 _STATIC_CLOSURE_RE = re.compile(
     r"(nothing|no code|no other code|nothing ever)\s+(ever\s+)?(calls?|invokes?|dereferences?|reads?)"
     r"|没有(任何)?(代码)?(会)?调用|无法调用|不会?被调用|无调用点"
-    r"|(is|are)\s+(not |un)?reachable|no (way|path) (to|of) (call|reach|invoke)"
+    r"|(is|are)\s+(not\s+reachable|unreachable)|no (way|path) (to|of) (call|reach|invoke)"
     r"|无法(到达|调用|执行)|不可达|无从调用"
     r"|(cannot|can't|无法|不能|no)\s+(be\s+)?(overflowed?|overflow)"
-    r"|overflow (is )?impossible|不(会|可能|能)溢出|无法溢出"
-    r"|impossible|no way to|not possible|不可能|无法实现|行不通"
-    r"|aspect.?ratio|宽高比|长宽比",
+    r"|overflow (is )?(impossible|not possible)|不(会|可能|能)溢出|无法溢出"
+    r"|no way to (call|reach|invoke|overflow)|not possible to (call|reach|invoke|overflow)"
+    r"|不可能(调用|到达|溢出|实现)|无法实现(调用|到达|溢出)?"
+    r"|aspect[ _-]?ratio|宽高比|长宽比",
     re.IGNORECASE,
+)
+
+#: Words that mean the description already cites an experiment. The nudge is
+#: meant for pure static closure; firing on "overflow impossible per objdump at
+#: 0x..." trains the model to ignore it.
+_PROBE_EVIDENCE_RE = re.compile(
+    r"(?i)(?:\b(?:objdump|readelf|gdb|disasm|disassembl\w*|ida|ghidra|radare2?|rizin|"
+    r"strace|ltrace|checked|observed|measured|verified)\b"
+    r"|0x[0-9a-f]{4,}|rc\s*=|反汇编|实测|验证|断点|日志|寄存器|返回值)"
 )
 
 _STATIC_CLOSURE_NUDGE = (
@@ -1102,6 +1112,9 @@ _STATIC_CLOSURE_NUDGE = (
 )
 
 
+# The MISS that reaches this function was already recorded as CHALLENGED by
+# miss_angle(); the nudge is advisory and one-shot. It does not reopen the angle
+# or change stall accounting — see the ctf-endgame skill for the exact wording.
 def _static_closure_nudge(description: str) -> str:
     """A one-line falsify-first reminder for MISSes worded as static assertions.
 
@@ -1109,7 +1122,9 @@ def _static_closure_nudge(description: str) -> str:
     phrasing — most misses are honest and must stay uncluttered.
     """
     text = str(description or "")
-    if not text or not _STATIC_CLOSURE_RE.search(text):
+    if not text or _PROBE_EVIDENCE_RE.search(text):
+        return ""
+    if not _STATIC_CLOSURE_RE.search(text):
         return ""
     return _STATIC_CLOSURE_NUDGE
 
@@ -1283,10 +1298,12 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
 
     if tool_name == "blackboard_hit_angle":
         node_id = args.get("node_id", "")
+        existing = bb.get_node(node_id)
+        was_proposed = existing is not None and existing.status == NodeStatus.PROPOSED
         node = bb.hit_angle(node_id)
         if not node:
             return _angle_not_found(bb, node_id)
-        if node.status != NodeStatus.CONFIRMED:
+        if not was_proposed:
             return (
                 f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
                 "already closed; coverage stays as recorded"
@@ -1295,10 +1312,12 @@ async def dispatch_blackboard_tool(agent: "AgentContext", tool_name: str, args: 
 
     if tool_name == "blackboard_miss_angle":
         node_id = args.get("node_id", "")
+        existing = bb.get_node(node_id)
+        was_proposed = existing is not None and existing.status == NodeStatus.PROPOSED
         node = bb.miss_angle(node_id)
         if not node:
             return _angle_not_found(bb, node_id)
-        if node.status != NodeStatus.CHALLENGED:
+        if not was_proposed:
             return (
                 f"[blackboard] angle {node_id} unchanged ({node.status.value}) — "
                 "already closed; coverage stays as recorded"

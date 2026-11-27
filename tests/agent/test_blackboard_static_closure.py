@@ -59,6 +59,19 @@ def test_probed_misses_stay_uncluttered(desc):
     assert _static_closure_nudge(desc) == "", desc
 
 
+@pytest.mark.parametrize(
+    "desc",
+    [
+        "the win function is reachable",
+        "overflow impossible per objdump at 0x13c8",
+        "nothing calls this pointer (verified with objdump)",
+    ],
+)
+def test_positive_or_probed_wording_is_not_a_static_closure(desc):
+    """A positive statement or a cited probe must not trigger the nudge."""
+    assert _static_closure_nudge(desc) == ""
+
+
 def test_nudge_names_the_three_checks():
     nudge = _static_closure_nudge("nothing calls heap pointers")
     assert "dump" in nudge
@@ -101,6 +114,22 @@ async def test_miss_response_stays_clean_for_probed_wording():
     assert "MISS" in out
     assert "静态断言" not in out
     assert angle.status == NodeStatus.CHALLENGED
+
+
+@pytest.mark.asyncio
+async def test_a_second_miss_on_the_same_angle_does_not_repeat_the_nudge():
+    bb, agent = _agent_with_board()
+    angle = bb.create_angle("nothing calls heap pointers")
+    first = await dispatch_blackboard_tool(
+        agent, "blackboard_miss_angle", {"node_id": angle.id}
+    )
+    second = await dispatch_blackboard_tool(
+        agent, "blackboard_miss_angle", {"node_id": angle.id}
+    )
+    assert "静态断言" in first
+    assert "静态断言" not in second
+    assert "unchanged" in second
+
 
 def test_nudge_carries_a_variable_change_menu():
     """From Claude-BugHunter's exploit-completion mechanic 3 (2026-11-26).
