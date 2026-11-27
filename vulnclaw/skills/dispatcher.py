@@ -144,6 +144,32 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "跨平台|用户名搜索|身份关联|github追踪|bilibili追踪": ["osint-recon"],
     # Full/deep recon — trigger osint-recon for comprehensive 4-dimension collection
     "全面侦察|深度侦察|完整信息收集|全面信息收集|深度收集|搜集基础信息": ["osint-recon"],
+    # ── 2026-11-27: 四个缺口域（Host 头 / SSO-ATO / 框架面 / CI-CD）──
+    # 分组保持短：legacy 打分按组内 alternation 总数摊薄，长组会掉分。
+    "host头|host header|host 头|x-forwarded-host|主机头": ["redteam-host-header-detail-pack"],
+    "密码重置投毒|重置链接投毒|重置邮件": ["redteam-host-header-detail-pack"],
+    "saml|sso|单点登录|xsw|签名包装": ["redteam-sso-ato-detail-pack"],
+    "账号接管|account takeover|mfa绕过|mfa 绕过|otp绕过|otp 绕过": [
+        "redteam-sso-ato-detail-pack"
+    ],
+    "spring boot|springboot|actuator|heapdump": ["redteam-framework-detail-pack"],
+    "laravel|ignition|next.js|nextjs|server action": ["redteam-framework-detail-pack"],
+    "asp.net|viewstate|machinekey|prototype pollution": ["redteam-framework-detail-pack"],
+    "ci/cd|cicd|github actions|gitlab ci|jenkins|pull_request_target": [
+        "redteam-cicd-supply-chain-detail-pack"
+    ],
+    "依赖混淆|dependency confusion|terraform state|软件供应链": [
+        "redteam-cicd-supply-chain-detail-pack"
+    ],
+    # ── 2026-11-27 第二批：SPA/影子 API、企业设备、竞态 ─────────────
+    "source map|sourcemap|shadow api|僵尸api|单页应用": ["redteam-spa-shadow-api-detail-pack"],
+    "隐藏接口|js bundle|swagger 泄露|openapi 泄露|源码泄露": [
+        "redteam-spa-shadow-api-detail-pack"
+    ],
+    "vcenter|vsphere|vmware|fortinet|fortigate": ["redteam-enterprise-appliance-detail-pack"],
+    "okta|entra id|m365|azure ad|ssl vpn": ["redteam-enterprise-appliance-detail-pack"],
+    "race condition|竞态|条件竞争|并发竞争": ["redteam-race-condition-detail-pack"],
+    "single-packet|超卖|重复兑换|并发领取": ["redteam-race-condition-detail-pack"],
 }
 
 
