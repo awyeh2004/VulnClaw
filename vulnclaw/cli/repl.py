@@ -713,7 +713,10 @@ def _repl_switch_language(args: str, agent: Any, config: Any) -> Any:
         return config
 
     config.session.language = lang
-    _from_main("save_config")(config)
+    # Persist only the file values: the live config may carry env overrides.
+    disk_config = _from_main("load_config")(apply_env=False)
+    disk_config.session.language = lang
+    _from_main("save_config")(disk_config)
     set_language_pref(lang)
     init_i18n(lang=lang if lang != "auto" else None, config=config)
     rebuild_translations()

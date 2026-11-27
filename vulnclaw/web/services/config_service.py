@@ -43,7 +43,8 @@ def get_public_config() -> ConfigView:
 
 def update_public_config(payload: ConfigUpdateRequest) -> ConfigView:
     """Update a safe subset of config values and return the latest public config."""
-    config = load_config()
+    # File-only: env values are runtime overrides and must not be persisted.
+    config = load_config(apply_env=False)
 
     if payload.provider is not None:
         config = apply_provider_preset(config, payload.provider)

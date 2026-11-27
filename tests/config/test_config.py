@@ -518,3 +518,104 @@ class TestSettingsLoad:
         settings_mod.save_config(config)
         reloaded = settings_mod.load_config()
         assert reloaded.llm.api_keys == ["x1", "x2"]
+
+
+class TestSolveBudgetValidation:
+    """The two per-run solve ceilings: ranges, warnings, and no env persistence."""
+
+    @staticmethod
+    def _isolate(monkeypatch, tmp_path):
+        import vulnclaw.config.settings as settings_mod
+
+        monkeypatch.setattr(settings_mod, "CONFIG_FILE", tmp_path / "config.yaml")
+        monkeypatch.setattr(settings_mod, "CONFIG_DIR", tmp_path)
+        return settings_mod
+
+    def test_negative_token_budget_env_is_ignored_with_a_warning(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", "-1")
+        with caplog.at_level("WARNING"):
+            config = settings_mod.load_config()
+        assert config.session.solve_max_model_tokens == 6_000_000
+        assert "out-of-range" in caplog.text
+
+    def test_invalid_token_budget_env_is_ignored_with_a_warning(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", "6M")
+        with caplog.at_level("WARNING"):
+            config = settings_mod.load_config()
+        assert config.session.solve_max_model_tokens == 6_000_000
+        assert "expected an integer" in caplog.text
+
+    def test_zero_token_budget_is_still_a_valid_disable(self, monkeypatch, tmp_path):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", "0")
+        config = settings_mod.load_config()
+        assert config.session.solve_max_model_tokens == 0
+
+    def test_positive_values_apply(self, monkeypatch, tmp_path):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", "12345")
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_STEPS", "7")
+        config = settings_mod.load_config()
+        assert config.session.solve_max_model_tokens == 12345
+        assert config.session.solve_max_steps == 7
+
+    def test_negative_steps_env_is_ignored_with_a_warning(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_STEPS", "-5")
+        with caplog.at_level("WARNING"):
+            config = settings_mod.load_config()
+        assert config.session.solve_max_steps == 240
+        assert "out-of-range" in caplog.text
+
+    def test_invalid_values_in_the_config_file_are_repaired(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import yaml
+
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"session": {"solve_max_model_tokens": -1, "solve_max_steps": 0}}
+            ),
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING"):
+            config = settings_mod.load_config()
+        assert config.session.solve_max_model_tokens == 6_000_000
+        assert config.session.solve_max_steps == 240
+        assert "invalid" in caplog.text
+
+    def test_set_config_value_rejects_an_invalid_budget(self, monkeypatch, tmp_path):
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        with pytest.raises(ValueError, match="solve_max_model_tokens"):
+            settings_mod.set_config_value("session.solve_max_model_tokens", "-1")
+        assert not (tmp_path / "config.yaml").exists()
+
+    def test_env_overrides_are_not_persisted_by_config_set(self, monkeypatch, tmp_path):
+        import yaml
+
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", "-1")
+        monkeypatch.setenv("VULNCLAW_SESSION_SOLVE_MAX_STEPS", "-5")
+        settings_mod.set_config_value("llm.model", "x")
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert raw["session"]["solve_max_model_tokens"] == 6_000_000
+        assert raw["session"]["solve_max_steps"] == 240
+
+    def test_explicit_budget_set_still_persists(self, monkeypatch, tmp_path):
+        import yaml
+
+        settings_mod = self._isolate(monkeypatch, tmp_path)
+        settings_mod.set_config_value("session.solve_max_model_tokens", "123")
+        settings_mod.set_config_value("session.solve_max_steps", "9")
+        raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert raw["session"]["solve_max_model_tokens"] == 123
+        assert raw["session"]["solve_max_steps"] == 9

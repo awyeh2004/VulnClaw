@@ -642,6 +642,8 @@ vulnclaw config set session.show_thinking false  # hide thinking process
 | `VULNCLAW_LLM_BASE_URL` | API base URL |
 | `VULNCLAW_LLM_MODEL` | Model name |
 | `VULNCLAW_SESSION_MAX_ROUNDS` | Max rounds |
+| `VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS` | Per-solve LLM token cap (0 disables) |
+| `VULNCLAW_SESSION_SOLVE_MAX_STEPS` | Per-solve turn cap (>= 1) |
 | `VULNCLAW_SESSION_STALE_ROUNDS_THRESHOLD` | Dead-loop threshold |
 | `VULNCLAW_SESSION_REASONING_STATE_ENABLED` | Structured reasoning toggle |
 | `VULNCLAW_SESSION_REFLEXION_ENABLED` | Adaptive reflection toggle |

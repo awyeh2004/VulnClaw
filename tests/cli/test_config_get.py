@@ -46,6 +46,18 @@ def test_config_get_reads_an_extra_section_created_by_set(monkeypatch, tmp_path)
     assert "mcp.servers.chrome-devtools.enabled = False" in result.output
 
 
+def test_config_set_rejects_an_invalid_budget(monkeypatch, tmp_path):
+    """An explicit invalid budget must not reach disk (or raise a traceback)."""
+    _isolate_config(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app, ["config", "set", "session.solve_max_model_tokens", "-1"]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert not (tmp_path / "config.yaml").exists()
+
+
 def test_setting_a_new_extra_section_does_not_fail_open(monkeypatch, tmp_path):
     # ``bool("false")`` is True and ``_config_enabled`` reads the mapping entry as
     # ``bool(entry.get("enabled"))`` — so a stringly-typed write into a freshly

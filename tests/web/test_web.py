@@ -53,7 +53,7 @@ class TestWebServices:
 
         saved = VulnClawConfig()
 
-        monkeypatch.setattr(config_service, "load_config", lambda: saved)
+        monkeypatch.setattr(config_service, "load_config", lambda **kwargs: saved)
         monkeypatch.setattr(config_service, "save_config", lambda cfg: None)
 
         view = config_service.update_public_config(
@@ -901,7 +901,7 @@ class TestWebServices:
 
         saved = VulnClawConfig()
 
-        monkeypatch.setattr(config_service, "load_config", lambda: saved)
+        monkeypatch.setattr(config_service, "load_config", lambda **kwargs: saved)
         monkeypatch.setattr(config_service, "save_config", lambda cfg: None)
 
         view = config_service.update_public_config(
@@ -928,7 +928,7 @@ class TestWebServices:
 
         saved = VulnClawConfig()
         saved.session.language = "zh"
-        monkeypatch.setattr(config_service, "load_config", lambda: saved)
+        monkeypatch.setattr(config_service, "load_config", lambda **kwargs: saved)
         monkeypatch.setattr(config_service, "save_config", lambda cfg: None)
 
         # Current value is surfaced to the dashboard.
@@ -946,7 +946,7 @@ class TestWebServices:
 
         saved = VulnClawConfig()
         saved.session.language = "fr"  # not one of auto/zh/en
-        monkeypatch.setattr(config_service, "load_config", lambda: saved)
+        monkeypatch.setattr(config_service, "load_config", lambda **kwargs: saved)
 
         assert config_service.get_public_config().language == "auto"
 

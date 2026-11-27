@@ -1838,9 +1838,12 @@ def _effective_block_actions(state: TuiState) -> tuple[str, ...]:
 
 
 def _persist_scope_state(state: TuiState, config: Any) -> None:
+    from vulnclaw.config.settings import load_config as _lc
     from vulnclaw.config.settings import save_config as _sc
     try:
-        sc = config.session
+        # File-only: the passed config may carry process env overrides.
+        disk = _lc(apply_env=False)
+        sc = disk.session
         sc.tui_scope_only_host = state.only_host
         sc.tui_scope_only_port = state.only_port
         sc.tui_scope_only_path = state.only_path
@@ -1850,7 +1853,7 @@ def _persist_scope_state(state: TuiState, config: Any) -> None:
         sc.tui_scope_block_actions = ",".join(state.block_actions)
         sc.tui_scope_mode = state.mode
         sc.tui_scope_resume = state.resume
-        _sc(config)
+        _sc(disk)
     except AttributeError:
         logger.warning("Failed to persist scope state", exc_info=True)
 
@@ -2712,7 +2715,7 @@ def _run_config_panel() -> None:
     from vulnclaw.cli.config_panel_render import render_panel
 
     screen = Console()
-    model = ConfigPanelModel(load_config())
+    model = ConfigPanelModel(load_config(apply_env=False))
     outcome: dict[str, str] = {}
     # Rows reserved for panel border, title, footer hint, and optional status lines.
     _VIEWPORT_CHROME = 6
@@ -2905,7 +2908,7 @@ def _read_server_name(screen: Console) -> str:
 def _run_config_wizard() -> None:
     """Run the interactive config editor (prompt-chain fallback)."""
     screen = Console()
-    config = load_config()
+    config = load_config(apply_env=False)
 
     try:
         while True:

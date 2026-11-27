@@ -618,6 +618,8 @@ vulnclaw config set session.show_thinking false # 隐藏推理过程
 | `VULNCLAW_LLM_BASE_URL` | API 基础 URL |
 | `VULNCLAW_LLM_MODEL` | 模型名称 |
 | `VULNCLAW_SESSION_MAX_ROUNDS` | 最大轮数 |
+| `VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS` | 单次 solve 的 LLM token 上限（0 表示关闭） |
+| `VULNCLAW_SESSION_SOLVE_MAX_STEPS` | 单次 solve 的最大轮数（≥1） |
 | `VULNCLAW_SESSION_STALE_ROUNDS_THRESHOLD` | 死循环检测阈值 |
 | `VULNCLAW_SESSION_REASONING_STATE_ENABLED` | 结构化推理状态开关 |
 | `VULNCLAW_SESSION_REFLEXION_ENABLED` | 自适应反思引擎开关 |

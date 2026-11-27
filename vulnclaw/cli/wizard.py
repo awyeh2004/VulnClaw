@@ -423,7 +423,8 @@ def run_setup_wizard(
     result = WizardResult()
 
     try:
-        config = load_config()
+        # File-only: the wizard edits config.yaml, not the process's env overrides.
+        config = load_config(apply_env=False)
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         TOOLS_DIR.mkdir(parents=True, exist_ok=True)
         status = detect_setup_status(config)

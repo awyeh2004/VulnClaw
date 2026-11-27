@@ -44,7 +44,14 @@ def config_set(
     value: str = typer.Argument(..., help="Config value"),
 ) -> None:
     """Set a config value."""
-    set_config_value(key, value)
+    try:
+        set_config_value(key, value)
+    except KeyError:
+        err_console.print(f"[red]未知配置键：{key}[/red]")
+        raise typer.Exit(2) from None
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from None
     console.print(
         f"[+] Set {key} = {'***' if 'key' in key.lower() or 'pass' in key.lower() else value}"
     )
@@ -123,7 +130,7 @@ def config_provider(
         console.print("    Tip: use [bold]custom[/] for a manual base_url and model.")
         raise typer.Exit(1)
 
-    config = _from_main("load_config")()
+    config = _from_main("load_config")(apply_env=False)
     config = apply_provider_preset(config, name.lower())
     save_config(config)
 
@@ -201,7 +208,7 @@ def config_model(
     m = _MODEL_MAP[provider]
     model = m["deep"] if deep else m["shallow"]
 
-    config = _from_main("load_config")()
+    config = _from_main("load_config")(apply_env=False)
     llm = config.llm
     prev_provider = llm.provider
     llm.provider = provider

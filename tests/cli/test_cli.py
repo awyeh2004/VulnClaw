@@ -1862,6 +1862,12 @@ class TestClassicReplSlashPalette:
             class session:
                 language = "auto"
 
+        class _DiskCfg:
+            class session:
+                language = "auto"
+
+        monkeypatch.setattr(main_mod, "load_config", lambda *a, **k: _DiskCfg())
+
         class _Agent:
             def __init__(self):
                 self.applied = None
@@ -1876,7 +1882,8 @@ class TestClassicReplSlashPalette:
 
         assert cfg.session.language == "en"
         assert out is cfg
-        assert saved["cfg"] is cfg
+        assert saved["cfg"].session.language == "en"
+        assert saved["cfg"] is not cfg
         assert agent.applied is cfg
 
     def test_repl_prompt_localizes_chinese_phase_when_language_is_english(self, monkeypatch):

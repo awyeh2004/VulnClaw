@@ -19,6 +19,7 @@ from .schema import (
     MCPServerConfig,
     MCPServersConfig,
     MCPTransportConfig,
+    SessionConfig,
     VulnClawConfig,
 )
 
@@ -189,10 +190,64 @@ def config_switch(config: Any, section: str, name: str) -> Optional[bool]:
     return bool(value)
 
 
-def load_config() -> VulnClawConfig:
+def _env_int(name: str, *, minimum: int) -> int | None:
+    """Parse an integer env override, warning instead of silently ignoring it.
+
+    ``suppress(ValueError)`` was hiding two distinct operator errors: a typo
+    (``6M``) left the default in place with no diagnostic, and a negative value
+    disabled the token cap entirely. Both are now reported.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r (expected an integer)", name, raw)
+        return None
+    if value < minimum:
+        logger.warning(
+            "Ignoring out-of-range %s=%r (minimum is %d)", name, raw, minimum
+        )
+        return None
+    return value
+
+
+def _validate_session_limits(config: VulnClawConfig, *, strict: bool) -> None:
+    """Keep solve budgets inside their documented ranges.
+
+    ``solve_max_model_tokens``: 0 is the documented "disabled" value, negatives
+    are invalid. ``solve_max_steps``: the loop needs at least one turn.
+    ``strict`` is used by ``set_config_value`` so an invalid ``config set`` never
+    reaches disk; the non-strict path repairs a hand-edited file in memory.
+    """
+    limits = (
+        ("solve_max_model_tokens", 0),
+        ("solve_max_steps", 1),
+    )
+    for field_name, minimum in limits:
+        value = getattr(config.session, field_name)
+        if value >= minimum:
+            continue
+        default = SessionConfig.model_fields[field_name].default
+        message = (
+            f"session.{field_name}={value!r} is invalid; it must be >= {minimum} "
+            f"(the default is {default!r})"
+        )
+        if strict:
+            raise ValueError(message)
+        logger.warning("%s; using the default instead", message)
+        setattr(config.session, field_name, default)
+
+
+def load_config(*, apply_env: bool = True) -> VulnClawConfig:
     """Load configuration from file + env vars.
 
     Priority: env vars > config file > built-in defaults.
+
+    ``apply_env=False`` is for read-modify-write paths (``config set``, the
+    config editors). Environment variables are runtime overrides; persisting
+    them back into ``config.yaml`` makes a per-run value sticky.
     """
     ensure_dirs()
 
@@ -214,7 +269,12 @@ def load_config() -> VulnClawConfig:
             logger.warning("Failed to parse config file %s: %s", CONFIG_FILE, e)
 
     # Overlay from env vars
-    config = _overlay_env(config)
+    if apply_env:
+        config = _overlay_env(config)
+
+    # Repair an invalid hand-edited value before any consumer sees it. This is
+    # also the defense-in-depth for callers that bypass the env helper.
+    _validate_session_limits(config, strict=False)
 
     return config
 
@@ -305,7 +365,8 @@ def set_config_value(key: str, value: str) -> None:
     (``mcp.servers.chrome-devtools.enabled``) and ``extra="allow"`` sections
     (``platforms.ctf2.enabled`` — the section may not exist yet and is created).
     """
-    config = load_config()
+    # File-only: env values are runtime overrides and must not be written back.
+    config = load_config(apply_env=False)
     parts = key.split(".")
     obj: Any = config
     for part in parts[:-1]:
@@ -354,6 +415,9 @@ def set_config_value(key: str, value: str) -> None:
                 else:
                     value = list(value)
         setattr(obj, field_name, value)
+    # Refuse to persist an invalid budget; config set is an explicit operator
+    # action, so an error is clearer than silently clamping it.
+    _validate_session_limits(config, strict=True)
     save_config(config)
 
 
@@ -432,7 +496,8 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
 
     Supported env vars (prefix VULNCLAW_):
         LLM:        API_KEY, BASE_URL, MODEL, PROVIDER, MAX_TOKENS, MAX_CONTEXT_TOKENS, TEMPERATURE
-        Session:    OUTPUT_DIR, AUTO_SAVE, REPORT_FORMAT, MAX_ROUNDS, SHOW_THINKING
+        Session:    OUTPUT_DIR, AUTO_SAVE, REPORT_FORMAT, MAX_ROUNDS, SHOW_THINKING,
+                    SOLVE_MAX_MODEL_TOKENS (0 disables the cap), SOLVE_MAX_STEPS (>=1)
         Safety:     PYTHON_EXECUTE_ENABLED, PYTHON_EXECUTE_RESTRICTED, PYTHON_EXECUTE_MODE,
                     PYTHON_EXECUTE_MAX_LINES, PYTHON_EXECUTE_SHOW_WARNING,
                     PYTHON_EXECUTE_MAX_OUTPUT_CHARS, PYTHON_EXECUTE_AUDIT_ENABLED
@@ -499,6 +564,14 @@ def _overlay_env(config: VulnClawConfig) -> VulnClawConfig:
     if v := os.environ.get("VULNCLAW_SESSION_MAX_ROUNDS"):
         with suppress(ValueError):
             config.session.max_rounds = int(v)
+    # Per-run ceilings for `solve`. Without these the only way to give a long
+    # run more headroom was editing the user's config.yaml, which then applies to
+    # every later run; a run killed at the token cap reports "exhausted" rather
+    # than a solving failure, so a competition drive needs to tune it per run.
+    if (tokens := _env_int("VULNCLAW_SESSION_SOLVE_MAX_MODEL_TOKENS", minimum=0)) is not None:
+        config.session.solve_max_model_tokens = tokens
+    if (steps := _env_int("VULNCLAW_SESSION_SOLVE_MAX_STEPS", minimum=1)) is not None:
+        config.session.solve_max_steps = steps
     if v := os.environ.get("VULNCLAW_SESSION_SHOW_THINKING"):
         config.session.show_thinking = v.lower() in ("1", "true", "yes", "on")
     if v := os.environ.get("VULNCLAW_SESSION_CONTEXT_AUTO_COMPACT"):
