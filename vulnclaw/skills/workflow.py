@@ -103,8 +103,8 @@ class SkillWorkflow(BaseModel):
                 )
         lines.append(
             "Before FINAL: every phase must be closed (HIT or MISS) and the "
-            "confirmed findings bound to evidence; a phase left undecided is "
-            "not a completed workflow."
+            "confirmed findings bound to evidence or carrying a poc_verification "
+            "record; a phase left undecided is not a completed workflow."
         )
         return lines
 

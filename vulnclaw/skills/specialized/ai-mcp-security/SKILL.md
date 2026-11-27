@@ -38,10 +38,10 @@ workflow:
       evidence: [leaked data, outbound request]
       exit: Leak confirmed or rejected
     - id: report
-      goal: Bind evidence and report only confirmed findings
-      tools: [traffic_bind_evidence, report_finding, blackboard_set_lock]
-      evidence: [bound request, reproduction log]
-      exit: report_finding accepted and completion gate passed
+      goal: Bind evidence or run the system PoC, then report only confirmed findings
+      tools: [traffic_bind_evidence, verify_finding, report_finding, blackboard_set_lock]
+      evidence: [bound request, PoC verification, reproduction log]
+      exit: report_finding accepted with bound evidence or poc_verification
   gates:
     - after: inventory
       require: [blackboard_summary]

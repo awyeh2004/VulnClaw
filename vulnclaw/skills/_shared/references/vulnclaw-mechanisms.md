@@ -70,7 +70,8 @@ workflow:
 - 每个 phase 对应一个 `blackboard_create_angle`，开始前建 ANGLE，结束用
   `blackboard_hit_angle` / `blackboard_miss_angle` 关闭；
 - 当前 phase 未决时不要开下一个；`gates` 里的工具先跑再进入下一阶段；
-- FINAL 前所有 phase 必须关闭，confirmed finding 必须绑定 evidence；
+- FINAL 前所有 phase 必须关闭，confirmed finding 必须绑定 evidence，或已有
+  `poc_verification`（`verify_finding` 跑系统生成 PoC 的 exit 0 记录）；
 - workflow 只是阶段表，不替代 `blackboard_summary` / `blackboard_review`；
 - CTF 的 fail-fast 优先于 workflow 阶段表，不要因为阶段没走完而卡死。
 
@@ -185,6 +186,7 @@ workflow:
 | `traffic_view` | 查看请求/响应 | 保留原始报文 |
 | `traffic_repeat` | 重放请求 | 过 host/path/port 约束；不要改范围 |
 | `traffic_bind_evidence` | 把报文绑定到 finding | `report_finding` 后用它补证据 |
+| `verify_finding` | 跑系统生成的 PoC 并记录 exit code | 需操作员逐次批准；exit 0 才写 `poc_verification` |
 | `evidence_list/view/search` | 证据查询 | 报告只引用已绑定 evidence |
 
 ### 13.3 上下文 / 经验
