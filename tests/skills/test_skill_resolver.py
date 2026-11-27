@@ -748,3 +748,25 @@ class TestExploitCompletionRouting:
             )
         )
         assert selection.primary == "ctf-misc"
+
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "只有一次 OCR 结果，能不能提交？",
+            "这条算不算解出？证据强度够吗",
+        ],
+    )
+    def test_evidence_strength_phrasings_also_select_the_skill(self, resolver, text):
+        """Mechanic 4 (evidence ladder) is asked about at submit time.
+
+        The check is invoked with the language people actually use right before
+        reporting ("only one decode — can I submit?"), not with the word
+        "exploit".
+        """
+        selection = resolver.resolve(
+            SkillQuery.from_input(text, target_type="ctf", task_types=["ctf"])
+        )
+        assert selection.primary == "exploit-completion", (
+            f"{text!r} → {selection.primary}"
+        )

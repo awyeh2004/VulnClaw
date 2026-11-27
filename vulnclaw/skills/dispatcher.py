@@ -150,6 +150,8 @@ SKILL_INTENT_MAP: dict[str, list[str]] = {
     "重复发送|一直重试|同一个请求|试了很多次|还在循环": ["exploit-completion"],
     "预期结果|对照组|基线响应|怎么判断成功|算不算成功": ["exploit-completion"],
     "follow the redirect|expected outcome|control response|same request again": ["exploit-completion"],
+    # 机制 4：提交前的证据定级（单次解码只是候选）
+    "只有一次|单次解码|再确认一次|第二条确认|证据强度|能不能提交|这条算不算解出": ["exploit-completion"],
     # largebin / House of Husk（Celldelning 2026-11-22 的官方解）：ctf-pwn 原有
     # 堆组只有 tcache/unsorted bin，命中不了这两个词，而它们正是"有堆写、
     # 无直接劫持点"时的标准答案。
