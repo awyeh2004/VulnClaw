@@ -1,4 +1,66 @@
 <details open>
+<summary><strong>Unreleased</strong> — verify_finding：系统生成 PoC 的 exit code 成为第三种 verified 依据</summary>
+
+- **新增工具 `verify_finding`** — 按 finding 的 `endpoint`（相对路径用 session target 拼成完整 URL）用 `PoCGenerator` 生成 PoC，交 `VerifierExecutor.execute_poc` 执行（沿用 `ExecutionGate` kind=poc 的逐次操作员审批，超时 5–120s）。exit 0 且 `parse_result` 判为 `vuln_confirmed` / `sensitive_data` / `security_bypass` 时，写入 `PoCVerification`（target / exit_code / result / poc_sha256 / output_sha256 / excerpt / 时间）并自动 `mark_verified`；失败或审批拒绝只返回原因，不改状态。
+- **防自证** — PoC 源码不由模型提供（工具只接收 finding 引用与 timeout），`report_finding` 不接受 `poc_verification` 参数，子 agent 调用直接拒绝。`report_finding(verified=true)` 的第三种锚点读取该记录（`exit_code == 0`），且 PoC 记录本身可替代文字 substantiation。
+- **接入面** — 工具注册进 `_ALWAYS_KEEP_TOOLS`（不被任务 bundle 裁掉），dispatch 走 `asyncio.to_thread` 避免阻塞事件循环；executor/verifier 角色 glob 加 `verify_finding`（实际子 agent 仍被工具内检查拒绝）。
+- **接入 workflow** — `web-pentest` / `ai-mcp-security` / `electron-desktop-audit` 的 `report` 阶段工具链加入 `verify_finding`，evidence 列加 `PoC verification`，exit 改为「bound evidence or poc_verification」；`workflow.py` 的 FINAL 提示与 `_shared/references/vulnclaw-mechanisms.md` 的工具表同步。
+- **测试** — 新增 `tests/agent/test_verify_finding_tool.py`（10 例：确认通过 / 失败不升级 / 审批拒绝 / 未找到 / 非 HTTP / 相对路径拼接 / 子 agent 拒绝 / schema 注册 / PoC 记录满足报告门 / report_finding 不能伪造记录）与 `tests/skills/test_workflow_verification_integration.py`（报告阶段含 `verify_finding`、全部 workflow 解析无警告、显式调用渲染 `poc_verification`、工具注册/always-keep、dispatch 可达）；`tests/skills` 783 passed。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — report_finding 的 verified 接入 task-done 门：必须有已绑定报文或 code_location</summary>
+
+- **改（中·防自证）：`report_finding(verified=true)` 不再接受纯文字依据** — 旧规则只要 evidence/vuln_type/remediation 任一就采纳，模型可以用自己写的 "error-based proof" 把 finding 升进 verified/SARIF。新规则（`agent/builtin_tools.py`）：HTTP/运行时 finding 必须已有 `traffic_bind_evidence` 绑定的内容寻址快照；SAST/审计 finding 可用 `code_location`；两者都没有则按候选记录并返回下一步（traffic_list → traffic_bind_evidence → 再报 verified）。
+- **配套** — `traffic_bind_evidence` 成功后在返回值里明确提示"仍未验证，如需升级请再 `report_finding(verified=true)`"；工具 schema 的 verified 描述同步更新；`AGENTS.md` §五 记录为有意设计。
+- **收紧（中·防乱绑）：绑定报文必须与 finding 的位置对得上** — `EvidenceRef` 新增可选 `url`/`method`（旧 ref 反序列化为 None，序列化时空值不落盘）；`traffic_bind_evidence` 从快照填入；`report_finding` 校验绑定报文与 `endpoint`/`method` 一致。兼容规则：集合端点允许 `/api/users` 由 `/api/users/42` 证明；`{id}`/`<id>`/`*` 等模板端点跳过匹配；旧 ref 无位置信息按"未知"处理，不追溯误拒。
+- **测试** — 新增 `tests/agent/test_report_finding_verification_gate.py`（10 例：无证据降级 / 已绑定报文升级 / code_location 保留 / 纯文字+绑定仍拒 / 绑定提示 / 错端点拒绝 / 方法不符拒绝 / 集合端点子路径放行 / 模板跳过 / 旧 ref 兼容）；`tests/traffic/test_a2_end_to_end.py` 的升级用例改为先绑定再升级，并断言绑定快照的 url/method；`tests/agent + tests/traffic + tests/skills` **2732 passed**，`tests/report + tests/config` **268 passed**。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — skills 静态 lint 接入 CI；修 competition-mode 整段 frontmatter 静默失效</summary>
+
+- **新增 `scripts/lint_skills.py`** — 72 个 skill 全量检查：E001 YAML 不可解析、E002 name 与目录/文件名不一致、E003 描述缺失或超 1024 字、E004 重名、E005 正文超 48k（提示词上限）、E006 目录技能无可用 reference、E007 声明的 shared reference 不存在、E008 routing 未知 token、E009 高置信密钥、E010 `requires_target` 非布尔、E011 workflow 引用未知工具、E012 workflow 解析警告（重复 phase / 悬空 gate / 未知 mode）；W001 被静默丢弃的 shared 声明、W002 本机路径、W003 正文 >20k。默认警告不失败，`--strict` 可升级。
+- **E011 的口径** — 允许内置工具 + 显式声明的外部工具（目前仅 `fetch`）；新增默认 MCP 工具进 workflow 时需同步 `EXTERNAL_TOOL_NAMES`，避免把拼写错误混进阶段表。
+- **修（中·静默失效）：`competition-mode` 的 frontmatter 整段解析失败** — description 未加引号且含 `CTF: `，`yaml.safe_load` 报 "mapping values are not allowed here"，loader 静默回退为空 description，并连带丢掉 `requires_target: false` 与 `routing`。加引号后恢复；lint 的 E001 即为此类问题设。
+- **CI** — test job 在 Execution boundary check 后新增 `python scripts/lint_skills.py`。
+- **测试** — `tests/skills/test_lint_skills.py` 扩到 15 例（新增 workflow 未知工具 / 解析警告 / 已知工具放行）；`tests/skills` 786 passed。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — skills 第二批：SPA/影子 API、企业边界设备、竞态条件（+3 pack / +3 reference）</summary>
+
+- **新增 3 个 primary skill** — `redteam-spa-shadow-api-detail-pack`（bundle 取端点、source map 还原、Swagger/OpenAPI 泄露、shadow/zombie API、.git/.DS_Store）、`redteam-enterprise-appliance-detail-pack`（Cisco/Fortinet/Citrix/Palo Alto/Ivanti/SonicWall/F5、vCenter/Workspace ONE、M365/Entra、Okta）、`redteam-race-condition-detail-pack`（相同副本/部分构造两种 primitive、HTTP/2 单包、TOCTOU、限速绕过）。各带 1 份自有 reference。
+- **企业设备纪律** — 默认口令/喷洒每用户 ≤1–2 次；Citrix Bleed、PAN-OS 命令注入、Fortinet RCE 等破坏性探针只做可达性检测，未经明确许可不执行；命中即停并脱敏。
+- **路由** — 新增短关键词组（source map/shadow api/单页应用、vcenter/fortinet/okta/entra、race condition/竞态/单包/重复兑换）。实测未抢既有路由：接口测试 → redteam-api-detail-pack、CSRF/JWT/SQLi 均保持原 winner。
+- **测试** — `test_redteam_gap_packs.py` 扩到 7 组 + 2 条非回归；`tests/skills` 764 passed。
+
+</details>
+
+---
+
+<details open>
+<summary><strong>Unreleased</strong> — skills 补四个缺口域：Host 头 / SSO-ATO / 框架面 / CI-CD（含深水区 reference 与路由锚点）</summary>
+
+- **新增 4 个 primary skill** — `redteam-host-header-detail-pack`、`redteam-sso-ato-detail-pack`、`redteam-framework-detail-pack`、`redteam-cicd-supply-chain-detail-pack`。每个带 1 份自有 reference（Host 头五类子机制；SAML XSW/注释注入/签名剥离 + OAuth/OIDC + JWT + MFA + 11 条 ATO 链；Spring Boot/Laravel/Next.js/Node/ASP.NET 面；Jenkins/Actions/GitLab/Terraform/依赖链），并声明 `upstream-source.md` + `vulnclaw-mechanisms.md` 共享参考。内容按中文授权测试口径重写，保留可复现命令、假阳性排除与证据门槛。
+- **路由** — `SKILL_INTENT_MAP` 增加短关键词组（host头/密码重置投毒、saml/sso/xsw、springboot/actuator/laravel/nextjs、cicd/jenkins/pull_request_target 等）。四个 pack 使用 `role: primary`：resolver 只从非 support 里选 primary，而 `format_selection_context` 只列出 primary 的 reference 文件；若设为 support，深水区文档不会出现在提示词的 reference 清单里。
+- **不抢通用路由** — 未声明宽泛 `vulnerability_classes`（SSO pack 仅 `oauth`/`jwt`）。实测 SQL注入 → web-security-advanced、JWT 解码 → crypto-toolkit、XSS → rapid-checklist、越权 → web-security-advanced 均未变。
+- **测试** — 新增 `tests/skills/test_redteam_gap_packs.py`：四组 query 必须解析到对应 pack 为 primary、自有 reference 可加载且在提示词中可见，另加两条非回归（JWT 解码、通用 SQLi）；`tests/skills` 730 passed。
+
+</details>
+
+---
+
+<details open>
 <summary><strong>Unreleased</strong> — CTF2 列题对不可读分区容错（过期 session 不再让整张题单死掉）</summary>
 
 - **修（中·实测坐实）：`ctf2.list_corpora` 让可选的 competition/stage 分区把整个列题打断** — 2026-10-15 现场日志：用户粘贴靶机 URL 直接解题（无平台 ref），agent 用 `platform_list` 找 ref 时，agent 作用域 PAT 对 `competition:read` 本就 403，回退的浏览器 session JWT 又已过期（401 TOKEN_EXPIRED），异常从 `list_corpora` 冒出去 → **整张题单返回空**；而 `platform_submit` 必须带 challenge ref，于是"flag 已经拿到却提交不了"。修法：competitions/stages 作为可选分区 try/except 跳过（practice 场次仍用 PAT 正常列出，实测过期 session 下仍返回 7 个练习场），与 `list_challenges` 已有的"跳过读不到的集合"容错一致。**遗留说明**：练习场内部的题目枚举仍是 session-only（Open API 无对应路由，实测 `/practice/<pid>/challenges/` 走 `_session_request`），所以过期 session 下"列出练习场"可、"展开场内题目"仍不可——要完整走 ref 流程需刷新浏览器 session，或改用 MCP 面的 `ctf2_*` 工具（Bearer PAT，不依赖 session）。

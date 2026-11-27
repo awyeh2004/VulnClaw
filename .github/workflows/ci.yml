@@ -50,6 +50,9 @@ jobs:
       - name: Execution boundary check
         run: python scripts/verify_execution_boundary.py
 
+      - name: Skill lint
+        run: python scripts/lint_skills.py
+
       - name: Frontend typecheck
         working-directory: frontend
         run: npx tsc -b
