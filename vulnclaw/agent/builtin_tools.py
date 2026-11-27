@@ -543,6 +543,10 @@ def execute_traffic_bind_tool(agent: AgentContext, args: dict[str, Any]) -> str:
 #: verb: four live runs produced 4/4 answer cards and zero bindable findings, and
 #: the whole evidence chain was unreachable from the model's seat.
 REPORT_FINDING_TOOL_NAME = "report_finding"
+#: Runs the system-generated PoC for a recorded finding. The PoC source is not
+#: model-supplied: it comes from ``PoCGenerator`` and goes through the same
+#: per-request ExecutionGate as any other code execution.
+VERIFY_FINDING_TOOL_NAME = "verify_finding"
 
 _SEVERITIES = ("Critical", "High", "Medium", "Low", "Info")
 #: Most severe first, so the rank has to count DOWN the tuple: rank 5 = Critical.
@@ -575,6 +579,61 @@ def _finding_title_key(title: str) -> str:
 
     cleaned = re.sub(rf"^{re.escape(UNVERIFIED_TITLE_PREFIX)}\s*", "", str(title or ""))
     return " ".join(cleaned.split()).casefold()
+
+
+#: Endpoint shapes that cannot be compared literally: the real capture will
+#: carry a concrete id where the finding names a template.
+_LOCATION_TEMPLATE_CHARS = frozenset("{}<>*$")
+
+
+def _ref_matches_finding_location(
+    ref: Any, endpoint: str | None, method: str | None
+) -> bool:
+    """Whether a bound capture can serve as proof for this endpoint/method.
+
+    Refs bound before ``url``/``method`` existed carry neither: that is
+    "location unknown", not a mismatch, so they keep the old presence-only
+    behaviour. Template endpoints (``/users/{id}``) are skipped too — rejecting
+    them would block true findings whose capture necessarily differs from the
+    template.
+    """
+    ref_method = str(getattr(ref, "method", "") or "").upper()
+    if method and ref_method and str(method).upper() != ref_method:
+        return False
+
+    ref_url = str(getattr(ref, "url", "") or "")
+    if not endpoint or not ref_url:
+        return True
+    if any(char in endpoint for char in _LOCATION_TEMPLATE_CHARS):
+        return True
+
+    endpoint_has_host = "://" in endpoint
+    endpoint_url = (
+        endpoint
+        if endpoint_has_host
+        else f"http://placeholder{endpoint if endpoint.startswith('/') else '/' + endpoint}"
+    )
+    request_url = (
+        ref_url if "://" in ref_url else f"http://placeholder{ref_url if ref_url.startswith('/') else '/' + ref_url}"
+    )
+
+    wanted = urlparse(endpoint_url)
+    actual = urlparse(request_url)
+    if (
+        endpoint_has_host
+        and wanted.netloc
+        and actual.netloc
+        and wanted.netloc.lower() != actual.netloc.lower()
+    ):
+        return False
+
+    wanted_path = (wanted.path or "/").rstrip("/") or "/"
+    actual_path = (actual.path or "/").rstrip("/") or "/"
+    if actual_path == wanted_path:
+        return True
+    # A finding that names the collection (/api/users) is legitimately proven by
+    # the concrete object request (/api/users/42) — the common IDOR shape.
+    return actual_path.startswith(wanted_path.rstrip("/") + "/")
 
 
 def _finding_for_report(session: Any, finding: Any, raw_title: str) -> Any | None:
@@ -672,11 +731,59 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
     )
 
     # "verified" gates the report/SARIF output, so it has to rest on something a
-    # reader can check. Ask for the same substantiating signal the intake
-    # quarantine asks for; otherwise record the honest shape (a candidate) and
-    # say why, so the model can re-report with the missing field in one turn.
+    # reader can check. Three anchors are accepted:
+    #   1. an HTTP capture bound by ``traffic_bind_evidence`` (a code-created,
+    #      content-addressed artifact), or
+    #   2. ``code_location`` for SAST/audit findings, which have no traffic to bind, or
+    #   3. a ``poc_verification`` record written by ``verify_finding`` after the
+    #      system-generated PoC exited 0 with a confirmation classification.
+    # Without one of them the report stays a candidate. This is the task-done
+    # gate: prose ("I exploited it") cannot promote a finding; running a real
+    # capture or a real PoC can, and both are code-verified.
+    #
+    # The legacy substantiation check is kept on top for the non-PoC paths: a
+    # bare "title + verified" must not pass the report/SARIF gate the intake
+    # quarantine guards. A PoC record IS substantiation on its own.
     wants_verified = bool(args.get("verified", False))
-    refused_verification = wants_verified and is_unsubstantiated(finding)
+    existing = _finding_for_report(session, finding, title)
+    source = existing if existing is not None else finding
+    refs = list(getattr(source, "evidence_refs", None) or [])
+    bound_evidence = len(refs)
+    has_code_location = bool(
+        finding.code_location or getattr(source, "code_location", None)
+    )
+    poc_artifact = getattr(source, "poc_verification", None)
+    has_poc_artifact = bool(
+        poc_artifact is not None and int(getattr(poc_artifact, "exit_code", -1)) == 0
+    )
+    missing_artifact = (
+        bound_evidence == 0 and not has_code_location and not has_poc_artifact
+    )
+
+    # A bound capture is only proof if it is the affected request. Refs bound
+    # before url/method existed carry no location (treated as unknown), and
+    # template endpoints are skipped inside the matcher — both keep old runs
+    # promotable instead of failing them retroactively.
+    endpoint = finding.endpoint or getattr(source, "endpoint", None)
+    method = finding.method or getattr(source, "method", None)
+    located_refs = [
+        ref
+        for ref in refs
+        if getattr(ref, "url", None) or getattr(ref, "method", None)
+    ]
+    location_mismatch = bool(
+        (endpoint or method)
+        and located_refs
+        and not any(
+            _ref_matches_finding_location(ref, endpoint, method) for ref in located_refs
+        )
+    )
+
+    refused_verification = wants_verified and (
+        (is_unsubstantiated(finding) and not has_poc_artifact)
+        or missing_artifact
+        or location_mismatch
+    )
     if refused_verification:
         wants_verified = False
     if wants_verified:
@@ -691,12 +798,24 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
         """The refusal note belongs in the answer only when it actually took effect."""
         if not refused_verification or recorded_as_verified:
             return ""
+        if missing_artifact:
+            return (
+                "  ⚠️ verified=true 未被采纳：该 finding 还没有可核查的报文证据"
+                "（traffic_bind_evidence）、code_location，也没有 PoC 验证记录（verify_finding）。"
+                "先 traffic_list 取 request_id → traffic_bind_evidence 绑定，"
+                "或调用 verify_finding 跑系统生成 PoC，再 report_finding(verified=true) 升级。"
+            )
+        if location_mismatch:
+            return (
+                "  ⚠️ verified=true 未被采纳：已绑定报文与 finding 的 endpoint/method 不一致"
+                "（绑定的是别的请求）。请绑定受影响端点、或同一路径下具体对象请求的报文；"
+                "若 endpoint 写的是模板（如 /users/{id}），改成实际请求路径。"
+            )
         return (
             "  ⚠️ verified=true 未被采纳：报告里没有任何可核查的依据（evidence / vuln_type / "
             "remediation 至少给一项），已按候选记录。补上依据后再报一次即可升级。"
         )
 
-    existing = _finding_for_report(session, finding, title)
     if existing is not None:
         filled = _merge_report_into(existing, finding)
         if wants_verified and not existing.verified:
@@ -740,6 +859,131 @@ def execute_report_finding_tool(agent: AgentContext, args: dict[str, Any]) -> st
         f"{next_step}{_tail(finding.verified)}"
     )
 
+
+def _finding_by_reference(session: Any, reference: Any) -> Any | None:
+    """Resolve a finding by finding_id or normalised title; never an answer card."""
+    from vulnclaw.config.domain_models import is_answer_card
+
+    ref = str(reference or "").strip()
+    if not ref:
+        return None
+    for finding in getattr(session, "findings", None) or []:
+        if is_answer_card(finding):
+            continue
+        if ref == str(getattr(finding, "finding_id", "") or ""):
+            return finding
+        if _finding_title_key(ref) == _finding_title_key(getattr(finding, "title", "")):
+            return finding
+    return None
+
+
+def execute_verify_finding_tool(agent: Any, args: dict[str, Any]) -> str:
+    """Run the system-generated PoC and record the code-executed result.
+
+    The model chooses WHICH finding to verify, never the PoC source: the code is
+    generated from the finding and executed through ``VerifierExecutor``, which
+    requires per-request operator approval via the ExecutionGate. This keeps the
+    new artifact honest — printing ``[CONFIRMED]`` from model-written code would
+    otherwise be a self-certification bypass.
+    """
+    from datetime import datetime
+
+    from vulnclaw.config.domain_models import PoCVerification
+    from vulnclaw.report.verifier import (
+        PoCGenerator,
+        VerificationResult,
+        VerifierExecutor,
+    )
+
+    if is_subagent(agent):
+        return (
+            "[verify_finding] 拒绝：子 agent 不能运行 PoC。由主 agent 在操作员批准下执行；"
+            "子 agent 可把候选与复现步骤交回主 agent。"
+        )
+
+    session = getattr(agent, "session_state", None)
+    if session is None or not hasattr(session, "findings"):
+        return "[verify_finding] 拒绝：当前会话不支持读取 findings"
+
+    finding = _finding_by_reference(session, args.get("finding"))
+    if finding is None:
+        return "[verify_finding] 拒绝：未找到 finding（用标题或 finding_id）"
+
+    session_target = str(getattr(session, "target", "") or "").strip()
+    endpoint = str(getattr(finding, "endpoint", "") or "").strip()
+    if endpoint.startswith("/") and session_target.startswith(("http://", "https://")):
+        # Findings often record just the affected path; the session target is the
+        # authority for scheme/host. The generated PoC needs a full URL.
+        target = urljoin(session_target.rstrip("/") + "/", endpoint.lstrip("/"))
+    else:
+        target = endpoint or session_target
+    if not target.startswith(("http://", "https://")):
+        return (
+            "[verify_finding] 拒绝：该 finding 没有 HTTP 目标，系统 PoC 验证不适用；"
+            "请用 traffic_bind_evidence 绑定报文，或为代码审计类 finding 提供 code_location。"
+        )
+
+    poc_code = PoCGenerator.generate_poc(finding=finding, target=target, baseline_len=0)
+
+    constraints = getattr(session, "task_constraints", None)
+    if constraints is not None:
+        from vulnclaw.agent.constraint_policy import validate_tool_action
+
+        violation = validate_tool_action(
+            "fetch", {"url": target, "method": "POST"}, constraints
+        ) or validate_tool_action(
+            "python_execute", {"code": poc_code}, constraints
+        )
+        if violation is not None:
+            return f"[verify_finding] constraint_violation: {violation}"
+
+    try:
+        timeout = int(args.get("timeout", 30) or 30)
+    except (TypeError, ValueError):
+        timeout = 30
+    timeout = max(5, min(timeout, 120))
+
+    returncode, output = VerifierExecutor.execute_poc(poc_code, timeout=timeout)
+    result = VerifierExecutor.parse_result(output, returncode)
+    excerpt = output[:500]
+
+    if result == VerificationResult.APPROVAL_REQUIRED:
+        return (
+            "[verify_finding] 未执行：PoC 需要操作员逐次批准，当前没有可用的批准通道。"
+            "请让操作员在交互终端/TUI 批准后重试。"
+        )
+
+    confirmed = returncode == 0 and result in (
+        VerificationResult.VULN_CONFIRMED,
+        VerificationResult.SENSITIVE_DATA_EXPOSED,
+        VerificationResult.SECURITY_BYPASS,
+    )
+    if not confirmed:
+        return (
+            f"[verify_finding] 未通过：exit={returncode}, result={result.value}。\n"
+            f"输出摘要：{excerpt}\n"
+            "finding 保持原状态；可补绑报文（traffic_bind_evidence）或修正 finding 后重试。"
+        )
+
+    finding.poc_verification = PoCVerification(
+        target=target,
+        exit_code=returncode,
+        result=result.value,
+        poc_sha256=hashlib.sha256(poc_code.encode("utf-8")).hexdigest(),
+        output_sha256=hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        output_excerpt=excerpt,
+        executed_at=datetime.now().isoformat(),
+        timeout_seconds=timeout,
+    )
+    if not getattr(finding, "verified", False):
+        finding.mark_verified(
+            note=f"PoC verified: {result.value} (exit 0)", evidence_level="L4"
+        )
+    return (
+        f"[verify_finding] 通过：exit=0, result={result.value}；"
+        "已记录 PoC 证据并把 finding 标记为已验证。\n"
+        f"输出摘要：{excerpt}"
+    )
 
 
 def enforce_traffic_repeat_constraints(
@@ -1092,6 +1336,11 @@ async def execute_mcp_tool(agent: AgentContext, tool_name: str, args: dict[str, 
         # Pure in-process state write (session findings), no I/O: the model's
         # only way to create the finding that traffic_bind_evidence binds proof to.
         return execute_report_finding_tool(agent, args)
+
+    if tool_name == VERIFY_FINDING_TOOL_NAME:
+        # System-generated PoC. VerifierExecutor is synchronous (subprocess +
+        # a blocking approval prompt), so keep it off the event loop.
+        return await asyncio.to_thread(execute_verify_finding_tool, agent, args)
 
     if tool_name in {"evidence_list", "evidence_view", "evidence_search"}:
         return execute_evidence_tool(agent, tool_name, args)
@@ -1497,6 +1746,7 @@ _ALWAYS_KEEP_TOOLS = frozenset({
     "evidence_view",
     "evidence_search",
     "python_execute",
+    "verify_finding",
     "crypto_decode",
     "shell_command",
     "blackboard_summary",
@@ -2194,8 +2444,10 @@ def build_openai_tools(
                             "type": "boolean",
                             "description": (
                                 "你是否已实弹验证该漏洞（默认 false=仅候选项）。"
-                                "只有报告里给出可核查依据（evidence/vuln_type/remediation 至少一项）"
-                                "才会被采纳，否则按候选记录并在返回值里说明。"
+                                "采纳条件：已有 traffic_bind_evidence 绑定的真实报文"
+                                "（且报文需与 endpoint/method 一致，模板路径除外），"
+                                "或该 finding 带 code_location（代码审计类）。"
+                                "只有文字依据不够，会按候选记录并在返回值里说明。"
                             ),
                             "default": False,
                         },
@@ -2205,6 +2457,38 @@ def build_openai_tools(
                         },
                     },
                     "required": ["title"],
+                },
+            },
+        }
+    )
+
+    append_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": VERIFY_FINDING_TOOL_NAME,
+                "description": (
+                    "Run the system-generated PoC for a recorded finding and record the "
+                    "code-executed result. The model chooses the finding, not the PoC "
+                    "source; execution requires per-request operator approval. On exit 0 "
+                    "plus a confirmation classification the finding is marked verified "
+                    "and gets a poc_verification artifact that report_finding(verified=true) "
+                    "accepts. Use this for HTTP findings when binding a capture is not "
+                    "possible; the finding must already exist via report_finding."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "finding": {
+                            "type": "string",
+                            "description": "finding 标题或 finding_id（先用 report_finding 记录）",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "PoC 超时秒数（5–120，默认 30）",
+                        },
+                    },
+                    "required": ["finding"],
                 },
             },
         }

@@ -172,6 +172,15 @@ class EvidenceRef(BaseModel):
     captured_at: Optional[str] = Field(
         default=None, description="Capture timestamp carried over from the traffic index"
     )
+    # ── request location (http_capture) ──────────────────────────────────
+    # Lets the task-done gate check that the bound capture actually belongs to
+    # the finding's endpoint/method instead of accepting any capture. Defaulted
+    # so refs bound before these fields deserialize unchanged (and are then
+    # treated as "location unknown", never as a mismatch).
+    url: Optional[str] = Field(default=None, description="Captured request URL (http_capture)")
+    method: Optional[str] = Field(
+        default=None, description="Captured request method, upper-case (http_capture)"
+    )
     # ── provenance a reader needs to interpret the pair ──────────────────
     role: EvidenceRole = Field(
         default=DEFAULT_EVIDENCE_ROLE, description="baseline | proof | verification | supporting"
@@ -197,6 +206,10 @@ class EvidenceRef(BaseModel):
             data.pop("captured_at", None)
             if data.get("role") == DEFAULT_EVIDENCE_ROLE:
                 data.pop("role", None)
+        if not data.get("url"):
+            data.pop("url", None)
+        if not data.get("method"):
+            data.pop("method", None)
         if not data.get("note"):
             data.pop("note", None)
         return data
@@ -416,6 +429,25 @@ def is_unsubstantiated(finding: Any) -> bool:
     )
 
 
+class PoCVerification(BaseModel):
+    """Code-executed PoC result recorded by the ``verify_finding`` tool.
+
+    Deliberately NOT part of ``report_finding``'s accepted arguments: the model
+    may ask the verifier to run, but only the executor's exit code and parsed
+    result can create this record. ``exit_code == 0`` plus a confirmation
+    classification is what the report gate treats as a verification artifact.
+    """
+
+    target: str = Field(default="", description="URL the PoC contacted")
+    exit_code: int = Field(description="PoC process exit code")
+    result: str = Field(description="Verifier classification (vuln_confirmed / ...)")
+    poc_sha256: str = Field(description="SHA-256 of the generated PoC source")
+    output_sha256: str = Field(description="SHA-256 of the captured output")
+    output_excerpt: str = Field(default="", description="First 500 chars of output")
+    executed_at: str = Field(description="Execution timestamp")
+    timeout_seconds: int = Field(default=30, description="Execution timeout in seconds")
+
+
 class VulnerabilityFinding(BaseModel):
     """A single vulnerability finding."""
 
@@ -454,6 +486,11 @@ class VulnerabilityFinding(BaseModel):
         description="Owning sub-agent task identity when this finding was merged",
     )
     poc_script: Optional[str] = Field(default=None, description="Generated PoC script path")
+    # ★ Code-executed PoC artifact. Only verify_finding writes it; report_finding
+    # does not accept it from model args, so it cannot be self-stamped.
+    poc_verification: Optional[PoCVerification] = Field(
+        default=None, description="System-generated PoC run that confirmed this finding"
+    )
     evidence_level: str = Field(default="L1", description="L1-L4 evidence strength")
     lifecycle_status: str = Field(
         default="candidate",

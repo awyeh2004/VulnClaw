@@ -323,5 +323,10 @@ def traffic_bind_evidence_text(
     lines.append(
         "  快照独立于抓包日志，清理流量不会影响这些证据；报告会按此顺序内联原始报文。"
     )
+    if not getattr(finding, "verified", False):
+        lines.append(
+            "  该 finding 仍未验证；绑定报文是可核查证据，如需标记为已验证，"
+            "请再调用 report_finding(..., verified=true)。"
+        )
     return "\n".join(lines)
 

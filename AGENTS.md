@@ -134,6 +134,19 @@ ctf2_user_delete_practice_id_challenges_challengeid_environment
 - `_path_progress_fingerprint`（`solver.py`）：**故意不把"新证据"计入进展**。
   `tests/agent/test_path_stall_guard.py` 开头记录了实测依据：一个跑偏的 run 每小时
   产出 53 次工具结果、大量证据却毫无进展。想改之前先读那个测试的注释。
+- `report_finding(verified=true)`（`agent/builtin_tools.py`）：**verified 必须有代码造出来的
+  可核查物**——HTTP/运行时 finding 需先经 `traffic_bind_evidence` 绑定真实报文（内容寻址快照），
+  或带 `code_location`（SAST/审计类无流量可绑）。纯文字依据只记候选。这是同一条原则在报告面的
+  延伸：模型不能靠自述把 finding 升进报告；`tests/agent/test_report_finding_verification_gate.py`
+  钉住了顺序与反例。绑定后模型需再报一次 `verified=true` 才升级，属于有意的两步。
+- 绑定报文还要**对得上位置**：`EvidenceRef` 记录 capture 的 `url`/`method`，`verified` 会校验
+  与 finding 的 `endpoint`/`method` 一致（集合端点允许 `/api/users` → `/api/users/42`，
+  `{id}` 这类模板跳过匹配，旧 ref 无位置信息视为未知）。绑定一条无关的 200 不能当过验证。
+- `verify_finding`（`agent/builtin_tools.py`）：第三种锚点——系统用 `PoCGenerator` 生成 PoC，
+  经 `VerifierExecutor` 执行，走同一个 `ExecutionGate` 的逐次操作员审批（kind=poc）。exit 0 且
+  `parse_result` 判为确认时写 `poc_verification`（含 target/exit_code/result/源码与输出 sha256）
+  并自动标记 verified。PoC 源码不由模型提供，`report_finding` 也不接受 `poc_verification` 参数，
+  子 agent 直接拒绝——这三条一起堵住「自己打印 [CONFIRMED] 自证」。
 
 stall guard 的动作是**交还给人**（`waiting for user input`），不是硬杀。CLI 只显示
 `⊘ 未达成`，容易误判成"崩了"，实际是它在等一个提示。

@@ -151,6 +151,8 @@ def bind_finding_evidence(
                 snapshot.response_sha256 if snapshot.response_present else snapshot.request_sha256
             ),
             captured_at=snapshot.captured_at or None,
+            url=snapshot.url or None,
+            method=(snapshot.method or "").upper() or None,
             role=role,
             note=note,
         )

@@ -149,9 +149,12 @@ class TestAgentCanActuallyDriveIt:
     def test_agent_reported_finding_is_bindable_in_one_pass(self, tmp_path):
         """The full loop through the agent-facing tools, no manual wiring.
 
-        report_finding -> traffic_list (get the request_id) -> traffic_bind_evidence
-        -> report. Nothing here calls the library directly except to read the
-        report back, which is the point: this is what a live run does.
+        report_finding (candidate) -> traffic_list (get the request_id) ->
+        traffic_bind_evidence -> report_finding(verified=true) -> report.
+        Nothing here calls the library directly except to read the report back,
+        which is the point: this is what a live run does. The second
+        ``report_finding`` is the task-done gate: the verified flag only becomes
+        reachable after a real capture is bound.
         """
         from vulnclaw.agent.builtin_tools import execute_report_finding_tool, execute_traffic_bind_tool
         from vulnclaw.traffic.tools import dispatch_traffic_tool
@@ -163,7 +166,8 @@ class TestAgentCanActuallyDriveIt:
         traffic = TrafficStore(run_dir / "evidence" / "traffic")
         proof = _capture(traffic, INJECTED_URL)
 
-        # 1. The model reports the vulnerability (the missing verb).
+        # 1. The model reports the vulnerability (the missing verb). It cannot be
+        # verified yet: no capture is bound, so the honest shape is a candidate.
         out = execute_report_finding_tool(
             agent,
             {
@@ -177,6 +181,7 @@ class TestAgentCanActuallyDriveIt:
         )
         assert "SQL Injection in /user" in out
         assert len(session.findings) == 1, f"finding not recorded: {out}"
+        assert session.findings[0].verified is False, out
 
         # 2. The model lists captures and sees the request_id (it does not guess).
         listing = dispatch_traffic_tool(traffic, "traffic_list", {})
@@ -191,6 +196,24 @@ class TestAgentCanActuallyDriveIt:
             },
         )
         assert "绑定" in bind_out and "拒绝" not in bind_out, bind_out
+
+        bound = session.findings[0].evidence_refs[-1]
+        assert bound.url == INJECTED_URL, bound
+        assert bound.method == "GET", bound
+
+        # 3b. Now that a code-created artifact exists, the verified re-report is
+        # accepted and promotes the same finding (no duplicate).
+        promote_out = execute_report_finding_tool(
+            agent,
+            {
+                "title": "SQL Injection in /user",
+                "vuln_type": "SQLi",
+                "evidence": "error-based proof bound from the captured request",
+                "verified": True,
+            },
+        )
+        assert "已更新" in promote_out, promote_out
+        assert session.findings[0].verified is True, promote_out
 
         # 4. The report carries the proof, with no manual binding anywhere.
         report_path = generate_report(
@@ -242,6 +265,20 @@ class TestReportFindingRecordsTheTruth:
         session = SessionState(target="http://app.test")
         return session, _AgentStub(session, run_dir)
 
+    @staticmethod
+    def _bind_unit_evidence(session):
+        """Attach the artifact the task-done gate requires before promotion.
+
+        The end-to-end test above covers the real traffic_bind_evidence path;
+        these tests are about re-report identity and dedup, so a unit-level ref
+        is enough to satisfy the gate.
+        """
+        from vulnclaw.config.domain_models import EvidenceRef
+
+        session.findings[0].evidence_refs.append(
+            EvidenceRef(kind="http_capture", request_id="req-1", snapshot_id="snap-1")
+        )
+
     def test_a_bare_verified_report_is_recorded_as_a_candidate(self):
         from vulnclaw.agent.builtin_tools import execute_report_finding_tool
 
@@ -263,6 +300,7 @@ class TestReportFindingRecordsTheTruth:
 
         session, agent = self._agent()
         execute_report_finding_tool(agent, dict(self.CANDIDATE))
+        self._bind_unit_evidence(session)
 
         upgraded = dict(self.CANDIDATE)
         upgraded["verified"] = True
@@ -282,6 +320,7 @@ class TestReportFindingRecordsTheTruth:
 
         session, agent = self._agent()
         execute_report_finding_tool(agent, dict(self.CANDIDATE))
+        self._bind_unit_evidence(session)
 
         # The second report cites a URL, so its generated finding_id changes from
         # "SQLi" to "SQLi_/user?id=1": identity cannot rest on the id alone.
@@ -299,6 +338,7 @@ class TestReportFindingRecordsTheTruth:
         run_dir = _run_layout(tmp_path)
         session, agent = self._agent(run_dir)
         execute_report_finding_tool(agent, dict(self.CANDIDATE))
+        self._bind_unit_evidence(session)
         upgraded = dict(self.CANDIDATE)
         upgraded["verified"] = True
         upgraded["evidence"] = "error-based proof"
@@ -338,6 +378,8 @@ class TestReportFindingRecordsTheTruth:
         from vulnclaw.agent.builtin_tools import execute_report_finding_tool
 
         session, agent = self._agent()
+        execute_report_finding_tool(agent, dict(self.CANDIDATE))
+        self._bind_unit_evidence(session)
         upgraded = dict(self.CANDIDATE)
         upgraded["verified"] = True
         upgraded["evidence"] = "error-based proof"
