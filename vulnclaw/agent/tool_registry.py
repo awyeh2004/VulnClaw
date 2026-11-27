@@ -33,6 +33,12 @@ from pathlib import Path
 #: Legacy bundle location, probed last. See the module docstring.
 _LEGACY_TOOLS_DIR = Path(r"E:\vulnclaw\tools")
 
+#: steghide ships as a Windows bundle but the same entry must work on POSIX.
+#: ``_detect`` treats each tuple as a path under a tools root; the first match
+#: wins. Kept in one place so the capability card and the "not available" block
+#: cannot disagree about how the tool is discovered.
+_STEGHIDE_BUNDLE = (("steghide", "steghide.exe"), ("steghide", "steghide"))
+
 
 def _repo_ir_tools_dir() -> Path:
     """``<repo>/.ir-tools`` when running from a checkout, else a harmless miss.
@@ -95,6 +101,7 @@ def _local_app_data() -> Path:
 # Detection keys, tried in this order by :func:`_detect`:
 #   "abs_candidates"  callables returning absolute paths (env-derived)
 #   "module"          importable Python module
+#   "rel_candidates"  alternative path tuples under each tools root
 #   "rel"             path parts under each tools root
 #   "rel_glob"        glob under each tools root
 #   "which"           command name on PATH
@@ -217,6 +224,30 @@ _REGISTRY: list[dict] = [
                  'Embed <cover.jpg> -e <file> -p <pw> <out.jpg> (嵌入)',
         "when": "JPEG 的 F5 隐写提取/嵌入。**别的工具都解不了 F5**：steghide/outguess 是不同算法。"
                 "先试默认密码 abc123，不行再用 run 里的口令线索",
+    },
+    {
+        "name": "steghide (JPEG/BMP/WAV/AU 隐写)",
+        "rel_candidates": _STEGHIDE_BUNDLE,
+        "which": "steghide",
+        "cmd": '"{path}" extract -sf <carrier> -p <passphrase> -xf <out> -f',
+        # Why this entry exists (2026-11-23): Crate-CTF 的 Owls and Dragons II 最后一步就是
+        # `steghide extract -p <卡片揭示的短语>` ——技能正文写着"用 steghide"，而本机没有二进制、
+        # 也没有工具卡，于是"知道答案也做不完"。安装来源与坑见下面 usage/when。
+        #
+        # 二进制来源（2026-11-23 实测）：官方 0.5.1 win32 包（内含 cygwin DLL 依赖）
+        # 从 Chocolatey 的 nupkg 里取：`https://packages.chocolatey.org/steghide.0.5.1.nupkg`
+        # （community.chocolatey.org 的 /api/v2/package/... 返回 403，走 packages.* 才好）。
+        # SourceForge 全 403、PyPI 无包、MSYS2 无此包——别再试这三条。
+        "keywords": ["steghide", "隐写", "stego", "jpg", "jpeg", "bmp", "wav", "au", "口令", "passphrase"],
+        "usage": 'extract -sf <jpg|bmp|wav|au> -p <passphrase> -xf <out> -f  (提取)\n'
+                 '  embed -ef <payload> -cf <cover.jpg> -p <pw> -e none -f  (嵌入，仅小/中图)\n'
+                 '  ⚠️ embed 在超大载体（实测 5333×4000）会 STATUS_ACCESS_VIOLATION（2001 年老 cygwin）；'
+                 '中图（2000×1500）往返正常。**提取方向可靠**。\n'
+                 '  ⚠️ `could not extract any data with that passphrase` 同时表示"口令错"和"该文件没有嵌入数据"，'
+                 '二者不可区分——换载体前先换口令，别把一条报错当成两个结论。\n'
+                 '  ⚠️ 载体必须是**原始 JPEG 字节**：任何重新保存/缩放都会破坏 DCT 系数里的载荷。',
+        "when": "JPEG/BMP/WAV/AU 的 steghide 载荷提取（口令通常来自题目里的短语/卡片/元数据）。"
+                "与 F5/outguess 是不同算法，互不替代：F5 用 F5.jar，steghide 用本工具。",
     },
     {
         "name": "二维码/条码识别 (pyzbar + cv2)",
@@ -514,6 +545,11 @@ def _detect(entry: dict) -> str | None:
             return _render_cmd(entry, None)
 
     # 3) the tools roots (relative paths, so any root works)
+    for rel in entry.get("rel_candidates") or ():
+        for root in _candidate_roots():
+            candidate = root.joinpath(*rel)
+            if candidate.is_file():
+                return _render_cmd(entry, str(candidate))
     rel = entry.get("rel")
     if rel:
         for root in _candidate_roots():
@@ -537,13 +573,16 @@ def _detect(entry: dict) -> str | None:
 
 
 def _unavailable_on_host(entry: dict[str, Any]) -> bool:
-    """Whether every named alternative is absent from the process PATH.
+    """Whether the tool is absent from PATH and every configured tools root.
 
-    The old block hardcoded one developer machine's Docker/package-manager
-    state and rendered it on every CTF run. Only the absence of the actual
-    alternatives is portable and verifiable here; host-specific installation
-    policy is deliberately not asserted.
+    A ``detect`` spec reuses :func:`_detect`, so the capability card and this
+    block cannot disagree about a tools-root install (the old block checked only
+    ``shutil.which`` and claimed it had checked the roots too). The ``commands``
+    fallback is kept for entries that do not carry a spec.
     """
+    detect = entry.get("detect")
+    if isinstance(detect, dict):
+        return _detect(detect) is None
     for command in entry.get("commands", ()):
         if shutil.which(command):
             return False
@@ -615,19 +654,41 @@ def _is_ir_goal(goal_lower: str) -> bool:
 #:
 #: Keep this list SHORT and factual: it states what the host lacks, not whether the
 #: technique is worth trying.
+_STEGO_MISSING_KEYWORDS = [
+    "jpg", "jpeg", "隐写", "stego", "steghide", "outguess", "zsteg",
+    "图片", "image", "藏", "wav", "音频", "音频隐写",
+]
+_STEGO_MISSING_ADVICE = (
+    "Do not try to install it or spend solve steps setting up a package manager "
+    "or container runtime: carve appended/embedded data by hand instead "
+    "(trailing bytes after FFD9 / RIFF end, PK\\x03\\x04 header, LSB planes)."
+)
+
 _UNAVAILABLE: tuple[dict[str, Any], ...] = (
     {
-        "name": "steghide / outguess / zsteg",
-        "keywords": [
-            "jpg", "jpeg", "隐写", "stego", "steghide", "outguess", "zsteg",
-            "图片", "image", "藏", "wav", "音频", "音频隐写",
-        ],
+        "name": "steghide",
+        "keywords": _STEGO_MISSING_KEYWORDS,
         "why": "not detected on this host's PATH or configured tool roots. "
-               "Do not try to install it or spend solve steps setting up a package manager "
-               "or container runtime: carve appended/embedded data by hand instead "
-               "(trailing bytes after FFD9 / RIFF end, PK\\x03\\x04 header, LSB planes); "
-               "for F5 use the F5 entry above.",
-        "commands": ("steghide", "outguess", "zsteg"),
+               f"{_STEGO_MISSING_ADVICE}",
+        "detect": {
+            "name": "steghide",
+            "rel_candidates": _STEGHIDE_BUNDLE,
+            "which": "steghide",
+        },
+    },
+    {
+        "name": "outguess",
+        "keywords": _STEGO_MISSING_KEYWORDS,
+        "why": "not detected on this host's PATH. "
+               f"{_STEGO_MISSING_ADVICE} For F5 use the F5 entry above.",
+        "detect": {"name": "outguess", "which": "outguess"},
+    },
+    {
+        "name": "zsteg",
+        "keywords": _STEGO_MISSING_KEYWORDS,
+        "why": "not detected on this host's PATH. "
+               f"{_STEGO_MISSING_ADVICE} For F5 use the F5 entry above.",
+        "detect": {"name": "zsteg", "which": "zsteg"},
     },
 )
 

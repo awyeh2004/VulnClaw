@@ -386,13 +386,20 @@ class TestF5CommandIsActuallyRunnable:
 
 
 class TestUnavailableToolsAreStated:
-    def test_a_stego_goal_is_told_steghide_is_missing(self):
+    @staticmethod
+    def _no_stego_tools(monkeypatch, tmp_path):
+        """Force a host with no steghide/outguess/zsteg anywhere."""
+        monkeypatch.setattr(tr, "_candidate_roots", lambda: [tmp_path / "empty"])
+        monkeypatch.setattr(tr.shutil, "which", lambda *_args, **_kwargs: None)
+
+    def test_a_stego_goal_is_told_steghide_is_missing(self, monkeypatch, tmp_path):
+        self._no_stego_tools(monkeypatch, tmp_path)
         card = tr.build_tool_card("Solve CTF challenge '九连环' jpg 隐写", mode="ctf")
         assert "NOT available on this host" in card
-        assert "steghide" in card
+        assert "**steghide**" in card
         assert "Do not try to install" in card
 
-    def test_the_unavailable_block_is_portable_not_machine_specific(self):
+    def test_the_unavailable_block_is_portable_not_machine_specific(self, monkeypatch, tmp_path):
         """The block must describe detected tool absence, not one host's Docker state.
 
         2026-10-21: the first version hardcoded "Docker Desktop cannot start on
@@ -401,32 +408,78 @@ class TestUnavailableToolsAreStated:
         the portable PATH/tool-root probe below; if these commands are present,
         the block must disappear instead of telling the model to avoid them.
         """
+        self._no_stego_tools(monkeypatch, tmp_path)
         card = tr.build_tool_card("stego image 隐写", mode="ctf")
         assert "Docker Desktop cannot start" not in card
         assert "not detected on this host" in card
 
-        monkeypatch_which = tr.shutil.which
-        tr.shutil.which = lambda name: "/usr/bin/steghide" if name == "steghide" else None
-        try:
-            filtered = tr.build_tool_card("stego image 隐写", mode="ctf")
-        finally:
-            tr.shutil.which = monkeypatch_which
-        assert "NOT available on this host" not in filtered
+        monkeypatch.setattr(
+            tr.shutil,
+            "which",
+            lambda name: "/usr/bin/steghide" if name == "steghide" else None,
+        )
+        filtered = tr.build_tool_card("stego image 隐写", mode="ctf")
+        missing = filtered.partition("## NOT available")[2]
+        assert "**steghide**" not in missing
+        assert "**outguess**" in missing
+        assert "**zsteg**" in missing
 
-    def test_a_non_ctf_goal_still_gets_keyword_gating(self):
+    def test_steghide_in_a_tools_root_is_not_also_declared_missing(self, monkeypatch, tmp_path):
+        """Regression: the capability entry and the "not available" block disagreed."""
+        root = tmp_path / "tools"
+        binary = root / "steghide" / "steghide.exe"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"MZ")
+        monkeypatch.setattr(tr, "_candidate_roots", lambda: [root])
+        monkeypatch.setattr(tr.shutil, "which", lambda *_args, **_kwargs: None)
+
+        card = tr.build_tool_card("jpg 隐写", mode="ctf")
+        available, _, missing = card.partition("## NOT available")
+        assert "steghide (JPEG/BMP/WAV/AU 隐写)" in available
+        assert "**steghide**" not in missing
+        assert "**outguess**" in missing
+        assert "**zsteg**" in missing
+
+    def test_steghide_on_path_is_listed_even_without_a_tools_root(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(tr, "_candidate_roots", lambda: [tmp_path / "empty"])
+        monkeypatch.setattr(
+            tr.shutil,
+            "which",
+            lambda name: "/usr/bin/steghide" if name == "steghide" else None,
+        )
+
+        card = tr.build_tool_card("jpg 隐写", mode="ctf")
+        assert "steghide (JPEG/BMP/WAV/AU 隐写)" in card
+        assert "**steghide**" not in card.partition("## NOT available")[2]
+
+    def test_posix_tools_root_layout_is_detected(self, monkeypatch, tmp_path):
+        root = tmp_path / "tools"
+        binary = root / "steghide" / "steghide"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"#!/bin/sh\n")
+        monkeypatch.setattr(tr, "_candidate_roots", lambda: [root])
+        monkeypatch.setattr(tr.shutil, "which", lambda *_args, **_kwargs: None)
+
+        card = tr.build_tool_card("jpg 隐写", mode="ctf")
+        assert str(binary) in card
+
+    def test_a_non_ctf_goal_still_gets_keyword_gating(self, monkeypatch, tmp_path):
         """ctf 模式无条件渲染（附件格式永远不出现在 goal 里）；别的模式仍按关键词。
 
         实测依据：九连环 的 goal 是 "Solve CTF2 challenge '九连环' (category MISC,
         difficulty Easy)"，一个 stego 关键词都没有——按关键词把关的话，那条把
         8 步耗在装 steghide 上的 run 根本不会看到这条提示。
         """
+        self._no_stego_tools(monkeypatch, tmp_path)
         card = tr.build_tool_card("attack http://10.0.0.1, capture the flag", mode="auto")
         assert "Docker Desktop cannot start" not in card
 
-    def test_a_ctf_goal_gets_the_block_even_without_keywords(self):
+    def test_a_ctf_goal_gets_the_block_even_without_keywords(self, monkeypatch, tmp_path):
+        self._no_stego_tools(monkeypatch, tmp_path)
         goal = "Solve CTF2 challenge '九连环' (category MISC, difficulty Easy)"
         assert "NOT available on this host" in tr.build_tool_card(goal, mode="ctf")
 
-    def test_the_block_says_what_to_do_instead(self):
+    def test_the_block_says_what_to_do_instead(self, monkeypatch, tmp_path):
+        self._no_stego_tools(monkeypatch, tmp_path)
         card = tr.build_tool_card("stego image 隐写", mode="ctf")
         assert "FFD9" in card, card
