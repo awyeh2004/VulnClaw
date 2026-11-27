@@ -20,9 +20,10 @@ from vulnclaw.platforms.base import Attachment
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, body: bytes) -> None:
+    def __init__(self, status_code: int, body: bytes, headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
         self._body = body
+        self.headers = headers or {}
 
     def iter_bytes(self, size: int = 8192):
         for start in range(0, len(self._body), size):
@@ -41,17 +42,27 @@ class _FakeStream:
 
 
 class _FakeClient:
-    def __init__(self, response: _FakeResponse | None = None, boom: Exception | None = None):
+    def __init__(
+        self,
+        response: _FakeResponse | None = None,
+        boom: Exception | None = None,
+        responses: dict[str, _FakeResponse] | None = None,
+    ):
         self._response = response
         self._boom = boom
+        self._responses = dict(responses or {})
         self.requested: list[str] = []
+        #: (url, kwargs) for every hop — lets tests assert per-hop auth scoping.
+        self.calls: list[tuple[str, dict]] = []
 
     def stream(self, method: str, url: str, **kwargs):
         self.requested.append(url)
+        self.calls.append((url, kwargs))
         if self._boom is not None:
             raise self._boom
-        assert self._response is not None
-        return _FakeStream(self._response)
+        response = self._responses.get(url, self._response)
+        assert response is not None
+        return _FakeStream(response)
 
 
 class TestResolveUrl:
@@ -75,6 +86,147 @@ class TestResolveUrl:
     @pytest.mark.parametrize("url", ["", "   ", None])
     def test_empty_url_stays_empty(self, url):
         assert att.resolve_url(Attachment(name="a.zip", url=url or "")) == ""
+
+
+class _AuthAdapter:
+    """Adapter that publishes a platform token and a base URL."""
+
+    def __init__(self, base_url: str = "https://ctf.example") -> None:
+        self.base_url = base_url
+
+    def download_headers(self) -> dict[str, str]:
+        return {"Authorization": "Token tok"}
+
+
+class TestDownloadAuthScope:
+    """The platform token follows the platform origin, never the attachment URL."""
+
+    def test_same_origin_absolute_url_gets_the_headers(self, tmp_path):
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert result.ok
+        assert client.calls[0][1]["headers"] == {"Authorization": "Token tok"}
+
+    def test_cross_origin_absolute_url_is_fetched_without_the_headers(self, tmp_path):
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://files.example/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert result.ok
+        assert client.calls[0][1]["headers"] is None
+
+    def test_scheme_downgrade_is_a_different_origin(self, tmp_path):
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="http://ctf.example/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert result.ok
+        assert client.calls[0][1]["headers"] is None
+
+    def test_explicit_default_port_matches_the_implicit_one(self, tmp_path):
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example:443/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter("https://ctf.example"),
+        )
+        assert result.ok
+        assert client.calls[0][1]["headers"] == {"Authorization": "Token tok"}
+
+    def test_cross_origin_redirect_drops_the_headers_on_the_second_hop(self, tmp_path):
+        responses = {
+            "https://ctf.example/files/a": _FakeResponse(
+                302, b"", headers={"location": "https://files.example/a"}
+            ),
+            "https://files.example/a": _FakeResponse(200, b"payload"),
+        }
+        client = _FakeClient(responses=responses)
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert result.ok
+        assert client.requested == ["https://ctf.example/files/a", "https://files.example/a"]
+        assert client.calls[0][1]["headers"] == {"Authorization": "Token tok"}
+        assert client.calls[1][1]["headers"] is None
+
+    def test_same_origin_redirect_keeps_the_headers(self, tmp_path):
+        responses = {
+            "https://ctf.example/files/a": _FakeResponse(
+                302, b"", headers={"location": "/files/real"}
+            ),
+            "https://ctf.example/files/real": _FakeResponse(200, b"payload"),
+        }
+        client = _FakeClient(responses=responses)
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert result.ok
+        assert client.calls[1][1]["headers"] == {"Authorization": "Token tok"}
+
+    def test_redirect_to_a_non_http_scheme_is_rejected(self, tmp_path):
+        responses = {
+            "https://ctf.example/files/a": _FakeResponse(
+                302, b"", headers={"location": "file:///etc/passwd"}
+            ),
+        }
+        client = _FakeClient(responses=responses)
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example/files/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert not result.ok
+        assert "unsupported attachment URL" in result.error
+        assert client.requested == ["https://ctf.example/files/a"]
+
+    def test_a_non_http_initial_url_is_rejected_before_any_request(self, tmp_path):
+        client = _FakeClient(_FakeResponse(200, b"x"))
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="ftp://ctf.example/a"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert not result.ok
+        assert "unsupported attachment URL" in result.error
+        assert client.requested == []
+
+    def test_too_many_redirects_is_reported(self, tmp_path):
+        responses = {}
+        for index in range(6):
+            responses[f"https://ctf.example/r{index}"] = _FakeResponse(
+                302, b"", headers={"location": f"/r{index + 1}"}
+            )
+        responses["https://ctf.example/r6"] = _FakeResponse(200, b"x")
+        client = _FakeClient(responses=responses)
+        result = att.download_attachment(
+            client,
+            Attachment(name="a", url="https://ctf.example/r0"),
+            str(tmp_path),
+            adapter=_AuthAdapter(),
+        )
+        assert not result.ok
+        assert "too many redirects" in result.error
+        assert len(client.requested) == 6
 
 
 class TestSafeName:

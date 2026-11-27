@@ -32,8 +32,10 @@ import os
 import ssl
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from vulnclaw.platforms import base
 from vulnclaw.utils.atomic_write import replace_with_retry
@@ -81,6 +83,118 @@ def safe_name(text: object) -> str:
     return cleaned.strip("._") or "attachment"
 
 
+def _adapter_base_url(adapter: object | None) -> str:
+    """The adapter's configured base URL, accepting a method or a property."""
+    base_url = getattr(adapter, "base_url", None)
+    if callable(base_url):
+        try:
+            base_url = base_url()
+        except Exception:  # noqa: BLE001 - a bad adapter must not break the URL path
+            return ""
+    return str(base_url or "").strip()
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` for an http(s) URL, else ``None``.
+
+    Used only for credential scoping: the platform token must not follow an
+    attachment URL to a different origin. Default ports are normalised so
+    ``https://host`` and ``https://host:443`` compare equal.
+    """
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = parts.hostname
+    if not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, host.lower(), port)
+
+
+def _same_origin(left: str, right: str) -> bool:
+    left_origin = _origin(left)
+    return left_origin is not None and left_origin == _origin(right)
+
+
+def _download_headers_for(adapter: object | None, url: str) -> dict[str, str]:
+    """Adapter auth headers, but only for the adapter's own origin.
+
+    The CTFd adapter returns an account-level API token. Challenge metadata can
+    contain an absolute URL on another host (a CDN, or a compromised platform),
+    so the token must never follow the URL there. Cross-origin downloads stay
+    allowed; they simply go out unauthenticated.
+
+    The origin check runs *before* ``download_headers()`` so a cross-origin URL
+    does not even cause the token to be materialised.
+    """
+    if adapter is None:
+        return {}
+    base_url = _adapter_base_url(adapter)
+    if not base_url or not _same_origin(url, base_url):
+        return {}
+    header_source = getattr(adapter, "download_headers", None)
+    if not callable(header_source):
+        return {}
+    try:
+        produced = header_source()
+    except Exception:  # noqa: BLE001 - headers are an optimisation, not a gate
+        return {}
+    if not isinstance(produced, Mapping):
+        return {}
+    return {str(k): str(v) for k, v in produced.items()}
+
+
+#: Statuses that carry a ``Location`` to the next hop. The downloader follows
+#: them itself (instead of httpx's ``follow_redirects``) so the credential scope
+#: is decided per hop, not only for the first URL.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
+
+
+@contextmanager
+def _stream_following_redirects(
+    client: object,
+    url: str,
+    adapter: object | None,
+    *,
+    max_redirects: int = _MAX_REDIRECTS,
+):
+    """Open the final 200-capable response, recomputing auth headers per hop.
+
+    A same-origin redirect keeps the platform token; a cross-origin one drops it.
+    ``httpx`` already strips ``Authorization``/``Cookie`` on cross-origin hops,
+    but this loop makes the guarantee independent of the header name and of the
+    HTTP client version.
+    """
+    current = url
+    for _ in range(max_redirects + 1):
+        if _origin(current) is None:
+            raise ValueError(f"unsupported attachment URL {current!r}")
+        headers = _download_headers_for(adapter, current)
+        with client.stream(  # type: ignore[attr-defined]
+            "GET", current, follow_redirects=False, headers=headers or None
+        ) as response:
+            if response.status_code in _REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if location:
+                    current = urljoin(current, location)
+                    continue
+            yield response
+            return
+    raise RuntimeError(
+        f"too many redirects while downloading attachment (>{max_redirects})"
+    )
+
+
 def resolve_url(attachment: base.Attachment, adapter: object | None = None) -> str:
     """The absolute URL for an attachment, or ``""`` when it cannot be built.
 
@@ -93,19 +207,10 @@ def resolve_url(attachment: base.Attachment, adapter: object | None = None) -> s
         return ""
     if not url.startswith("/"):
         return url
-    base_url = getattr(adapter, "base_url", None)
-    # Accept both a method and a plain attribute. The original form called it when
-    # callable and otherwise threw the value away, so an adapter exposing
-    # `base_url` as a property (which is the natural spelling) silently lost every
-    # root-relative attachment URL and reported "platform exposes no base URL".
-    if callable(base_url):
-        try:
-            base_url = base_url()
-        except Exception:  # noqa: BLE001
-            base_url = ""
+    base_url = _adapter_base_url(adapter)
     if not base_url:
         return ""
-    return f"{str(base_url).rstrip('/')}{url}"
+    return f"{base_url.rstrip('/')}{url}"
 
 
 def _is_certificate_failure(exc: BaseException) -> bool:
@@ -211,28 +316,15 @@ def download_attachment(
         )
     declared_md5 = str(getattr(attachment, "md5", "") or "").strip().lower()
 
-    # Platform-specific download auth. The caller owns the client and therefore the
-    # TLS policy, but only the adapter knows whether the artifact URL needs a token
-    # — CTFd serves /files/... only to an authorized session, so a bare client gets
-    # a login redirect and the bytes on disk are an HTML page.
-    request_headers = {}
-    header_source = getattr(adapter, "download_headers", None)
-    if callable(header_source):
-        try:
-            produced = header_source()
-        except Exception:  # noqa: BLE001 - headers are an optimisation, not a gate
-            produced = None
-        if isinstance(produced, Mapping):
-            request_headers = {str(k): str(v) for k, v in produced.items()}
-
+    # Platform-specific download auth is resolved per hop by
+    # _stream_following_redirects: only the adapter's own origin receives the
+    # token. A cross-origin URL/CDN hop is fetched without it.
     sha256 = hashlib.sha256()
     md5 = hashlib.md5()
     written = 0
     over_cap = False
     try:
-        with client.stream(  # type: ignore[attr-defined]
-            "GET", url, follow_redirects=True, headers=request_headers or None
-        ) as response:
+        with _stream_following_redirects(client, url, adapter) as response:
             if response.status_code != 200:
                 return AttachmentDownload(
                     name=label, url=url, error=f"HTTP {response.status_code}"

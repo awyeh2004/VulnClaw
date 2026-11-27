@@ -110,6 +110,9 @@ class CTFdAdapter:
         read the challenge, so a bare ``httpx.Client()`` gets a login redirect and
         every attachment lands as 0 bytes or an HTML page. The shared downloader
         therefore asks the adapter for headers instead of assuming none are needed.
+
+        The downloader only sends this header back to this adapter's own origin;
+        an absolute attachment URL on another host is fetched unauthenticated.
         """
         return {"Authorization": f"Token {self._token}"}
 
