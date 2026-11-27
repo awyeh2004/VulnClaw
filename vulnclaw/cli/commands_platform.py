@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, Optional
 
 import typer
 
@@ -27,8 +27,10 @@ def ctf2(
     practice_id: str = typer.Argument(
         ..., help="CTF2 practice ground id the challenge belongs to"
     ),
-    max_steps: int = typer.Option(
-        240, "--max-steps", help="Runaway safety budget for autonomous turns"
+    max_steps: Optional[int] = typer.Option(
+        None,
+        "--max-steps",
+        help="Runaway safety budget for autonomous turns; defaults to session.solve_max_steps (240)",
     ),
     hint: list[str] = typer.Option(
         [],
@@ -152,7 +154,7 @@ def ctf2(
             # challenge's reuse chain split in two (2026-10-06).
             target=ref_token,
             goal=goal,
-            max_steps=_from_main("_cli_value")(max_steps, 240),
+            max_steps=_from_main("_cli_value")(max_steps, None),
             # Same sentinel problem as every other flag here: when `ctf2()` is called
             # from Python the default is a truthy `OptionInfo`, and `list()` on it
             # raises "not iterable". `_cli_value` unwraps it to the real default.
@@ -164,8 +166,10 @@ def ctf2(
 
 def gcs(
     exercise_id: int = typer.Argument(..., help="西湖论剑 challenge (exercise) id"),
-    max_steps: int = typer.Option(
-        240, "--max-steps", help="Runaway safety budget for autonomous turns"
+    max_steps: Optional[int] = typer.Option(
+        None,
+        "--max-steps",
+        help="Runaway safety budget for autonomous turns; defaults to session.solve_max_steps (240)",
     ),
 ) -> None:
     """Solve a West Lake Sword Competition (西湖论剑) challenge by exercise id.
@@ -266,7 +270,7 @@ def gcs(
         **_from_main("_solve_defaults")(
             target=str(exercise_id),
             goal=goal,
-            max_steps=_from_main("_cli_value")(max_steps, 240),
+            max_steps=_from_main("_cli_value")(max_steps, None),
             resume=False,
         )
     )

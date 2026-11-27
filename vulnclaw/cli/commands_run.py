@@ -148,6 +148,18 @@ def _solve_defaults(**overrides: Any) -> dict[str, Any]:
     return merged
 
 
+def _resolve_max_steps(value: Optional[int], config: Any) -> int:
+    """Explicit ``--max-steps`` wins; otherwise use the session setting.
+
+    The session field is also the target of ``VULNCLAW_SESSION_SOLVE_MAX_STEPS``,
+    so this is the one place that makes the env knob effective for ``solve``,
+    ``go``, ``ctf2`` and ``gcs``.
+    """
+    if value is not None:
+        return int(value)
+    return int(getattr(config.session, "solve_max_steps", 240))
+
+
 
 def run(
     target: str = typer.Argument(..., help="Target host/IP/URL"),
@@ -543,8 +555,13 @@ def solve(
     prompt: Optional[str] = typer.Option(
         None, "--prompt", help="Custom task description (overrides auto-generated)"
     ),
-    max_steps: int = typer.Option(
-        240, "--max-steps", help="Runaway safety budget for autonomous turns (not a planned round count)"
+    max_steps: Optional[int] = typer.Option(
+        None,
+        "--max-steps",
+        help=(
+            "Runaway safety budget for autonomous turns (not a planned round "
+            "count); defaults to session.solve_max_steps (240)"
+        ),
     ),
     max_directions: int = typer.Option(
         3,
@@ -609,6 +626,7 @@ def solve(
 ) -> None:
     """Model-led solve loop; runs until goal, user input, no path, or safety cap."""
     config = _from_main("load_config")()
+    max_steps = _resolve_max_steps(_cli_value(max_steps, None), config)
     if not _from_main("has_llm_credentials")(config.llm):
         err_console.print("[!] Configure LLM credentials first (api_key or auth_mode).")
         raise typer.Exit(1)
@@ -807,7 +825,6 @@ def go(
         **_solve_defaults(
             target=target,
             goal=resolved_goal,
-            max_steps=240,
             resume=True,
             model=model,
         )

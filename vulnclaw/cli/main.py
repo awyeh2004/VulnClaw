@@ -166,6 +166,7 @@ from vulnclaw.cli.commands_run import (  # noqa: F401 — re-export
     _SOLVE_DECLARED_DEFAULTS,
     _cli_value,
     _is_typer_sentinel,
+    _resolve_max_steps,
     _signature_defaults,
     _solve_defaults,
     _typer_sentinel_types,

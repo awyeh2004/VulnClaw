@@ -75,7 +75,7 @@ def test_ctf2_forwards_plain_values(captured_solve, monkeypatch):
     assert captured_solve["stream"] is False
     assert captured_solve["model"] == "auto"
     assert captured_solve["additional_targets"] is None
-    assert isinstance(captured_solve["max_steps"], int)
+    assert captured_solve["max_steps"] is None
 
 
 def test_ctf2_max_steps_override_survives(captured_solve, monkeypatch):
@@ -97,6 +97,16 @@ def test_gcs_forwards_plain_values(captured_solve, monkeypatch):
     _assert_no_sentinels(captured_solve)
     assert captured_solve["target"] == "1234"
     assert captured_solve["model"] == "auto"
+    assert captured_solve["max_steps"] is None
+
+
+def test_gcs_max_steps_override_survives(captured_solve, monkeypatch):
+    async def fake_exercise(exercise_id):
+        return {"data": {"name": "some exercise", "isNeedInit": True}}
+
+    monkeypatch.setattr(main, "gcs_exercise", fake_exercise)
+    main.gcs(1234, max_steps=42)
+    assert captured_solve["max_steps"] == 42
 
 
 def test_the_helper_unwraps_and_passes_through():

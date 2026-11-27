@@ -15,7 +15,9 @@ from vulnclaw.cli.main import _solve_defaults
 # The values the three call sites hand-wrote before the refactor.
 _HAND_WRITTEN = {
     "prompt": None,
-    "max_steps": 240,
+    # None means "resolve from session.solve_max_steps" inside solve(); the
+    # session default remains 240, so this is not a behavior change by default.
+    "max_steps": None,
     "max_directions": 3,
     "max_tool_rounds": 6,
     "resume": True,
@@ -49,6 +51,16 @@ def test_overrides_win():
     assert got["resume"] is False
     assert got["model"] == "x"
     assert got["target"] == "t" and got["goal"] == "g"
+
+
+def test_max_steps_resolves_from_the_session_when_omitted():
+    from types import SimpleNamespace
+
+    from vulnclaw.cli.main import _resolve_max_steps
+
+    config = SimpleNamespace(session=SimpleNamespace(solve_max_steps=7))
+    assert _resolve_max_steps(None, config) == 7
+    assert _resolve_max_steps(3, config) == 3
 
 
 def test_required_arguments_are_not_invented():
